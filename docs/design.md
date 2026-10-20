@@ -111,7 +111,9 @@ so the lock always holds an exact commit or version.
 - `self_managed`: FormalSpec pins and installs the first version, then leaves
   the app's own updater alone. For Steam, Claude Code, browsers.
 - `channel = "bleeding"` on a package skips any release-age delay a host
-  sets as policy.
+  sets as policy (`host(release_age = "3d")`). A package resolves to the newest
+  release at least that old, using the longest delay among the hosts that
+  declare it.
 
 ### Patches and build flags
 
@@ -155,6 +157,12 @@ image = "ghcr.io/ublue-os/bazzite-nvidia@sha256:…"
 Distro repos usually keep only the newest version of a package, so FormalSpec
 caches the exact `.rpm`, `.pkg.tar.zst` or `.xbps` files it locked. A pin
 stays installable after the distro moves on.
+
+`fspec update [pkg...]` resolves every package declared by any host (or only
+the named ones), keeps the other entries, drops entries no host declares and
+prints one line per change. A package gets an artifact for each platform its
+hosts declare. Distro sources (`dnf`, `pacman`, `apt`, `xbps`) lock only the
+name until step 8 adds their pins.
 
 A nightly CI job can run `fspec update` and open a PR with each bump and a
 changelog link. Merging it is the auto-update.
@@ -392,6 +400,7 @@ A cargo workspace under `crates/`:
 | --- | --- |
 | `fspec-core` | Resource types, host facts, `Paths`, the state file, the lock, the plan diff, the apply engine, the journal, the `Runner` and `Fetch` seams |
 | `fspec-eval` | Starlark builtins and evaluation into `Host` values |
+| `fspec-sources` | Resolvers (aqua, github, npm, cargo, flatpak, brew, git, nix) and `fspec update` |
 | `fspec` | The CLI |
 
 Builtins validate their arguments against the `fspec-core` types as soon as
