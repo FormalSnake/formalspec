@@ -1,0 +1,55 @@
+name: fspec-images
+
+on:
+  push:
+    branches: [main]
+    paths: ["**/*.star", "files/**", "patches/**"]
+  schedule:
+    - cron: "0 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+  pull-requests: write
+
+env:
+  REGISTRY: ghcr.io/formalsnake
+  SPEC: spec.star
+  FSPEC_SOURCE: https://github.com/FormalSnake/formalspec
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        host: [e1504g, g815]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo install --locked --git "$FSPEC_SOURCE" fspec
+      - name: Render the Containerfile
+        run: fspec --spec "$SPEC" image containerfile --host "${{ matrix.host }}" > "$RUNNER_TEMP/Containerfile"
+      - name: Build
+        run: podman build --file "$RUNNER_TEMP/Containerfile" --tag "$REGISTRY/fspec-${{ matrix.host }}:latest" .
+      - name: Push
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | podman login ghcr.io --username "${{ github.actor }}" --password-stdin
+          podman push "$REGISTRY/fspec-${{ matrix.host }}:latest"
+
+  lock:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo install --locked --git "$FSPEC_SOURCE" fspec
+      - run: fspec --spec "$SPEC" update --images --registry "$REGISTRY"
+      - uses: peter-evans/create-pull-request@v7
+        with:
+          add-paths: fspec.lock
+          branch: fspec/image-digests
+          commit-message: "chore(image): update image digests"
+          title: "chore(image): update image digests"
+          body: Digests from the fspec-images workflow.

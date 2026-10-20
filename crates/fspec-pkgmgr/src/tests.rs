@@ -170,8 +170,8 @@ fn flatpak_lock_bump_repins_and_missing_commit_fails() {
     assert_eq!(w.state(Scope::System).entries[&want[0].resource.key()].record["commit"], "bbb");
 
     let bare = World::linux();
-    let err = bare.plan(Scope::System, &want).unwrap_err();
-    assert!(err.to_string().contains("fspec update"), "{err}");
+    let plan = bare.plan(Scope::System, &want).unwrap();
+    assert!(plan.unsupported[0].contains("fspec update"), "{:?}", plan.unsupported);
 }
 
 #[test]

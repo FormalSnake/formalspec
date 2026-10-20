@@ -17,6 +17,7 @@ fspec-sources.workspace = true
 fspec-pkgmgr.workspace = true
 fspec-os.workspace = true
 fspec-remote.workspace = true
+fspec-image.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]

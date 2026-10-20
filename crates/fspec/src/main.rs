@@ -7,6 +7,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use fspec_core::apply::{apply_scope, desired_from_generation, plan_scope, state_dir};
 use fspec_core::facts::{Facts, local_hostname};
 use fspec_core::fetch::LiveFetch;
+use fspec_core::resource::System;
 use fspec_core::runner::{Cmd, LiveRunner, LogRunner, Runner};
 use fspec_core::{Cx, Host, Lock, Paths, Plan, Scope, State};
 use fspec_remote::{Planned, Probe, Remote, Target};
@@ -66,6 +67,22 @@ enum Command {
     Update {
         /// Only re-resolve these packages, default every package.
         pkgs: Vec<String>,
+        /// Pin each image host's pushed image digest instead of resolving packages.
+        #[arg(long, conflicts_with = "pkgs")]
+        images: bool,
+        /// Image registry namespace for --images, default `ghcr.io/<owner of the git remote>`.
+        #[arg(long, requires = "images")]
+        registry: Option<String>,
+    },
+    /// Build the bootc image of a host.
+    Image {
+        #[command(subcommand)]
+        command: ImageCommand,
+    },
+    /// Continuous integration for image hosts.
+    Ci {
+        #[command(subcommand)]
+        command: CiCommand,
     },
     /// Pull an app's edit of a managed file back into the repo.
     Adopt {
@@ -99,6 +116,25 @@ enum Command {
     Env {
         #[arg(long)]
         dir: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum ImageCommand {
+    /// Print the Containerfile CI builds for a host.
+    Containerfile {
+        #[arg(long)]
+        host: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum CiCommand {
+    /// Write the workflow that builds and pushes every host's image.
+    Init {
+        /// Image registry namespace, default `ghcr.io/<owner of the git remote>`.
+        #[arg(long)]
+        registry: Option<String>,
     },
 }
 
@@ -146,22 +182,56 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
-        Command::Update { pkgs } => {
+        Command::Update { pkgs, images, registry } => {
             let spec = fspec_eval::evaluate(&spec_path)?;
             let lock_path = spec_dir.join("fspec.lock");
             let old = Lock::load(&lock_path)?;
             let (fetch, runner) = (LiveFetch::new(), LiveRunner);
-            let result =
-                fspec_sources::update::update(&spec.hosts, &old, pkgs, &fspec_sources::Cx::new(&fetch, &runner))?;
-            if result.lock != old {
-                result.lock.save(&lock_path)?;
+            let (lock, changes, errors, what) = if *images {
+                let registry = registry_for(registry.as_deref(), &runner, &spec_dir)?;
+                let u = fspec_image::update_images(&spec.hosts, &old, &registry, &fetch)?;
+                (u.lock, u.changes, u.errors, "image")
+            } else {
+                let u =
+                    fspec_sources::update::update(&spec.hosts, &old, pkgs, &fspec_sources::Cx::new(&fetch, &runner))?;
+                (u.lock, u.changes, u.errors, "package")
+            };
+            if lock != old {
+                lock.save(&lock_path)?;
             }
-            for line in &result.changes {
+            for line in &changes {
                 println!("{line}");
             }
-            if !result.errors.is_empty() {
-                bail!("{} package(s) failed:\n{}", result.errors.len(), result.errors.join("\n"));
+            if !errors.is_empty() {
+                bail!("{} {what}(s) failed:\n{}", errors.len(), errors.join("\n"));
             }
+            Ok(())
+        }
+        Command::Image { command: ImageCommand::Containerfile { host } } => {
+            let spec = fspec_eval::evaluate(&spec_path)?;
+            let name = host.clone().unwrap_or_else(local_hostname);
+            let host = spec.host(&name)?;
+            let Some(System::Image(image)) = &host.system else {
+                bail!("host {name} has no image(...) system layer");
+            };
+            print!("{}", fspec_image::containerfile(image)?);
+            Ok(())
+        }
+        Command::Ci { command: CiCommand::Init { registry } } => {
+            let spec = fspec_eval::evaluate(&spec_path)?;
+            let registry = registry_for(registry.as_deref(), &LiveRunner, &spec_dir)?;
+            let hosts: Vec<String> = spec
+                .hosts
+                .iter()
+                .filter(|h| matches!(h.system, Some(System::Image(_))))
+                .map(|h| h.name.clone())
+                .collect();
+            let spec_name = spec_path.file_name().and_then(|n| n.to_str()).context("spec has no file name")?;
+            let path = spec_dir.join(fspec_image::WORKFLOW_PATH);
+            std::fs::create_dir_all(path.parent().context("workflow path has no parent")?)?;
+            std::fs::write(&path, fspec_image::workflow(&registry, spec_name, &hosts)?)
+                .with_context(|| format!("writing {}", path.display()))?;
+            println!("wrote {}", path.display());
             Ok(())
         }
         Command::Apply { host, all, dirty, local, scope } => {
@@ -325,6 +395,13 @@ fn apply_local(paths: &Paths, spec_path: &Path, spec_dir: &Path, host: &Host, sc
         println!("{plan}");
     }
     Ok(())
+}
+
+fn registry_for(flag: Option<&str>, runner: &dyn Runner, spec_dir: &Path) -> Result<String> {
+    match flag {
+        Some(r) => Ok(r.to_string()),
+        None => fspec_image::default_registry(runner, spec_dir),
+    }
 }
 
 fn adopt(env: &Env, host: &Host, path: &str) -> Result<()> {

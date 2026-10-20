@@ -1,0 +1,4 @@
+FROM ghcr.io/ublue-os/bazzite-nvidia:stable
+RUN dnf install -y asusctl tuned-ppd && dnf clean all
+RUN mkdir -p /usr/lib/bootc/kargs.d && printf '%s\n' 'kargs = ["lockdown=integrity", "iommu=force"]' > /usr/lib/bootc/kargs.d/fspec.toml
+RUN bootc container lint
