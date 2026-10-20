@@ -1,0 +1,17 @@
+[package]
+name = "fspec-pkgmgr"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+base64.workspace = true
+fspec-core.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+fspec-eval.workspace = true
+tempfile.workspace = true

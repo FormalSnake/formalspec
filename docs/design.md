@@ -156,6 +156,13 @@ Distro repos usually keep only the newest version of a package, so FormalSpec
 caches the exact `.rpm`, `.pkg.tar.zst` or `.xbps` files it locked. A pin
 stays installable after the distro moves on.
 
+The lock entry for a distro package holds one artifact per platform, so the
+cached file is used for single-name packages; a multi-name `dnf([...])` package
+installs by name. Flatpak pins live in `any = { commit = … }`, brew records
+`version`; Homebrew can only install the current version, so the brew pin is
+checked (drift, then `brew upgrade`), not enforced, and an upgrade is not
+reversed on rollback.
+
 A nightly CI job can run `fspec update` and open a PR with each bump and a
 changelog link. Merging it is the auto-update.
 

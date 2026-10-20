@@ -1,0 +1,19 @@
+[[pkg]]
+name = "aerospace"
+source = "brew:cask"
+version = "0.19.2"
+
+[[pkg]]
+name = "firefox"
+source = "flatpak:org.mozilla.firefox"
+any = { commit = "6f1c3a9b2d0e4c8f7a15b6d9e3c2a8470f5b1d6e9c3a7f2e8d4b0a6c1e5f9d37" }
+
+[[pkg]]
+name = "ripgrep"
+source = "brew"
+version = "14.1.1"
+
+[[pkg]]
+name = "steam"
+source = "flatpak:com.valvesoftware.Steam"
+any = { commit = "b84e0d7a1c5f93e26a7d4b8c0f1e3a59d2c6b7e4f8a0d1c3e5b9a7f2d6c4e801" }
