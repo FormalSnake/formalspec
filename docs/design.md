@@ -173,6 +173,49 @@ This gives FormalSpec three things Nix users expect:
   `.fspec.toml` and a shell hook.
 - `fspec rollback` repoints `current` at the previous generation.
 
+Users put `/opt/fspec/current/bin` on PATH; nothing else exposes store tools.
+
+A generation is `generations/<n>/bin/`, symlinks into the store (relative, so a
+rooted tree stays movable). Each apply starts from the links of the generation
+`current` points at, applies only the changed packages, and renames a temp
+symlink over `current` last; the journal restores the old link if anything
+fails. Which executables get linked: the lock artifact's `bins` when set, else
+every executable regular file in the top two levels of the unpacked tree; for
+npm, the package's `bin` entries. Store directories are named
+`<hash8>-<name>-<version>`, never rewritten, and reused when present. An
+artifact is verified against its `sha256-` or `sha512-` SRI hash before
+anything is unpacked (`.tar.gz`, `.tar.xz`, `.tar.zst`, `.zip`, or a bare
+binary named after the package).
+
+Each pkg's record keeps the store path, version, linked bins and the lock entry
+it was installed from. `fspec rollback [gen]` re-applies that generation's
+resources with a lock rebuilt from those records, as a new generation, so the
+old store paths are reused and no download happens. The live `fspec.lock` is
+untouched: until it is reverted too, `plan` reports the newer locked version as
+drift. A `pinned` pkg whose locked artifact differs from the record is drift
+(that is how a bumped lock reaches `apply`); a `self_managed` pkg is installed
+once and never touched by later lock changes.
+
+npm packages are the registry tarball. One without runtime `dependencies` is
+unpacked and its `bin` linked; one with dependencies is installed with
+`npm install --omit=dev --prefix <dir>`, so the host needs npm on PATH. The
+`nix` source runs `nix build --no-link --print-out-paths nixpkgs#<attr>` (pinned
+to the lock's `rev` when set) and links the result's `bin/`; nothing is hashed or
+copied.
+
+`.fspec.toml` in a project pins versions:
+
+```toml
+[tools]
+ripgrep = "14.1.0"
+```
+
+`eval "$(fspec shell-hook zsh)"` (also `bash`, and `fspec shell-hook fish | source`)
+installs a hook that runs `fspec env --dir $PWD` on directory change and puts
+the bins of each pinned version that is in the store first on PATH. The hook
+shells out to a hidden `fspec env`, which links them under
+`~/.cache/fspec/pins/`.
+
 Distro packages and Flatpaks live where their package manager puts them; the
 state file still records them, so rollback reinstalls the previous set.
 
@@ -367,6 +410,7 @@ distro, so the `system` block is where those names live.
 | `fspec plan [--all]` | Diff config against state, per host |
 | `fspec apply [--host h] [--all]` | Converge, over ssh for remote hosts |
 | `fspec rollback [gen]` | Previous generation, data included |
+| `fspec shell-hook <fish\|zsh\|bash>` | Shell code that applies `.fspec.toml` pins |
 | `fspec gc --older-than 14d` | Drop old generations, store paths and trash |
 | `fspec adopt <path>` | Pull an app's edit of a managed file into the repo |
 | `fspec orphans` | Unattributed app data |
@@ -392,6 +436,7 @@ A cargo workspace under `crates/`:
 | --- | --- |
 | `fspec-core` | Resource types, host facts, `Paths`, the state file, the lock, the plan diff, the apply engine, the journal, the `Runner` and `Fetch` seams |
 | `fspec-eval` | Starlark builtins and evaluation into `Host` values |
+| `fspec-store` | The store backend: hash check, unpack, generations, `current`, npm and nix packages, project pins |
 | `fspec` | The CLI |
 
 Builtins validate their arguments against the `fspec-core` types as soon as

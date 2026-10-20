@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
-use fspec_core::apply::{apply_scope, plan_scope, state_dir};
+use fspec_core::apply::{apply_scope, desired_from_generation, plan_scope, state_dir};
 use fspec_core::facts::{Facts, local_hostname};
 use fspec_core::fetch::LiveFetch;
 use fspec_core::runner::{Cmd, LiveRunner, LogRunner, Runner};
@@ -46,6 +46,31 @@ enum Command {
         #[arg(long)]
         scope: Option<ScopeArg>,
     },
+    /// Re-apply an earlier generation as a new one. Store packages come back by moving
+    /// `current`, since their old store paths are still there.
+    Rollback {
+        /// The generation to restore, default the one before the current.
+        generation: Option<u64>,
+        #[arg(long)]
+        host: Option<String>,
+        #[arg(long)]
+        scope: Option<ScopeArg>,
+    },
+    /// Print shell code that puts `.fspec.toml` pinned tools on PATH. Run it from the shell's rc file.
+    ShellHook { shell: ShellArg },
+    /// Print the bin directories pinned for a directory, one per line. Called by the shell hook.
+    #[command(hide = true)]
+    Env {
+        #[arg(long)]
+        dir: PathBuf,
+    },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ShellArg {
+    Fish,
+    Zsh,
+    Bash,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -95,12 +120,57 @@ fn main() -> Result<()> {
             let scopes: Vec<Scope> = scope.map(|s| vec![s.into()]).unwrap_or(SCOPES.to_vec());
             for scope in scopes {
                 if scope == Scope::System && is_live(&paths) && !is_root(env.runner.as_ref())? {
-                    sudo_system_apply(&spec_path, &host.name, &paths)?;
+                    sudo_system(&spec_path, &host.name, &paths, &["apply"])?;
                     continue;
                 }
                 let state = State::load(&state_dir(&paths, scope).join("state.json"))?;
                 let plan = apply_scope(&env.cx(scope, &state), &backends::all(), &host.desired())?;
                 println!("{plan}");
+            }
+            Ok(())
+        }
+        Command::Rollback { generation, host, scope } => {
+            let spec = fspec_eval::evaluate(&spec_path)?;
+            let host = select(&spec, host.as_deref(), &paths)?;
+            let mut env = Env::new(&paths, host, &spec_dir)?;
+            let scopes: Vec<Scope> = scope.map(|s| vec![s.into()]).unwrap_or(SCOPES.to_vec());
+            for scope in scopes {
+                let dir = state_dir(&paths, scope);
+                let state = State::load(&dir.join("state.json"))?;
+                let n = match generation {
+                    Some(n) if *n > state.generation => continue,
+                    Some(n) => *n,
+                    None if state.generation == 0 => continue,
+                    None => state.generation - 1,
+                };
+                if scope == Scope::System && is_live(&paths) && !is_root(env.runner.as_ref())? {
+                    sudo_system(&spec_path, &host.name, &paths, &["rollback", &n.to_string()])?;
+                    continue;
+                }
+                let desired = desired_from_generation(&dir, n)?;
+                let past = if n == 0 {
+                    State::default()
+                } else {
+                    State::load(&dir.join("generations").join(format!("{n}.json")))?
+                };
+                env.lock = fspec_store::lock_from_state(&past);
+                let plan = apply_scope(&env.cx(scope, &state), &backends::all(), &desired)?;
+                println!("{plan}");
+            }
+            Ok(())
+        }
+        Command::ShellHook { shell } => {
+            let shell = match shell {
+                ShellArg::Fish => fspec_store::Shell::Fish,
+                ShellArg::Zsh => fspec_store::Shell::Zsh,
+                ShellArg::Bash => fspec_store::Shell::Bash,
+            };
+            print!("{}", fspec_store::shell_hook(shell));
+            Ok(())
+        }
+        Command::Env { dir } => {
+            for bin in fspec_store::pin_dirs(&paths, dir)? {
+                println!("{}", bin.display());
             }
             Ok(())
         }
@@ -192,8 +262,8 @@ fn is_root(runner: &dyn Runner) -> Result<bool> {
 }
 
 /// The system scope needs root and the user scope must not run as root, so a non-root apply
-/// hands the system scope to `sudo fspec apply --scope system`.
-fn sudo_system_apply(spec: &Path, host: &str, paths: &Paths) -> Result<()> {
+/// or rollback hands the system scope to `sudo fspec <command> --scope system`.
+fn sudo_system(spec: &Path, host: &str, paths: &Paths, command: &[&str]) -> Result<()> {
     let exe = std::env::current_exe()?;
     let status = std::process::Command::new("sudo")
         .arg(exe)
@@ -201,11 +271,12 @@ fn sudo_system_apply(spec: &Path, host: &str, paths: &Paths) -> Result<()> {
         .arg(spec)
         .arg("--home")
         .arg(&paths.home)
-        .args(["apply", "--scope", "system", "--host", host])
+        .args(command)
+        .args(["--scope", "system", "--host", host])
         .status()
         .context("running sudo")?;
     if !status.success() {
-        bail!("system scope apply failed");
+        bail!("system scope {} failed", command[0]);
     }
     Ok(())
 }

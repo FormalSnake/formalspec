@@ -45,6 +45,19 @@ impl Cx<'_> {
     }
 }
 
+/// The resources a past generation had applied, for `rollback`. Generation 0 is the empty state.
+pub fn desired_from_generation(state_dir: &Path, n: u64) -> Result<Vec<Desired>> {
+    if n == 0 {
+        return Ok(vec![]);
+    }
+    let path = state_dir.join("generations").join(format!("{n}.json"));
+    if !path.exists() {
+        bail!("generation {n} was not found in {}", state_dir.display());
+    }
+    let state = State::load(&path)?;
+    Ok(state.entries.into_values().map(|e| Desired { resource: e.resource, owner: e.owner }).collect())
+}
+
 pub fn state_dir(paths: &Paths, scope: Scope) -> PathBuf {
     match scope {
         Scope::System => paths.system_state_dir(),
