@@ -11,7 +11,10 @@ use fspec_core::{Paths, State};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use crate::{BrewBackend, DnfBackend, FlatpakBackend};
+use crate::{AptBackend, BrewBackend, DistroBackend, DnfBackend, FlatpakBackend, PacmanBackend, XbpsBackend};
+
+const ALL: [&dyn Backend; 7] =
+    [&FlatpakBackend, &BrewBackend, &DnfBackend, &PacmanBackend, &AptBackend, &XbpsBackend, &DistroBackend];
 
 struct World {
     _dir: tempfile::TempDir,
@@ -38,8 +41,13 @@ impl World {
     }
 
     fn linux() -> World {
-        let fedora = Distro { distro: "fedora".into(), init: fspec_core::facts::Init::Systemd, packages: vec![] };
-        World::new("x86_64-linux", Some(System::Distro(fedora)))
+        World::on("fedora", &[])
+    }
+
+    fn on(distro: &str, packages: &[&str]) -> World {
+        let packages = packages.iter().map(ToString::to_string).collect();
+        let distro = Distro { distro: distro.into(), init: fspec_core::facts::Init::Systemd, packages };
+        World::new("x86_64-linux", Some(System::Distro(distro)))
     }
 
     fn darwin() -> World {
@@ -66,12 +74,12 @@ impl World {
     }
 
     fn apply(&self, scope: Scope, want: &[Desired]) -> anyhow::Result<Plan> {
-        apply_scope(&self.cx(scope), &[&FlatpakBackend, &BrewBackend, &DnfBackend], want)
+        apply_scope(&self.cx(scope), &ALL, want)
     }
 
     fn plan(&self, scope: Scope, want: &[Desired]) -> anyhow::Result<Plan> {
         let state = self.state(scope);
-        plan_scope(&self.cx(scope), &[&FlatpakBackend, &BrewBackend, &DnfBackend], want, &state)
+        plan_scope(&self.cx(scope), &ALL, want, &state)
     }
 
     /// Commands since the last call.
@@ -385,7 +393,7 @@ fn dnf_caches_the_locked_rpm_and_installs_the_file() {
     let cached = w.paths.root.join("var/cache/fspec/pkgs/htop-3.3-1.fc42.x86_64.rpm");
     assert_eq!(fs::read(&cached).unwrap(), b"rpm one");
     assert_eq!(w.take()[0], format!("dnf install -y {}", cached.display()));
-    assert_eq!(w.state(Scope::System).entries[&want[0].resource.key()].record["rpm"], "htop-3.3-1.fc42.x86_64.rpm");
+    assert_eq!(w.state(Scope::System).entries[&want[0].resource.key()].record["file"], "htop-3.3-1.fc42.x86_64.rpm");
     assert!(w.plan(Scope::System, &want).unwrap().changes.is_empty());
 }
 
@@ -480,4 +488,292 @@ fn flatpak_removal_trashes_the_app_data_under_var_app() {
 
     w.apply(Scope::System, &want).unwrap();
     assert!(data.join("config/prefs").exists());
+}
+
+/// How each distro family spells its commands.
+struct Fam {
+    distro: &'static str,
+    kind: &'static str,
+    install: &'static str,
+    remove: &'static str,
+    version: &'static str,
+    /// What the version query prints for a package at 3.3.
+    printed: &'static str,
+    ext: &'static str,
+}
+
+const FAMS: [Fam; 4] = [
+    Fam {
+        distro: "fedora",
+        kind: "dnf",
+        install: "dnf install -y",
+        remove: "dnf remove -y",
+        version: "rpm -q --qf %{VERSION}-%{RELEASE}",
+        printed: "3.3-1",
+        ext: "rpm",
+    },
+    Fam {
+        distro: "arch",
+        kind: "pacman",
+        install: "pacman -S --noconfirm --needed",
+        remove: "pacman -R --noconfirm",
+        version: "pacman -Q",
+        printed: "htop 3.3-1",
+        ext: "pkg.tar.zst",
+    },
+    Fam {
+        distro: "debian",
+        kind: "apt",
+        install: "apt-get install -y",
+        remove: "apt-get remove -y",
+        version: "dpkg-query -W -f=${Version}",
+        printed: "3.3-1",
+        ext: "deb",
+    },
+    Fam {
+        distro: "void",
+        kind: "xbps",
+        install: "xbps-install -y",
+        remove: "xbps-remove -y",
+        version: "xbps-query -p pkgver",
+        printed: "htop-3.3_1",
+        ext: "xbps",
+    },
+];
+
+impl Fam {
+    fn pkg(&self, name: &str, names: &[&str]) -> Desired {
+        pkg(name, json!({"kind": self.kind, "names": names}), "pinned")
+    }
+
+    fn world(&self) -> World {
+        World::on(self.distro, &[])
+    }
+
+    /// The commands that install the cached `file` as `names`.
+    fn install_file(&self, w: &World, file: &str, names: &str) -> Vec<String> {
+        let dir = w.paths.root.join("var/cache/fspec/pkgs");
+        let path = dir.join(file);
+        match self.kind {
+            "dnf" => vec![format!("dnf install -y {}", path.display())],
+            "pacman" => vec![format!("pacman -U --noconfirm --needed {}", path.display())],
+            "apt" => vec![format!("apt-get install -y {}", path.display())],
+            _ => vec![
+                format!("xbps-rindex -a {}", path.display()),
+                format!("xbps-install -y -R {} {names}", dir.display()),
+            ],
+        }
+    }
+
+    fn is_query(&self, line: &str) -> bool {
+        line.starts_with(self.version)
+    }
+
+    fn without_queries(&self, lines: Vec<String>) -> Vec<String> {
+        lines.into_iter().filter(|l| !self.is_query(l)).collect()
+    }
+}
+
+fn locked_file(w: &mut World, f: &Fam, version: &str, body: &[u8]) -> String {
+    let file = format!("htop-{version}.x86_64.{}", f.ext);
+    let url = format!("https://example/{file}");
+    let artifact = Artifact { url: Some(url.clone()), hash: Some(sri(body)), ..Default::default() };
+    w.lock.upsert(locked("htop", &format!("{}:", f.kind), Some(version), &[("x86_64-linux", artifact)]));
+    w.fetch.bodies.insert(url, body.to_vec());
+    file
+}
+
+#[test]
+fn every_family_installs_by_name_reports_drift_and_removes() {
+    for f in &FAMS {
+        let w = f.world();
+        w.answer(f.version, 0, f.printed);
+        let want = [f.pkg("htop", &[]), f.pkg("tools", &["jq", "ripgrep"])];
+        w.apply(Scope::System, &want).unwrap();
+        let lines = w.take();
+        assert_eq!(
+            f.without_queries(lines.clone()),
+            [format!("{} htop", f.install), format!("{} jq ripgrep", f.install)]
+        );
+        assert_eq!(lines.iter().filter(|l| f.is_query(l)).count(), 3, "{}", f.kind);
+        assert!(w.plan(Scope::System, &want).unwrap().changes.is_empty(), "{}", f.kind);
+
+        w.forget_answers();
+        w.answer(f.version, 0, f.printed);
+        w.answer(&format!("{} jq", f.version), 1, "not installed");
+        let plan = w.plan(Scope::System, &want).unwrap();
+        assert_eq!(plan.changes.len(), 1, "{}: {plan}", f.kind);
+
+        w.forget_answers();
+        w.take();
+        w.apply(Scope::System, &[]).unwrap();
+        assert_eq!(w.take(), [format!("{} htop", f.remove), format!("{} jq ripgrep", f.remove)], "{}", f.kind);
+    }
+}
+
+#[test]
+fn every_family_detects_a_version_that_moved() {
+    for f in &FAMS {
+        let w = f.world();
+        w.answer(f.version, 0, f.printed);
+        let want = [f.pkg("htop", &[])];
+        w.apply(Scope::System, &want).unwrap();
+        w.forget_answers();
+        let moved = f.printed.replace("3.3", "3.4");
+        w.answer(f.version, 0, &moved);
+        assert!(is_drift(&w.plan(Scope::System, &want).unwrap()), "{}", f.kind);
+    }
+}
+
+#[test]
+fn every_family_caches_the_locked_file_and_installs_it() {
+    for f in &FAMS {
+        let mut w = f.world();
+        let file = locked_file(&mut w, f, "3.3-1", b"package one");
+        let want = [f.pkg("htop", &[])];
+        w.apply(Scope::System, &want).unwrap();
+        let cached = w.paths.root.join("var/cache/fspec/pkgs").join(&file);
+        assert_eq!(fs::read(&cached).unwrap(), b"package one", "{}", f.kind);
+        assert_eq!(f.without_queries(w.take()), f.install_file(&w, &file, "htop"), "{}", f.kind);
+        assert_eq!(w.state(Scope::System).entries[&want[0].resource.key()].record["file"], file.as_str());
+        assert!(w.plan(Scope::System, &want).unwrap().changes.is_empty(), "{}", f.kind);
+    }
+}
+
+#[test]
+fn every_family_rejects_a_bad_hash_before_touching_the_system() {
+    for f in &FAMS {
+        let mut w = f.world();
+        let file = locked_file(&mut w, f, "3.3-1", b"package one");
+        w.fetch.bodies.insert(format!("https://example/{file}"), b"tampered".to_vec());
+        let err = w.apply(Scope::System, &[f.pkg("htop", &[])]).unwrap_err();
+        assert!(format!("{err:#}").contains("hashes to"), "{}: {err:#}", f.kind);
+        assert!(w.take().is_empty(), "{}", f.kind);
+    }
+}
+
+#[test]
+fn every_family_journals_the_old_file_on_a_lock_bump() {
+    for f in &FAMS {
+        let mut w = f.world();
+        let old = locked_file(&mut w, f, "3.3-1", b"package one");
+        let want = [f.pkg("htop", &[]), f.pkg("zzz", &[])];
+        w.apply(Scope::System, &want[..1]).unwrap();
+        w.take();
+
+        let new = locked_file(&mut w, f, "3.4-1", b"package two");
+        assert!(is_drift(&w.plan(Scope::System, &want[..1]).unwrap()), "{}", f.kind);
+
+        w.answer(&format!("{} zzz", f.install), 1, "");
+        assert!(w.apply(Scope::System, &want).is_err(), "{}", f.kind);
+        w.forget_answers();
+        let mut expect = f.install_file(&w, &new, "htop");
+        expect.push(format!("{} zzz", f.install));
+        expect.push(format!("{} zzz", f.remove));
+        expect.extend(f.install_file(&w, &old, "htop"));
+        assert_eq!(f.without_queries(w.take()), expect, "{}", f.kind);
+    }
+}
+
+#[test]
+fn every_family_rolls_back_the_earlier_install() {
+    for f in &FAMS {
+        let w = f.world();
+        w.answer(&format!("{} b", f.install), 1, "");
+        assert!(w.apply(Scope::System, &[f.pkg("a", &[]), f.pkg("b", &[])]).is_err());
+        let lines = w.take();
+        assert_eq!(&lines[lines.len() - 2..], [format!("{} b", f.remove), format!("{} a", f.remove)], "{}", f.kind);
+    }
+}
+
+#[test]
+fn apt_runs_noninteractive() {
+    let w = World::on("debian", &[]);
+    w.apply(Scope::System, &[FAMS[2].pkg("htop", &[])]).unwrap();
+    let calls = w.runner.calls.lock().unwrap();
+    let install = calls.iter().find(|c| c.program == "apt-get").unwrap();
+    assert_eq!(install.env, [("DEBIAN_FRONTEND".to_string(), "noninteractive".to_string())]);
+}
+
+#[test]
+fn distro_managers_claim_only_their_own_distro_and_never_image_hosts() {
+    for (i, f) in FAMS.iter().enumerate() {
+        for (j, other) in FAMS.iter().enumerate() {
+            let w = other.world();
+            let claimed = ALL.iter().filter(|b| b.handles(&w.cx(Scope::System), &f.pkg("htop", &[]).resource)).count();
+            assert_eq!(claimed, usize::from(i == j), "{} source on {}", f.kind, other.distro);
+        }
+    }
+    let image =
+        Image { base: "quay.io/fedora/fedora-silverblue:42".into(), packages: None, kernel_args: vec![], distro: None };
+    let w = World::new("x86_64-linux", Some(System::Image(image)));
+    let want = FAMS[0].pkg("htop", &[]);
+    assert!(!ALL.iter().any(|b| b.handles(&w.cx(Scope::System), &want.resource)));
+}
+
+fn distro_res(distro: &str, packages: &[&str]) -> Desired {
+    let packages: Vec<_> = packages.iter().map(ToString::to_string).collect();
+    Desired {
+        resource: Resource::Distro(Distro { distro: distro.into(), init: fspec_core::facts::Init::Systemd, packages }),
+        owner: None,
+    }
+}
+
+#[test]
+fn distro_backend_installs_the_diff_of_the_base_packages() {
+    for f in &FAMS {
+        let w = World::on(f.distro, &["a", "b"]);
+        w.apply(Scope::System, &[distro_res(f.distro, &["a", "b"])]).unwrap();
+        assert_eq!(f.without_queries(w.take()).last().unwrap(), &format!("{} a b", f.install), "{}", f.kind);
+
+        w.apply(Scope::System, &[distro_res(f.distro, &["b", "c"])]).unwrap();
+        let lines = f.without_queries(w.take());
+        assert_eq!(&lines[lines.len() - 2..], [format!("{} a", f.remove), format!("{} c", f.install)], "{}", f.kind);
+
+        let rec = &w.state(Scope::System).entries[&distro_res(f.distro, &[]).resource.key()].record;
+        assert_eq!(rec["names"], json!(["b", "c"]));
+        assert!(w.plan(Scope::System, &[distro_res(f.distro, &["b", "c"])]).unwrap().changes.is_empty());
+    }
+}
+
+#[test]
+fn distro_backend_rolls_back_a_failed_install_and_reports_drift() {
+    let f = &FAMS[1];
+    let w = World::on(f.distro, &["a"]);
+    w.answer(f.version, 0, "a 1.0-1");
+    let want = [distro_res(f.distro, &["a"])];
+    w.apply(Scope::System, &want).unwrap();
+    w.take();
+
+    w.answer(&format!("{} z", f.install), 1, "");
+    assert!(w.apply(Scope::System, &[distro_res(f.distro, &["a", "z"])]).is_err());
+    let lines = f.without_queries(w.take());
+    assert_eq!(&lines[lines.len() - 2..], [format!("{} z", f.install), format!("{} z", f.remove)]);
+
+    w.forget_answers();
+    w.answer(f.version, 1, "");
+    assert!(is_drift(&w.plan(Scope::System, &want).unwrap()));
+}
+
+#[test]
+fn btrfs_snapshot_is_taken_before_the_commit_only_on_btrfs() {
+    let want = [distro_res("arch", &["linux"])];
+    let w = World::on("arch", &["linux"]);
+    w.answer("findmnt -no FSTYPE", 0, "ext4\n");
+    w.apply(Scope::System, &want).unwrap();
+    assert!(w.take().iter().all(|l| !l.starts_with("btrfs")));
+
+    let w = World::on("arch", &["linux"]);
+    w.answer("findmnt -no FSTYPE", 0, "btrfs\n");
+    w.apply(Scope::System, &want).unwrap();
+    let lines = w.take();
+    let root = w.paths.system("/").display().to_string();
+    let snap = format!("btrfs subvolume snapshot -r {root} {}", w.paths.system("/.snapshots/fspec-1").display());
+    let at = lines.iter().position(|l| *l == snap).unwrap_or_else(|| panic!("{lines:?}"));
+    let install = lines.iter().position(|l| l.starts_with("pacman -S")).unwrap();
+    assert!(at < install, "{lines:?}");
+
+    // Nothing to change, nothing to snapshot.
+    w.apply(Scope::System, &want).unwrap();
+    assert!(w.take().iter().all(|l| !l.starts_with("btrfs")));
 }

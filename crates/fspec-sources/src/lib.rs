@@ -4,6 +4,7 @@
 mod age;
 mod aqua;
 mod cargo;
+mod distro;
 mod git;
 mod github;
 mod hash;
@@ -14,6 +15,7 @@ pub mod update;
 use std::sync::OnceLock;
 
 use anyhow::{Result, anyhow};
+use fspec_core::facts::Facts;
 use fspec_core::fetch::Fetch;
 use fspec_core::lock::LockedPkg;
 use fspec_core::resource::{Channel, Pkg, Source};
@@ -25,6 +27,8 @@ pub use age::parse_age;
 pub struct Cx<'a> {
     pub fetch: &'a dyn Fetch,
     pub runner: &'a dyn Runner,
+    /// Platform and distro of the machine running the update; only it can ask a package manager.
+    pub local: (String, String),
     /// Unix seconds, the reference point for release-age cutoffs.
     pub now: i64,
     pub(crate) registry: OnceLock<aqua::Registry>,
@@ -32,7 +36,7 @@ pub struct Cx<'a> {
 
 impl<'a> Cx<'a> {
     pub fn new(fetch: &'a dyn Fetch, runner: &'a dyn Runner) -> Cx<'a> {
-        Cx { fetch, runner, now: age::now(), registry: OnceLock::new() }
+        Cx { fetch, runner, local: Facts::probe_local(), now: age::now(), registry: OnceLock::new() }
     }
 }
 
@@ -59,7 +63,9 @@ pub fn resolve(pkg: &Pkg, platforms: &[String], min_age: Option<i64>, cx: &Cx) -
         Source::Brew { name, cask } => service::brew(name.as_deref().unwrap_or(&pkg.name), *cask, cx, &mut locked),
         Source::Git { url, rev } => git::resolve(url, rev, cx, &mut locked),
         Source::Nix { attr } => service::nix(attr, cx, &mut locked),
-        Source::Dnf(_) | Source::Pacman(_) | Source::Apt(_) | Source::Xbps(_) => Ok(()),
+        Source::Dnf(_) | Source::Pacman(_) | Source::Apt(_) | Source::Xbps(_) => {
+            distro::resolve(&pkg.source, &pkg.name, platforms, cx, &mut locked)
+        }
     };
     result.map_err(|e| anyhow!("{}: {e:#}", ctx()))?;
     Ok(locked)

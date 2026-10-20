@@ -161,8 +161,18 @@ stays installable after the distro moves on.
 `fspec update [pkg...]` resolves every package declared by any host (or only
 the named ones), keeps the other entries, drops entries no host declares and
 prints one line per change. A package gets an artifact for each platform its
-hosts declare. Distro sources (`dnf`, `pacman`, `apt`, `xbps`) lock only the
-name until step 8 adds their pins.
+hosts declare. A distro source (`dnf`, `pacman`, `apt`, `xbps`) records the
+version plus the exact package file URL and hash per platform, found two ways.
+When the machine running `fspec update` is that distro on that arch, it asks its
+own package manager: `dnf repoquery --location`, `pacman -Sddp`,
+`apt-get download --print-uris`, `xbps-query -R --property=...`. Otherwise
+Arch reads the `core.db` and `extra.db` tarballs from `geo.mirror.pkgbuild.com`
+(x86_64 only; Arch Linux ARM has its own mirrors) and Void reads
+`<arch>-repodata` from `repo-default.voidlinux.org`. Fedora and Debian have no
+repo metadata simple enough to parse here, so on any other machine those
+platforms stay name-only: the host installs the newest version by name and
+nothing is cached. Run `fspec update` on a Fedora or Debian machine of the
+right arch to get exact pins; `release_age` does not apply to distro sources.
 The lock entry for a distro package holds one artifact per platform, so the
 cached file is used for single-name packages; a multi-name `dnf([...])` package
 installs by name. Flatpak pins live in `any = { commit = … }`, brew records
@@ -515,6 +525,25 @@ On classic distros (Fedora Workstation, Arch, Debian, Void) it is
 `fedora(...)`, `arch(...)` and so on, driving the package manager directly with
 cached pinned packages, and kernel rollback comes from btrfs snapshots.
 
+The `packages` list of `fedora(...)`, `arch(...)`, `debian(...)` and `void(...)`
+is installed by name with `dnf`, `pacman -S --needed`, `apt-get` and
+`xbps-install`, and a name removed from the list is removed from the machine.
+The base packages are not in the lock, so they are never pinned or cached;
+pin a package that matters by declaring it as a `pkg` as well. Dropping the
+whole `fedora(...)` declaration leaves its packages installed. Before any
+change to the system layer, if `findmnt -no FSTYPE /` says btrfs, apply takes a
+read-only snapshot `/.snapshots/fspec-<generation>`; it is taken while
+preparing, before the package phases commit, so it holds the old kernel. A
+failed apply leaves the snapshot behind. Other filesystems get no snapshot.
+`pkg` sources for the four managers cache the locked `.rpm`, `.pkg.tar.zst`,
+`.deb` or `.xbps` under `/var/cache/fspec/pkgs` and install the file (`dnf
+install`, `pacman -U`, `apt-get install`, and for `.xbps` a local repository
+directory built with `xbps-rindex -a` and used through `xbps-install -R`). A
+rollback reinstalls the previous cached file, or the plain name when it is gone.
+Xbps has no exact-version flag here, so the local repository pins by being the
+only place that file lives; if the Void repos hold a newer version, xbps may
+prefer it.
+
 macOS has no equivalent of either; the system layer there is `defaults`,
 launchd and Homebrew.
 
@@ -631,7 +660,8 @@ A cargo workspace under `crates/`:
 | `fspec-eval` | Starlark builtins and evaluation into `Host` values |
 | `fspec-store` | The store backend: hash check, unpack, generations, `current`, npm and nix packages, project pins, `gc` |
 | `fspec-image` | Containerfile and workflow generation, ghcr digest resolution, the bootc `image` backend |
-| `fspec-sources` | Resolvers (aqua, github, npm, cargo, flatpak, brew, git, nix) and `fspec update` |
+| `fspec-sources` | Resolvers (aqua, github, npm, cargo, flatpak, brew, git, nix, dnf, pacman, apt, xbps) and `fspec update` |
+| `fspec-pkgmgr` | Flatpak, Homebrew and the distro package backends (dnf, pacman, apt, xbps), and the base packages of a classic distro |
 | `fspec-remote` | Remote hosts: ssh and tar command lines, the spec shipment, the probe check, `--all` ordering |
 | `fspec` | The CLI |
 

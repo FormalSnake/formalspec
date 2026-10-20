@@ -1,9 +1,13 @@
-//! Package manager backends: Flatpak and Homebrew everywhere they exist, dnf on classic Fedora.
+//! Package manager backends: Flatpak and Homebrew everywhere they exist, dnf, pacman, apt and xbps on their classic distros,
+//! and the base packages of those distros.
 //! Each one journals the inverse command before it changes anything.
 
 mod brew;
-mod dnf;
+mod distro;
+mod family;
 mod flatpak;
+mod managers;
+mod pkgs;
 #[cfg(test)]
 mod tests;
 
@@ -15,8 +19,9 @@ use fspec_core::runner::{Cmd, Output};
 use serde_json::{Map, Value};
 
 pub use brew::BrewBackend;
-pub use dnf::DnfBackend;
+pub use distro::DistroBackend;
 pub use flatpak::FlatpakBackend;
+pub use managers::{AptBackend, DnfBackend, PacmanBackend, XbpsBackend};
 
 fn pkg(r: &Resource) -> Result<&Pkg> {
     match r {
