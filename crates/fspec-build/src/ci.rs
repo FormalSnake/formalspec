@@ -1,0 +1,90 @@
+//! `.github/workflows/fspec-packages.yml`: builds every `git(...)` package on a runner of each
+//! platform a host declares and pushes the result to `ghcr.io/<owner>/fspec-cache`.
+
+use std::collections::BTreeSet;
+
+use anyhow::{Result, bail};
+use fspec_core::resource::{Host, Resource, Source};
+
+/// `(package, platform)` for every `git(...)` package a host declares, sorted.
+pub fn jobs(hosts: &[Host]) -> Vec<(String, String)> {
+    let all: BTreeSet<_> = hosts
+        .iter()
+        .flat_map(|h| {
+            h.resources.iter().filter_map(move |r| match r {
+                Resource::Pkg(p) if matches!(p.source, Source::Git { .. }) => {
+                    Some((p.name.clone(), h.platform.clone()))
+                }
+                _ => None,
+            })
+        })
+        .collect();
+    all.into_iter().collect()
+}
+
+fn runner(platform: &str) -> Result<&'static str> {
+    Ok(match platform {
+        "x86_64-linux" => "ubuntu-24.04",
+        "aarch64-linux" => "ubuntu-24.04-arm",
+        "aarch64-darwin" => "macos-14",
+        other => {
+            bail!("no CI runner for platform {other}, the cache builds x86_64-linux, aarch64-linux and aarch64-darwin")
+        }
+    })
+}
+
+pub const PATH: &str = ".github/workflows/fspec-packages.yml";
+
+pub fn workflow(jobs: &[(String, String)]) -> Result<String> {
+    if jobs.is_empty() {
+        bail!("no host declares a git(...) package, there is nothing to cache");
+    }
+    let mut matrix = String::new();
+    for (pkg, platform) in jobs {
+        matrix
+            .push_str(&format!("          - {{ pkg: {pkg}, platform: {platform}, runner: {} }}\n", runner(platform)?));
+    }
+    Ok(format!(
+        r#"name: fspec packages
+
+on:
+  push:
+    branches: [main]
+    paths: [fspec.lock, "patches/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    name: ${{{{ matrix.pkg }}}} (${{{{ matrix.platform }}}})
+    runs-on: ${{{{ matrix.runner }}}}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+{matrix}    steps:
+      - uses: actions/checkout@v4
+      - uses: oras-project/setup-oras@v1
+      - name: Install fspec
+        run: cargo install --locked --git {repo} fspec
+      - name: Build
+        run: fspec build --pkg ${{{{ matrix.pkg }}}} --platform ${{{{ matrix.platform }}}} --out out
+      - name: Push
+        env:
+          TOKEN: ${{{{ secrets.GITHUB_TOKEN }}}}
+        run: |
+          owner=$(echo "${{{{ github.repository_owner }}}}" | tr '[:upper:]' '[:lower:]')
+          echo "$TOKEN" | oras login ghcr.io -u "${{{{ github.actor }}}}" --password-stdin
+          cd out
+          oras push "ghcr.io/$owner/fspec-cache/${{{{ matrix.pkg }}}}:$(cat tag)" \
+            "${{{{ matrix.pkg }}}}-${{{{ matrix.platform }}}}.tar.zst:application/vnd.fspec.package.v1.tar+zstd"
+"#,
+        repo = env!("CARGO_PKG_REPOSITORY"),
+    ))
+}
+
+#[cfg(test)]
+mod tests;

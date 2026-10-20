@@ -459,3 +459,207 @@ fn durations_parse() {
     assert!(parse_duration("14").is_err());
     assert!(parse_duration("d").is_err());
 }
+
+const NPM_PATCH: &str = "\
+diff --git a/cli.sh b/cli.sh
+--- a/cli.sh
++++ b/cli.sh
+@@ -1,2 +1,2 @@
+ #!/bin/sh
+-echo npm tool
++echo patched tool
+";
+
+fn npm_tool() -> Vec<u8> {
+    tgz(&[
+        ("package/package.json", r#"{"name": "@scope/tool", "bin": "./cli.sh"}"#, 0o644),
+        ("package/cli.sh", "#!/bin/sh\necho npm tool\n", 0o644),
+    ])
+}
+
+fn npm_pkg(patches: &[&str]) -> Desired {
+    let resource = serde_json::from_value(json!({
+        "kind": "pkg", "name": "tool", "source": {"kind": "npm", "name": "@scope/tool"}, "patches": patches,
+    }));
+    Desired { resource: resource.unwrap(), owner: None }
+}
+
+fn lock_npm(w: &mut World, patches: Option<String>) {
+    let body = npm_tool();
+    let mut l = locked("tool", "npm:@scope/tool", "1.2.3", "https://example/tool.tgz", &body);
+    l.patches = patches;
+    w.lock.upsert(l);
+    w.fetch = MapFetch::default().with("https://example/tool.tgz", body);
+}
+
+fn write_patch(w: &World, text: &str) -> String {
+    fs::create_dir_all(w.paths.root.join("patches")).unwrap();
+    fs::write(w.paths.root.join("patches/fix.patch"), text).unwrap();
+    "patches/fix.patch".into()
+}
+
+#[test]
+fn npm_patches_apply_to_the_unpacked_tree_and_change_the_store_path() {
+    let mut w = World::new();
+    lock_npm(&mut w, None);
+    w.apply(&[npm_pkg(&[])]).unwrap();
+    assert_eq!(w.run("tool"), "npm tool");
+    let plain = w.state().entries[&npm_pkg(&[]).resource.key()].record["store"].as_str().unwrap().to_string();
+
+    let patch = write_patch(&w, NPM_PATCH);
+    let hash = fspec_core::patches::hash(&w.paths.root, std::slice::from_ref(&patch)).unwrap();
+    lock_npm(&mut w, Some(hash));
+    let want = [npm_pkg(&[&patch])];
+    assert_eq!(w.plan(&want).changes.len(), 1);
+    w.apply(&want).unwrap();
+    assert_eq!(w.run("tool"), "patched tool");
+    let patched = w.state().entries[&want[0].resource.key()].record["store"].as_str().unwrap().to_string();
+    assert_ne!(plain, patched);
+    assert!(w.root().join(&plain).exists(), "the unpatched tree stays for rollback");
+    assert!(w.plan(&want).changes.is_empty());
+}
+
+#[test]
+fn a_patched_pkg_whose_patches_differ_from_the_lock_is_refused() {
+    let mut w = World::new();
+    let patch = write_patch(&w, NPM_PATCH);
+    let hash = fspec_core::patches::hash(&w.paths.root, std::slice::from_ref(&patch)).unwrap();
+    lock_npm(&mut w, Some(hash));
+    write_patch(&w, &NPM_PATCH.replace("patched", "edited"));
+    let err = w.apply(&[npm_pkg(&[&patch])]).unwrap_err();
+    assert!(format!("{err:#}").contains("patches changed, run fspec update"), "{err:#}");
+    assert_eq!(w.store_entries(), 0);
+
+    lock_npm(&mut w, None);
+    let err = w.apply(&[npm_pkg(&[&patch])]).unwrap_err();
+    assert!(format!("{err:#}").contains("patches changed, run fspec update"), "{err:#}");
+}
+
+#[test]
+fn a_patch_that_does_not_apply_aborts_the_apply() {
+    let mut w = World::new();
+    let patch = write_patch(&w, &NPM_PATCH.replace("echo npm tool", "echo something else"));
+    let hash = fspec_core::patches::hash(&w.paths.root, std::slice::from_ref(&patch)).unwrap();
+    lock_npm(&mut w, Some(hash));
+    let err = w.apply(&[npm_pkg(&[&patch])]).unwrap_err();
+    assert!(format!("{err:#}").contains("patching tool"), "{err:#}");
+    assert_eq!(w.store_entries(), 0);
+}
+
+const REF: &str = "ghcr.io/o/fspec-cache/tool@sha256:aa";
+
+fn tar_zst(name: &str, content: &str) -> Vec<u8> {
+    let mut tar = tar::Builder::new(Vec::new());
+    let mut h = tar::Header::new_gnu();
+    h.set_size(content.len() as u64);
+    h.set_mode(0o755);
+    tar.append_data(&mut h, name, content.as_bytes()).unwrap();
+    let tar = tar.into_inner().unwrap();
+    ruzstd::encoding::compress_to_vec(tar.as_slice(), ruzstd::encoding::CompressionLevel::Fastest)
+}
+
+/// Plays `oras`: `pull` drops the artifact into the `-o` directory, `manifest fetch` names its layer.
+struct FakeOras {
+    artifact: Vec<u8>,
+    layer_digest: String,
+    calls: Mutex<Vec<String>>,
+}
+
+impl FakeOras {
+    fn new(artifact: Vec<u8>) -> FakeOras {
+        let layer_digest = format!("sha256:{}", sha256_hex(&artifact));
+        FakeOras { artifact, layer_digest, calls: Mutex::new(vec![]) }
+    }
+}
+
+fn sha256_hex(body: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(body).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+impl Runner for FakeOras {
+    fn run(&self, cmd: &Cmd) -> anyhow::Result<Output> {
+        self.calls.lock().unwrap().push(cmd.to_string());
+        let mut out = Output::default();
+        match cmd.args[0].as_str() {
+            "pull" => {
+                assert_eq!(cmd.args[1], REF);
+                assert_eq!(cmd.args[2], "-o");
+                fs::write(Path::new(&cmd.args[3]).join("tool-aarch64-darwin.tar.zst"), &self.artifact)?;
+            }
+            "manifest" => {
+                out.stdout = json!({"layers": [{
+                    "digest": self.layer_digest,
+                    "annotations": {"org.opencontainers.image.title": "tool-aarch64-darwin.tar.zst"},
+                }]})
+                .to_string();
+            }
+            other => panic!("unexpected oras {other}"),
+        }
+        Ok(out)
+    }
+}
+
+fn git_pkg() -> Desired {
+    pkg("tool", json!({"kind": "git", "url": "https://example/tool", "rev": "main"}), "pinned")
+}
+
+fn lock_git(w: &mut World, reference: &str) {
+    w.lock.upsert(LockedPkg {
+        name: "tool".into(),
+        source: "git:https://example/tool@main".into(),
+        version: None,
+        rev: Some("4f1c2a9d3e5b7a8c9d0e1f2a3b4c5d6e7f8a9b0c".into()),
+        patches: None,
+        artifacts: BTreeMap::from([(
+            PLATFORM.to_string(),
+            Artifact { oci: Some(reference.into()), ..Default::default() },
+        )]),
+    });
+}
+
+#[test]
+fn a_ci_built_package_is_pulled_with_oras_and_installed() {
+    let mut w = World::new();
+    lock_git(&mut w, REF);
+    let oras = std::sync::Arc::new(FakeOras::new(tar_zst("tool", "#!/bin/sh\necho from ci\n")));
+    struct Shared(std::sync::Arc<FakeOras>);
+    impl Runner for Shared {
+        fn run(&self, cmd: &Cmd) -> anyhow::Result<Output> {
+            self.0.run(cmd)
+        }
+    }
+    w.runner = Box::new(Shared(oras.clone()));
+    w.apply(&[git_pkg()]).unwrap();
+    assert_eq!(w.run("tool"), "from ci");
+
+    let calls = oras.calls.lock().unwrap();
+    assert_eq!(calls.len(), 2);
+    assert!(calls[0].starts_with(&format!("oras pull {REF} -o ")), "{calls:?}");
+    assert_eq!(calls[1], format!("oras manifest fetch {REF}"));
+    let record = &w.state().entries[&git_pkg().resource.key()].record;
+    assert_eq!(record["id"], REF);
+    assert_eq!(record["bins"]["tool"], "tool");
+}
+
+#[test]
+fn an_oci_layer_that_does_not_match_its_manifest_is_refused() {
+    let mut w = World::new();
+    lock_git(&mut w, REF);
+    let mut oras = FakeOras::new(tar_zst("tool", "#!/bin/sh\necho from ci\n"));
+    oras.layer_digest = "sha256:00".into();
+    w.runner = Box::new(oras);
+    let err = w.apply(&[git_pkg()]).unwrap_err();
+    assert!(format!("{err:#}").contains("manifest says"), "{err:#}");
+    assert_eq!(w.store_entries(), 0);
+}
+
+#[test]
+fn a_tag_without_a_digest_is_refused_and_never_pulled() {
+    let mut w = World::new();
+    lock_git(&mut w, "ghcr.io/o/fspec-cache/tool:abc-aarch64-darwin");
+    let runner = RecordingRunner::default();
+    w.runner = Box::new(runner);
+    let err = w.apply(&[git_pkg()]).unwrap_err();
+    assert!(format!("{err:#}").contains("not pinned to a digest"), "{err:#}");
+}

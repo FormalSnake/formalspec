@@ -1,0 +1,38 @@
+name: fspec packages
+
+on:
+  push:
+    branches: [main]
+    paths: [fspec.lock, "patches/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    name: ${{ matrix.pkg }} (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { pkg: librepods, platform: aarch64-darwin, runner: macos-14 }
+          - { pkg: librepods, platform: x86_64-linux, runner: ubuntu-24.04 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oras-project/setup-oras@v1
+      - name: Install fspec
+        run: cargo install --locked --git {{repo}} fspec
+      - name: Build
+        run: fspec build --pkg ${{ matrix.pkg }} --platform ${{ matrix.platform }} --out out
+      - name: Push
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "$TOKEN" | oras login ghcr.io -u "${{ github.actor }}" --password-stdin
+          cd out
+          oras push "ghcr.io/$owner/fspec-cache/${{ matrix.pkg }}:$(cat tag)" \
+            "${{ matrix.pkg }}-${{ matrix.platform }}.tar.zst:application/vnd.fspec.package.v1.tar+zstd"

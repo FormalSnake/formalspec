@@ -199,6 +199,14 @@ pub struct Pkg {
     pub patches: Vec<String>,
     #[serde(default)]
     pub build_flags: Vec<String>,
+    /// Replaces recipe detection for a `git(...)` package: a command that installs into
+    /// `$FSPEC_OUT`, run with `$FSPEC_SRC` set to the patched checkout.
+    #[serde(default)]
+    pub build: Vec<String>,
+    /// Executables a source build packs at the top of its artifact, by file name. Empty: every
+    /// executable the recipe produced.
+    #[serde(default)]
+    pub bins: Vec<String>,
     /// App data paths removed with the package.
     #[serde(default)]
     pub data: Vec<String>,

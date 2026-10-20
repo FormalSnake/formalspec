@@ -44,13 +44,15 @@ impl Spec {
 pub fn evaluate(spec_path: &Path) -> anyhow::Result<Spec> {
     let root = spec_path.parent().map(Path::to_path_buf).unwrap_or_default();
     let globals = globals();
-    let loader = Loader { root, globals: &globals, cache: RefCell::default(), loading: RefCell::default() };
+    let loader =
+        Loader { root: SpecRoot(root), globals: &globals, cache: RefCell::default(), loading: RefCell::default() };
     let text = std::fs::read_to_string(spec_path).with_context(|| format!("reading {}", spec_path.display()))?;
     let ast = AstModule::parse(&spec_path.display().to_string(), text, &dialect()).map_err(|e| e.into_anyhow())?;
 
     Module::with_temp_heap(|module| {
         let mut eval = Evaluator::new(&module);
         eval.set_loader(&loader);
+        eval.extra = Some(&loader.root);
         eval.eval_module(ast, &globals).map_err(|e| e.into_anyhow())?;
         let hosts = module.get("hosts").context("spec.star must set `hosts` to a list of host(...)")?;
         let list = ListRef::from_value(hosts).context("`hosts` must be a list")?;
@@ -81,8 +83,12 @@ fn globals() -> Globals {
         .build()
 }
 
+/// The spec's directory, which `glob` reads and `load` resolves against.
+#[derive(ProvidesStaticType)]
+struct SpecRoot(PathBuf);
+
 struct Loader<'a> {
-    root: PathBuf,
+    root: SpecRoot,
     globals: &'a Globals,
     cache: RefCell<HashMap<String, FrozenModule>>,
     loading: RefCell<Vec<String>>,
@@ -101,13 +107,14 @@ impl FileLoader for Loader<'_> {
         if self.loading.borrow().iter().any(|p| p == path) {
             return Err(other(anyhow!("load cycle: {} -> {path}", self.loading.borrow().join(" -> "))));
         }
-        let file = self.root.join(rel);
+        let file = self.root.0.join(rel);
         let text = std::fs::read_to_string(&file).with_context(|| format!("load(\"{path}\")")).map_err(other)?;
         let ast = AstModule::parse(path, text, &dialect())?;
         self.loading.borrow_mut().push(path.into());
         let frozen = Module::with_temp_heap(|module| {
             let mut eval = Evaluator::new(&module);
             eval.set_loader(self);
+            eval.extra = Some(&self.root);
             eval.eval_module(ast, self.globals)?;
             drop(eval);
             module.freeze().map_err(|e| other(anyhow!("{e:?}")))
@@ -347,8 +354,38 @@ fn expand<'v>(
     bail!("{what}: modules hold resources, lists or functions, got {}", v.get_type())
 }
 
+/// The one place evaluation reads the filesystem besides `load`: files under the spec's own
+/// directory tree, so a spec stays a function of the repo. Sorted, `/`-separated, relative to
+/// the spec directory; directories are skipped and links leading outside the tree are dropped.
+fn glob_(root: &Path, pattern: &str) -> anyhow::Result<Vec<String>> {
+    use std::path::Component;
+    if Path::new(pattern).components().any(|c| !matches!(c, Component::Normal(_) | Component::CurDir)) {
+        bail!(
+            "glob(\"{pattern}\"): patterns are relative to the spec's directory and cannot use `..` or start with `/`"
+        );
+    }
+    let canonical = root.canonicalize().with_context(|| format!("reading {}", root.display()))?;
+    let full = format!("{}/{pattern}", glob::Pattern::escape(&root.to_string_lossy()));
+    let mut found = Vec::new();
+    for entry in glob::glob(&full).map_err(|e| anyhow!("glob(\"{pattern}\"): {e}"))? {
+        let path = entry?;
+        if !path.is_file() || !path.canonicalize().is_ok_and(|p| p.starts_with(&canonical)) {
+            continue;
+        }
+        let rel = path.strip_prefix(root).context("glob matched outside the spec directory")?;
+        found.push(rel.to_string_lossy().replace('\\', "/"));
+    }
+    found.sort();
+    Ok(found)
+}
+
 #[starlark_module]
 fn builtins(builder: &mut GlobalsBuilder) {
+    fn glob<'v>(pattern: &str, eval: &mut Evaluator<'v, '_, '_>) -> anyhow::Result<Vec<String>> {
+        let root = eval.extra.and_then(|e| e.downcast_ref::<SpecRoot>()).context("glob needs a spec directory")?;
+        glob_(&root.0, pattern)
+    }
+
     fn host<'v>(
         #[starlark(args)] args: UnpackTuple<Value<'v>>,
         #[starlark(kwargs)] kwargs: Value<'v>,

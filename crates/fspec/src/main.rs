@@ -7,9 +7,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 use fspec_core::apply::{apply_scope, desired_from_generation, plan_scope, state_dir};
 use fspec_core::facts::{Facts, local_hostname};
 use fspec_core::fetch::LiveFetch;
-use fspec_core::resource::System;
+use fspec_core::resource::{Source, System};
 use fspec_core::runner::{Cmd, LiveRunner, LogRunner, Runner};
-use fspec_core::{Cx, Host, Lock, Paths, Plan, Scope, State};
+use fspec_core::{Cx, Host, Lock, Paths, Plan, Resource, Scope, State};
 use fspec_remote::{Planned, Probe, Remote, Target};
 
 #[derive(Parser)]
@@ -68,10 +68,14 @@ enum Command {
         /// Only re-resolve these packages, default every package.
         pkgs: Vec<String>,
         /// Pin each image host's pushed image digest instead of resolving packages.
-        #[arg(long, conflicts_with = "pkgs")]
+        #[arg(long, conflicts_with_all = ["pkgs", "cache"])]
         images: bool,
-        /// Image registry namespace for --images, default `ghcr.io/<owner of the git remote>`.
-        #[arg(long, requires = "images")]
+        /// Also record the digest of each CI-built artifact (see `fspec ci packages`).
+        #[arg(long)]
+        cache: bool,
+        /// Registry for --images (default `ghcr.io/<origin owner>`) or --cache (default
+        /// `ghcr.io/<origin owner>/fspec-cache`).
+        #[arg(long)]
         registry: Option<String>,
     },
     /// Build the bootc image of a host.
@@ -79,7 +83,17 @@ enum Command {
         #[command(subcommand)]
         command: ImageCommand,
     },
-    /// Continuous integration for image hosts.
+    /// Build a `git(...)` package from source at its locked commit into a `.tar.zst`.
+    Build {
+        #[arg(long)]
+        pkg: String,
+        /// Must be this machine's platform, e.g. `x86_64-linux`.
+        #[arg(long)]
+        platform: String,
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Generate CI that builds image hosts and packages.
     Ci {
         #[command(subcommand)]
         command: CiCommand,
@@ -158,6 +172,9 @@ enum CiCommand {
         #[arg(long)]
         registry: Option<String>,
     },
+    /// Write .github/workflows/fspec-packages.yml: build every git package per platform and push
+    /// it to the OCI cache.
+    Packages,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -204,29 +221,81 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
-        Command::Update { pkgs, images, registry } => {
+        Command::Update { pkgs, images, cache, registry } => {
             let spec = fspec_eval::evaluate(&spec_path)?;
             let lock_path = spec_dir.join("fspec.lock");
             let old = Lock::load(&lock_path)?;
             let (fetch, runner) = (LiveFetch::new(), LiveRunner);
-            let (lock, changes, errors, what) = if *images {
+            if *images {
                 let registry = registry_for(registry.as_deref(), &runner, &spec_dir)?;
                 let u = fspec_image::update_images(&spec.hosts, &old, &registry, &fetch)?;
-                (u.lock, u.changes, u.errors, "image")
-            } else {
-                let u =
-                    fspec_sources::update::update(&spec.hosts, &old, pkgs, &fspec_sources::Cx::new(&fetch, &runner))?;
-                (u.lock, u.changes, u.errors, "package")
-            };
-            if lock != old {
-                lock.save(&lock_path)?;
+                if u.lock != old {
+                    u.lock.save(&lock_path)?;
+                }
+                for line in &u.changes {
+                    println!("{line}");
+                }
+                if !u.errors.is_empty() {
+                    bail!("{} image(s) failed:\n{}", u.errors.len(), u.errors.join("\n"));
+                }
+                return Ok(());
             }
-            for line in &changes {
+            let sources = fspec_sources::Cx::new(&fetch, &runner).with_spec_dir(&spec_dir);
+            let mut result = fspec_sources::update::update(&spec.hosts, &old, pkgs, &sources)?;
+            let mut errors = std::mem::take(&mut result.errors);
+            for line in &result.changes {
                 println!("{line}");
             }
-            if !errors.is_empty() {
-                bail!("{} {what}(s) failed:\n{}", errors.len(), errors.join("\n"));
+            if *cache {
+                let registry = fspec_build::cache::registry(&runner, &spec_dir, registry.as_deref())?;
+                let (lines, failed) = fspec_build::cache::record(&mut result.lock, &spec.hosts, &registry, &runner)?;
+                lines.iter().for_each(|l| println!("cached {l}"));
+                errors.extend(failed);
             }
+            if result.lock != old {
+                result.lock.save(&lock_path)?;
+            }
+            if !errors.is_empty() {
+                bail!("{} problem(s):\n{}", errors.len(), errors.join("\n"));
+            }
+            Ok(())
+        }
+        Command::Build { pkg, platform, out } => {
+            let spec = fspec_eval::evaluate(&spec_path)?;
+            let pkg = spec
+                .hosts
+                .iter()
+                .flat_map(|h| &h.resources)
+                .find_map(|r| match r {
+                    Resource::Pkg(p) if p.name == *pkg => Some(p),
+                    _ => None,
+                })
+                .with_context(|| format!("no host declares a package named `{pkg}`"))?;
+            let Source::Git { url, .. } = &pkg.source else {
+                bail!("{} is {}, only git packages build", pkg.name, pkg.source)
+            };
+            let (local, _) = Facts::probe_local();
+            if local != *platform {
+                bail!("this machine is {local}, build {platform} on a matching runner");
+            }
+            let lock = Lock::load(&spec_dir.join("fspec.lock"))?;
+            let locked = lock
+                .pkg(&pkg.name)
+                .filter(|l| l.source == pkg.source.to_string())
+                .with_context(|| format!("pkg {} is not in fspec.lock, run fspec update", pkg.name))?;
+            fspec_core::patches::check(&spec_dir, &pkg.patches, locked.patches.as_deref())?;
+            let rev = locked.rev.as_deref().with_context(|| format!("pkg {} has no rev in fspec.lock", pkg.name))?;
+            let job = fspec_build::Job { pkg, url, rev, platform, spec_dir: &spec_dir, out };
+            println!("{}", fspec_build::build(&LiveRunner, &job)?.archive.display());
+            Ok(())
+        }
+        Command::Ci { command: CiCommand::Packages } => {
+            let spec = fspec_eval::evaluate(&spec_path)?;
+            let text = fspec_build::ci::workflow(&fspec_build::ci::jobs(&spec.hosts))?;
+            let path = spec_dir.join(fspec_build::ci::PATH);
+            std::fs::create_dir_all(path.parent().context("workflow has a parent")?)?;
+            std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
+            println!("{}", path.display());
             Ok(())
         }
         Command::Image { command: ImageCommand::Containerfile { host } } => {
@@ -491,7 +560,6 @@ fn registry_for(flag: Option<&str>, runner: &dyn Runner, spec_dir: &Path) -> Res
 }
 
 fn adopt(env: &Env, host: &Host, path: &str) -> Result<()> {
-    use fspec_core::Resource;
     use fspec_files::adopt::{Outcome, adopt};
     let wanted = std::path::absolute(path)?;
     let (file, scope) = host

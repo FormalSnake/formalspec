@@ -6,11 +6,13 @@ mod archive;
 pub mod gc;
 mod generation;
 mod npm;
+mod oci;
+mod patch;
 mod pins;
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use fspec_core::apply::Records;
@@ -81,8 +83,14 @@ struct Target<'a> {
 }
 
 enum Kind<'a> {
-    Archive { url: &'a str, hash: &'a str, dirname: String, artifact: &'a Artifact },
+    Archive { origin: Origin<'a>, dirname: String, artifact: &'a Artifact },
     Nix { attr: &'a str },
+}
+
+/// Where an archive comes from. A CI build is already patched; a download is patched here.
+enum Origin<'a> {
+    Url { url: &'a str, hash: &'a str },
+    Oci { reference: &'a str },
 }
 
 fn target<'a>(cx: &'a Cx, p: &'a Pkg) -> Result<Target<'a>> {
@@ -93,16 +101,40 @@ fn target<'a>(cx: &'a Cx, p: &'a Pkg) -> Result<Target<'a>> {
         let id = locked.rev.clone().unwrap_or_else(|| version.clone());
         return Ok(Target { locked, version, id, kind: Kind::Nix { attr } });
     }
+    fspec_core::patches::check(cx.spec_dir, &p.patches, locked.patches.as_deref())
+        .with_context(|| format!("pkg {}", p.name))?;
     let platform = cx.facts.platform();
     let artifact =
         locked.artifacts.get(&platform).or_else(|| locked.artifacts.get("any")).with_context(|| {
             format!("pkg {} has no artifact for {platform} in fspec.lock, run fspec update", p.name)
         })?;
+    if let Some(reference) = artifact.oci.as_deref() {
+        let version = version.chars().take(12).collect::<String>();
+        let dirname = format!("{}-{}-{version}", archive::hash8(reference), p.name);
+        return Ok(Target {
+            locked,
+            version,
+            id: reference.into(),
+            kind: Kind::Archive { origin: Origin::Oci { reference }, dirname, artifact },
+        });
+    }
     let (Some(url), Some(hash)) = (artifact.url.as_deref(), artifact.hash.as_deref()) else {
-        bail!("pkg {} needs a url and a hash for {platform} in fspec.lock, run fspec update", p.name);
+        bail!(
+            "pkg {} needs a url and a hash, or an oci reference, for {platform} in fspec.lock, run fspec update",
+            p.name
+        );
     };
-    let dirname = format!("{}-{}-{version}", archive::hash8(hash), p.name);
-    Ok(Target { locked, version, id: hash.into(), kind: Kind::Archive { url, hash, dirname, artifact } })
+    let identity = match &locked.patches {
+        Some(patches) => format!("{hash}+{patches}"),
+        None => hash.to_string(),
+    };
+    let dirname = format!("{}-{}-{version}", archive::hash8(&identity), p.name);
+    Ok(Target {
+        locked,
+        version,
+        id: identity,
+        kind: Kind::Archive { origin: Origin::Url { url, hash }, dirname, artifact },
+    })
 }
 
 /// A self_managed package keeps whatever it has once installed.
@@ -135,6 +167,7 @@ impl Backend for StoreBackend {
                 | Source::Github { .. }
                 | Source::Npm { .. }
                 | Source::Cargo { .. }
+                | Source::Git { .. }
                 | Source::Nix { .. }
         )
     }
@@ -149,11 +182,15 @@ impl Backend for StoreBackend {
         let root = cx.paths.fspec_root();
         let Some(inst) = Installed::from_record(&entry.record) else { return Ok(vec!["no install recorded".into()]) };
         let mut notes = Vec::new();
-        if p.mode == PkgMode::Pinned
-            && let Ok(t) = target(cx, p)
-            && t.id != inst.id
-        {
-            notes.push(format!("locked {} (installed {})", t.version, inst.version));
+        if p.mode == PkgMode::Pinned {
+            let locked = cx.lock.pkg(&p.name).and_then(|l| l.patches.as_deref());
+            if let Err(e) = fspec_core::patches::check(cx.spec_dir, &p.patches, locked) {
+                notes.push(e.to_string());
+            } else if let Ok(t) = target(cx, p)
+                && t.id != inst.id
+            {
+                notes.push(format!("locked {} (installed {})", t.version, inst.version));
+            }
         }
         if !inst.exists(&root) {
             notes.push(format!("{} is missing from the store", inst.store));
@@ -181,19 +218,33 @@ impl Backend for StoreBackend {
                     fs::create_dir_all(marker.parent().context("marker has a parent")?)?;
                     fs::write(&marker, out)?;
                 }
-                Kind::Archive { url, hash, dirname, .. } => {
+                Kind::Archive { origin, dirname, .. } => {
                     if root.join("store").join(&dirname).exists() {
                         continue;
                     }
-                    let body = cx.fetch.get(url)?;
-                    archive::verify(&body, hash).with_context(|| format!("verifying {url}"))?;
                     let dest = staging.join("store").join(&dirname);
-                    archive::unpack(&body, &dest, &p.name).with_context(|| format!("unpacking {url}"))?;
-                    if let Source::Npm { name } = &p.source {
-                        let tarball = staging.join("dl").join(format!("{dirname}.tgz"));
-                        fs::create_dir_all(tarball.parent().context("tarball has a parent")?)?;
-                        fs::write(&tarball, &body)?;
-                        npm::finish(cx.runner, &dest, &tarball, name)?;
+                    match origin {
+                        Origin::Oci { reference } => {
+                            let body = oci::pull(cx.runner, reference, &staging.join("oci").join(&dirname))
+                                .with_context(|| format!("pulling {reference}"))?;
+                            archive::unpack(&body, &dest, &p.name).with_context(|| format!("unpacking {reference}"))?;
+                        }
+                        Origin::Url { url, hash } => {
+                            let body = cx.fetch.get(url)?;
+                            archive::verify(&body, hash).with_context(|| format!("verifying {url}"))?;
+                            archive::unpack(&body, &dest, &p.name).with_context(|| format!("unpacking {url}"))?;
+                            if let Source::Npm { name } = &p.source {
+                                let tarball = staging.join("dl").join(format!("{dirname}.tgz"));
+                                fs::create_dir_all(tarball.parent().context("tarball has a parent")?)?;
+                                fs::write(&tarball, &body)?;
+                                npm::finish(cx.runner, &dest, &tarball, name)?;
+                            }
+                            if !p.patches.is_empty() {
+                                let tree = patch_root(&dest, &p.source);
+                                patch::apply_all(&tree, cx.spec_dir, &p.patches)
+                                    .with_context(|| format!("patching {}", p.name))?;
+                            }
+                        }
                     }
                 }
             }
@@ -228,6 +279,20 @@ impl Backend for StoreBackend {
         }
         generation.switch(journal)?;
         Ok(records)
+    }
+}
+
+/// Where patch paths are relative to: the package directory inside an npm install or the single
+/// top-level directory of an archive, else the unpacked root.
+fn patch_root(dest: &Path, source: &Source) -> PathBuf {
+    if let Source::Npm { name } = source {
+        let installed = dest.join("node_modules").join(name);
+        return if installed.is_dir() { installed } else { dest.join("package") };
+    }
+    let mut entries = fs::read_dir(dest).into_iter().flatten().flatten();
+    match (entries.next(), entries.next()) {
+        (Some(only), None) if only.path().is_dir() => only.path(),
+        _ => dest.to_path_buf(),
     }
 }
 
