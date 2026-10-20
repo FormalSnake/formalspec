@@ -56,6 +56,8 @@ fn expected(distro: &str, bootstrap: &str, boot: &[String]) -> Vec<String> {
         bootstrap.to_string(),
         format!("cp -L /r/etc/resolv.conf {new}/etc/resolv.conf"),
         format!("tee {new}/etc/fstab"),
+        format!("mount --rbind /r/home {new}/home"),
+        format!("mount --make-rslave {new}/home"),
         format!("mount --rbind /r/dev {new}/dev"),
         format!("mount --make-rslave {new}/dev"),
         format!("mount --rbind /r/sys {new}/sys"),
@@ -142,6 +144,17 @@ fn void_bootstrap_sets_the_architecture() {
     let plan = switch_distro(&paths(), &systemd_boot(), &target("void")).unwrap();
     let crate::Step::Run(cmd) = &plan.steps[6] else { panic!("not a run step") };
     assert_eq!(cmd.env, [("XBPS_ARCH".to_string(), "x86_64".to_string())]);
+}
+
+#[test]
+fn the_chroot_apply_gets_a_path_with_sbin() {
+    let plan = switch_distro(&paths(), &systemd_boot(), &target("debian")).unwrap();
+    let chroot = plan.steps.iter().find_map(|s| match s {
+        crate::Step::Run(c) if c.program == "chroot" => Some(c),
+        _ => None,
+    });
+    let path = chroot.unwrap().env.iter().find(|(k, _)| k == "PATH").map(|(_, v)| v.as_str());
+    assert!(path.unwrap().split(':').any(|d| d == "/usr/sbin"));
 }
 
 #[test]
@@ -280,6 +293,29 @@ fn detect_falls_back_to_grub_and_its_fedora_spelling() {
     answer(&r, "test -d /r/boot/grub2", 1, "");
     answer(&r, "findmnt -no TARGET -T /r/boot", 0, "/r\n");
     let m = detect(&r, &paths()).unwrap();
+    assert_eq!(m.bootloader, Bootloader::Grub { mkconfig: "grub-mkconfig", cfg: "/boot/grub/grub.cfg" });
+}
+
+/// Fails to spawn `program`, as the live runner does when it is not installed.
+struct Missing<'a>(&'a RecordingRunner, &'static str);
+
+impl fspec_core::runner::Runner for Missing<'_> {
+    fn run(&self, cmd: &fspec_core::runner::Cmd) -> anyhow::Result<Output> {
+        if cmd.program == self.1 {
+            let err = std::io::Error::from(std::io::ErrorKind::NotFound);
+            return Err(anyhow::Error::from(err).context(format!("running `{cmd}`")));
+        }
+        self.0.run(cmd)
+    }
+}
+
+#[test]
+fn detect_takes_a_missing_bootctl_as_no_systemd_boot() {
+    let r = RecordingRunner::default();
+    btrfs_host(&r);
+    answer(&r, "test -d /r/boot/grub2", 1, "");
+    answer(&r, "findmnt -no TARGET -T /r/boot", 0, "/r\n");
+    let m = detect(&Missing(&r, "bootctl"), &paths()).unwrap();
     assert_eq!(m.bootloader, Bootloader::Grub { mkconfig: "grub-mkconfig", cfg: "/boot/grub/grub.cfg" });
 }
 

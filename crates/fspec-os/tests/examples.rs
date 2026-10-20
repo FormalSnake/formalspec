@@ -68,10 +68,10 @@ fn fedora_host() {
     for expected in [
         "getent passwd kyan",
         "useradd -m -u 1000 -s /usr/bin/fish -G wheel,docker kyan",
-        "systemctl enable --now fspec-caddy.service",
-        "systemctl enable --now fspec-backup.timer",
-        "systemctl enable --now fspec-tidy.timer",
-        "systemctl --user enable --now fspec-syncthing.service",
+        "systemctl start fspec-caddy.service",
+        "systemctl start fspec-backup.timer",
+        "systemctl start fspec-tidy.timer",
+        "systemctl --user start fspec-syncthing.service",
     ] {
         assert!(lines.iter().any(|l| l == expected), "{expected} missing from {lines:#?}");
     }

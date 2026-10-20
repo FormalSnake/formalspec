@@ -74,8 +74,11 @@ impl Backend for SystemdBackend {
 
             // Undo steps replay backwards: files are restored first, then the reload, then the
             // unit is brought back to its old state, so that step is recorded first.
+            // systemctl refuses `--now` in a chroot but ignores start and stop there, so a root
+            // built by `switch --distro` still applies.
             if op.is_removal() {
-                journal.record(Undo::Run { cmd: ctl(&["enable", "--now", &main]) })?;
+                journal.record(Undo::Run { cmd: ctl(&["start", &main]) })?;
+                journal.record(Undo::Run { cmd: ctl(&["enable", &main]) })?;
             } else if op.current.is_some() {
                 journal.record(Undo::Run { cmd: ctl(&["restart", &main]) })?;
             }
@@ -84,7 +87,8 @@ impl Backend for SystemdBackend {
                 for u in &us {
                     journal.backup(&cx.resolve(&u.path)?)?;
                 }
-                cx.runner.run(&ctl(&["disable", "--now", &main]))?;
+                cx.runner.run(&ctl(&["stop", &main]))?;
+                cx.runner.run(&ctl(&["disable", &main]))?;
                 for u in &us {
                     remove_any(&cx.resolve(&u.path)?)?;
                 }
@@ -101,8 +105,10 @@ impl Backend for SystemdBackend {
             if op.current.is_some() {
                 cx.runner.check(&ctl(&["restart", &main]))?;
             } else {
-                journal.record(Undo::Run { cmd: ctl(&["disable", "--now", &main]) })?;
-                cx.runner.check(&ctl(&["enable", "--now", &main]))?;
+                journal.record(Undo::Run { cmd: ctl(&["disable", &main]) })?;
+                journal.record(Undo::Run { cmd: ctl(&["stop", &main]) })?;
+                cx.runner.check(&ctl(&["enable", &main]))?;
+                cx.runner.check(&ctl(&["start", &main]))?;
             }
             let mut rec = Map::new();
             rec.insert("units".into(), json!(us.iter().map(|u| u.path.clone()).collect::<Vec<_>>()));

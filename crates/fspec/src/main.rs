@@ -548,7 +548,10 @@ fn switch(paths: &Paths, spec_path: &Path, host: &Host, opts: &Switch, release: 
         let plan = fspec_switch::switch_distro(paths, &machine(paths, runner.as_ref())?, &target)?;
         run_plan(paths, runner.as_ref(), &plan)?;
         if live {
-            println!("{distro} is installed in @{distro}: reboot and pick \"{distro} (fspec)\" from the boot menu");
+            println!(
+                "{distro} is installed in @{distro}: reboot and pick \"{}\" from the boot menu",
+                fspec_switch::title(distro)
+            );
         }
     } else if opts.reset_var {
         let Some(System::Image(_)) = &host.system else { bail!("host {} has no image(...) system layer", host.name) };

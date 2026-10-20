@@ -122,7 +122,10 @@ fn add_update_remove_command_sequences() {
 
     apply_scope(&w.cx(Scope::System), backends, &[desired(svc("/bin/web"))]).unwrap();
     assert!(fs::read_to_string(&unit).unwrap().contains("ExecStart=/bin/web\n"));
-    assert_eq!(w.runner.lines(), ["systemctl daemon-reload", "systemctl enable --now fspec-web.service"]);
+    assert_eq!(
+        w.runner.lines(),
+        ["systemctl daemon-reload", "systemctl enable fspec-web.service", "systemctl start fspec-web.service"]
+    );
 
     w.runner.calls.lock().unwrap().clear();
     apply_scope(&w.cx(Scope::System), backends, &[desired(svc("/bin/web2"))]).unwrap();
@@ -132,7 +135,10 @@ fn add_update_remove_command_sequences() {
     w.runner.calls.lock().unwrap().clear();
     let job = resource(json!({"kind": "timer", "name": "job", "exec": "/bin/job", "schedule": "@daily"}));
     apply_scope(&w.cx(Scope::System), backends, &[desired(svc("/bin/web2")), desired(job)]).unwrap();
-    assert_eq!(w.runner.lines(), ["systemctl daemon-reload", "systemctl enable --now fspec-job.timer"]);
+    assert_eq!(
+        w.runner.lines(),
+        ["systemctl daemon-reload", "systemctl enable fspec-job.timer", "systemctl start fspec-job.timer"]
+    );
     assert!(timer_unit.exists());
 
     w.runner.calls.lock().unwrap().clear();
@@ -140,9 +146,11 @@ fn add_update_remove_command_sequences() {
     assert_eq!(
         w.runner.lines(),
         [
-            "systemctl disable --now fspec-web.service",
+            "systemctl stop fspec-web.service",
+            "systemctl disable fspec-web.service",
             "systemctl daemon-reload",
-            "systemctl disable --now fspec-job.timer",
+            "systemctl stop fspec-job.timer",
+            "systemctl disable fspec-job.timer",
             "systemctl daemon-reload",
         ]
     );
@@ -157,7 +165,11 @@ fn user_units_use_the_user_manager() {
     assert!(w.paths.home.join(".config/systemd/user/fspec-syncthing.service").exists());
     assert_eq!(
         w.runner.lines(),
-        ["systemctl --user daemon-reload", "systemctl --user enable --now fspec-syncthing.service"]
+        [
+            "systemctl --user daemon-reload",
+            "systemctl --user enable fspec-syncthing.service",
+            "systemctl --user start fspec-syncthing.service",
+        ]
     );
 }
 
@@ -169,7 +181,7 @@ fn failed_enable_rolls_back_files_and_replays_undo() {
     w.runner.calls.lock().unwrap().clear();
 
     let job = resource(json!({"kind": "timer", "name": "job", "exec": "/bin/job", "schedule": "@daily"}));
-    w.runner.respond("systemctl enable --now fspec-job.timer", Output { status: 1, ..Output::default() });
+    w.runner.respond("systemctl start fspec-job.timer", Output { status: 1, ..Output::default() });
     let err = apply_scope(&w.cx(Scope::System), backends, &[desired(svc("/bin/web")), desired(job)]).unwrap_err();
     assert!(format!("{err:#}").contains("rolled back"), "{err:#}");
     assert!(!w.paths.root.join("etc/systemd/system/fspec-job.timer").exists());
@@ -177,8 +189,10 @@ fn failed_enable_rolls_back_files_and_replays_undo() {
         w.runner.lines(),
         [
             "systemctl daemon-reload",
-            "systemctl enable --now fspec-job.timer",
-            "systemctl disable --now fspec-job.timer",
+            "systemctl enable fspec-job.timer",
+            "systemctl start fspec-job.timer",
+            "systemctl stop fspec-job.timer",
+            "systemctl disable fspec-job.timer",
             "systemctl daemon-reload",
         ]
     );

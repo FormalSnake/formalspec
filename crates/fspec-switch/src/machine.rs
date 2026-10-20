@@ -27,8 +27,16 @@ pub struct Machine {
     pub boot_prefix: String,
 }
 
+/// A tool that is not installed answers no, like one that fails: Debian ships no `bootctl` unless
+/// systemd-boot is installed.
 fn probe(runner: &dyn Runner, cmd: Cmd) -> Result<Option<String>> {
-    let out = runner.run(&cmd)?;
+    let out = match runner.run(&cmd) {
+        Ok(out) => out,
+        Err(e) if e.downcast_ref::<std::io::Error>().is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) => {
+            return Ok(None);
+        }
+        Err(e) => return Err(e),
+    };
     Ok((out.status == 0).then(|| out.stdout.trim().to_string()))
 }
 

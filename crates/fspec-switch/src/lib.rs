@@ -12,7 +12,7 @@ use anyhow::{Result, bail};
 use fspec_core::runner::{Cmd, Runner};
 
 pub use bootc::{ResetVar, has_staged, is_bootc, reset_var, to_image};
-pub use classic::{Target, switch_distro};
+pub use classic::{Target, switch_distro, title};
 pub use forget::forget;
 pub use machine::{Bootloader, Machine, assumed, detect};
 

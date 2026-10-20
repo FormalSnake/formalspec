@@ -94,7 +94,8 @@ fn kernel_globs(distro: &str) -> (&'static str, &'static str) {
     }
 }
 
-fn title(distro: &str) -> String {
+/// The boot menu name of `distro`'s entry, e.g. `Void (fspec)`.
+pub fn title(distro: &str) -> String {
     let mut c = distro.chars();
     let first = c.next().map(|f| f.to_uppercase().collect::<String>()).unwrap_or_default();
     format!("{first}{} (fspec)", c.as_str())
@@ -167,7 +168,8 @@ pub fn switch_distro(paths: &Paths, m: &Machine, t: &Target) -> Result<Plan> {
         format!("{uuid} / btrfs subvol={new},compress=zstd 0 0\n{uuid} /home btrfs subvol={home},compress=zstd 0 0\n");
     plan.run(Cmd::new("tee").arg(format!("{root}/etc/fstab")).stdin(fstab));
 
-    for (src, dst) in [("/dev", "dev"), ("/sys", "sys")] {
+    // The shared home goes in before the apply, so a declared user's home lands in it.
+    for (src, dst) in [("/home", "home"), ("/dev", "dev"), ("/sys", "sys")] {
         let dst = format!("{root}/{dst}");
         plan.run(Cmd::new("mount").arg("--rbind").arg(s(&paths.system(src))).arg(&dst));
         plan.run(Cmd::new("mount").arg("--make-rslave").arg(&dst));
@@ -184,7 +186,9 @@ pub fn switch_distro(paths: &Paths, m: &Machine, t: &Target) -> Result<Plan> {
             .args(["/usr/local/bin/fspec", "--spec"])
             .arg(format!("/var/lib/fspec/spec/{}", t.spec_file))
             .args(["apply", "--local", "--scope", "system", "--host", t.host])
-            .env("HOME", "/root"),
+            .env("HOME", "/root")
+            // The running distro's PATH can miss the new root's tool dirs: Arch has no /usr/sbin.
+            .env("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"),
     );
 
     boot_entry(&mut plan, paths, m, t.distro, &root);
