@@ -1,0 +1,43 @@
+[[pkg]]
+name = "dev-tools-arch"
+source = "pacman:jq,ripgrep"
+
+[[pkg]]
+name = "dev-tools-debian"
+source = "apt:jq,ripgrep"
+
+[[pkg]]
+name = "dev-tools-fedora"
+source = "dnf:jq,ripgrep"
+
+[[pkg]]
+name = "dev-tools-void"
+source = "xbps:jq,ripgrep"
+
+[[pkg]]
+name = "htop-arch"
+source = "pacman:htop"
+version = "3.5.3-1"
+
+[pkg.x86_64-linux]
+url = "https://geo.mirror.pkgbuild.com/extra/os/x86_64/htop-3.5.3-1-x86_64.pkg.tar.zst"
+hash = "sha256-8hZhvAIp7475sYmLYbN7zYT8wzTAH3JNGE4iCrqJ/aY="
+
+[[pkg]]
+name = "htop-debian"
+source = "apt:htop"
+
+[[pkg]]
+name = "htop-fedora"
+source = "dnf:htop"
+
+[[pkg]]
+name = "htop-void"
+source = "xbps:htop"
+version = "3.5.3_1"
+
+[pkg.x86_64-linux]
+url = "https://repo-default.voidlinux.org/current/htop-3.5.3_1.x86_64.xbps"
+hash = "sha256-KG3+aFR3xeuhdA4rUVcMmKH0b2wsry4CSvIJ9t7aMOg="
+
+[system]

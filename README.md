@@ -11,7 +11,7 @@
 
 [![Rust](https://img.shields.io/badge/built_with-rust-4a9eda?style=for-the-badge&labelColor=161616&logo=rust&logoColor=white)](docs/design.md)
 [![Config](https://img.shields.io/badge/config-starlark-4a9eda?style=for-the-badge&labelColor=161616)](docs/design.md#config-language-starlark)
-[![Status](https://img.shields.io/badge/status-untested-d3a35f?style=for-the-badge&labelColor=161616)](docs/design.md#build-order)
+[![Status](https://img.shields.io/badge/status-early-d3a35f?style=for-the-badge&labelColor=161616)](docs/design.md#build-order)
 [![License](https://img.shields.io/badge/license-MIT-cccccc?style=for-the-badge&labelColor=161616)](LICENSE)
 
 Declare your machines in code and keep them identical, on any Linux distro
@@ -35,10 +35,13 @@ Claude Code, keep doing that.
 └──────────────────────┘                 └──────────────────────────┘
 ```
 
-**Untested on real hosts.** Every step of the build order is implemented and
-covered by tests that run against temp roots, with package managers, init
-systems and bootc calls recorded instead of run. Nothing has converged a live
-machine yet. [`docs/design.md`](docs/design.md) is the spec.
+**Early.** Every step of the build order is implemented. Apply, drift repair,
+removal, rollback and `gc` have run for real on macOS and on Fedora 44, Arch,
+Debian 13 and Void (systemd and runit) in containers, using
+[`examples/live-macos`](examples/live-macos) and
+[`examples/live-linux`](examples/live-linux). bootc images, remote apply and
+`fspec switch` have only run against temp roots so far.
+[`docs/design.md`](docs/design.md) is the spec.
 
 ## What it manages
 

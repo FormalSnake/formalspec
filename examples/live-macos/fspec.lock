@@ -1,0 +1,11 @@
+[[pkg]]
+name = "ripgrep"
+source = "aqua:ripgrep"
+version = "15.2.0"
+
+[pkg.aarch64-darwin]
+url = "https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-aarch64-apple-darwin.tar.gz"
+hash = "sha256-N1Cy6T834MaSZX2ldNcBmhAcAITaBaeQyD/TNbrZc+Q="
+bins = ["ripgrep-15.2.0-aarch64-apple-darwin/rg"]
+
+[system]

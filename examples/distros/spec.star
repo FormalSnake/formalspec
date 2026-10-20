@@ -1,11 +1,10 @@
 def dev_tools(host):
-    if host.distro == "fedora":
-        return [pkg("dev-tools", source = dnf(["jq", "ripgrep"])), pkg("htop", source = dnf())]
-    if host.distro == "arch":
-        return [pkg("dev-tools", source = pacman(["jq", "ripgrep"])), pkg("htop", source = pacman())]
-    if host.distro == "debian":
-        return [pkg("dev-tools", source = apt(["jq", "ripgrep"])), pkg("htop", source = apt())]
-    return [pkg("dev-tools", source = xbps(["jq", "ripgrep"])), pkg("htop", source = xbps())]
+    # The lock holds one source per package name, so each distro's packages get their own name.
+    mgr = {"fedora": dnf, "arch": pacman, "debian": apt, "void": xbps}[host.distro]
+    return [
+        pkg("dev-tools-" + host.distro, source = mgr(["jq", "ripgrep"])),
+        pkg("htop-" + host.distro, source = mgr(["htop"])),
+    ]
 
 hosts = [
     host(
