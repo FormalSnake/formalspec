@@ -11,6 +11,9 @@ use crate::facts::Init;
 #[serde(deny_unknown_fields)]
 pub struct Host {
     pub name: String,
+    /// The ssh alias `fspec apply` reaches this host by, default the host name.
+    #[serde(default)]
+    pub ssh: Option<String>,
     /// `<arch>-<os>`, e.g. `x86_64-linux`.
     pub platform: String,
     #[serde(default)]

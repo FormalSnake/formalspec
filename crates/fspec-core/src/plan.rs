@@ -2,14 +2,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use anyhow::{Result, bail};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::resource::{Desired, Key, Resource, Scope};
 use crate::state::State;
 
 /// The config-level difference between a host's spec and what its state files say was applied.
-#[derive(Serialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Plan {
     pub host: String,
     pub changes: Vec<Change>,
@@ -18,7 +18,7 @@ pub struct Plan {
     pub unsupported: Vec<String>,
 }
 
-#[derive(Serialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Change {
     pub key: Key,
     pub scope: Scope,
@@ -27,7 +27,7 @@ pub struct Change {
     pub detail: String,
 }
 
-#[derive(Serialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum Action {
     Add,

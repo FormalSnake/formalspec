@@ -9,6 +9,7 @@ use fspec_core::facts::{Facts, local_hostname};
 use fspec_core::fetch::LiveFetch;
 use fspec_core::runner::{Cmd, LiveRunner, LogRunner, Runner};
 use fspec_core::{Cx, Host, Lock, Paths, Plan, Scope, State};
+use fspec_remote::{Planned, Probe, Remote, Target};
 
 #[derive(Parser)]
 #[command(version, about = "Declare your machines in Starlark and keep them identical")]
@@ -34,13 +35,28 @@ enum Command {
         #[arg(long)]
         host: Option<String>,
         /// Print the plan as JSON.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "all")]
         json: bool,
+        /// Plan every host in the spec, asking each remote host over ssh.
+        #[arg(long, conflicts_with = "host")]
+        all: bool,
+        /// Ship a spec tree with uncommitted changes to remote hosts anyway.
+        #[arg(long)]
+        dirty: bool,
     },
-    /// Converge this host.
+    /// Converge a host, over ssh when it is not this machine.
     Apply {
         #[arg(long)]
         host: Option<String>,
+        /// Apply every host in the spec, remote ones first and this machine last; stops at the first failure.
+        #[arg(long, conflicts_with = "host")]
+        all: bool,
+        /// Ship a spec tree with uncommitted changes to remote hosts anyway.
+        #[arg(long)]
+        dirty: bool,
+        /// Apply on this machine whatever the host is called. Set on the remote end of an ssh apply.
+        #[arg(long, hide = true)]
+        local: bool,
         /// Apply one scope only. Without it, the system scope runs (through sudo when needed),
         /// then the user scope.
         #[arg(long)]
@@ -69,6 +85,12 @@ enum Command {
         host: Option<String>,
         #[arg(long)]
         scope: Option<ScopeArg>,
+    },
+    /// Print what this machine is, as `apply` compares it with the declaration.
+    #[command(hide = true)]
+    Facts {
+        #[arg(long)]
+        json: bool,
     },
     /// Print shell code that puts `.fspec.toml` pinned tools on PATH. Run it from the shell's rc file.
     ShellHook { shell: ShellArg },
@@ -110,16 +132,13 @@ fn main() -> Result<()> {
     let spec_path = std::path::absolute(&cli.spec)?;
     let spec_dir = spec_path.parent().context("spec has no parent directory")?.to_path_buf();
     match &cli.command {
-        Command::Plan { host, json } => {
+        Command::Plan { host, json, all, dirty } => {
             let spec = fspec_eval::evaluate(&spec_path)?;
-            let host = select(&spec, host.as_deref(), &paths)?;
-            let env = Env::new(&paths, host, &spec_dir)?;
-            let mut plans = Vec::new();
-            for scope in SCOPES {
-                let state = State::load(&state_dir(&paths, scope).join("state.json"))?;
-                plans.push(plan_scope(&env.cx(scope, &state), &backends::all(), &host.desired(), &state)?);
+            if *all {
+                return plan_all(&spec, &paths, &spec_path, *dirty);
             }
-            let plan = merge(plans);
+            let host = select(&spec, host.as_deref(), &paths)?;
+            let plan = plan_local(&paths, host, &spec_dir)?;
             if *json {
                 println!("{}", serde_json::to_string_pretty(&plan)?);
             } else {
@@ -145,21 +164,29 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
-        Command::Apply { host, scope } => {
+        Command::Apply { host, all, dirty, local, scope } => {
             let spec = fspec_eval::evaluate(&spec_path)?;
-            let host = select(&spec, host.as_deref(), &paths)?;
-            let env = Env::new(&paths, host, &spec_dir)?;
-            let scopes: Vec<Scope> = scope.map(|s| vec![s.into()]).unwrap_or(SCOPES.to_vec());
-            for scope in scopes {
-                if scope == Scope::System && is_live(&paths) && !is_root(env.runner.as_ref())? {
-                    sudo_system(&spec_path, &host.name, &paths, &["apply"])?;
-                    continue;
+            let this = local_hostname();
+            let remote = Remote {
+                runner: &LiveRunner,
+                spec_dir: spec_dir.clone(),
+                spec_file: file_name(&spec_path)?,
+                dirty: *dirty,
+            };
+            let apply_one = |h: &Host| -> Result<()> {
+                match remote_alias(h, &this, &paths, *local) {
+                    Some(alias) => remote.apply(h, &alias, scope.map(scope_name)),
+                    None => apply_local(&paths, &spec_path, &spec_dir, h, *scope),
                 }
-                let state = State::load(&state_dir(&paths, scope).join("state.json"))?;
-                let plan = apply_scope(&env.cx(scope, &state), &backends::all(), &host.desired())?;
-                println!("{plan}");
+            };
+            if *all {
+                if !is_live(&paths) {
+                    bail!("--all applies real machines; it cannot run under --root");
+                }
+                return fspec_remote::apply_all(&spec.hosts, &this, apply_one);
             }
-            Ok(())
+            let host = select(&spec, host.as_deref(), &paths)?;
+            apply_one(host)
         }
         Command::Adopt { path, host } => {
             let spec = fspec_eval::evaluate(&spec_path)?;
@@ -201,6 +228,15 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
+        Command::Facts { json } => {
+            let probe = Probe::local(local_hostname());
+            if *json {
+                println!("{}", serde_json::to_string(&probe)?);
+            } else {
+                println!("{}: {}/{}", probe.hostname, probe.platform, probe.distro);
+            }
+            Ok(())
+        }
         Command::ShellHook { shell } => {
             let shell = match shell {
                 ShellArg::Fish => fspec_store::Shell::Fish,
@@ -217,6 +253,78 @@ fn main() -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn scope_name(s: ScopeArg) -> &'static str {
+    match s {
+        ScopeArg::System => "system",
+        ScopeArg::User => "user",
+    }
+}
+
+fn file_name(spec_path: &Path) -> Result<String> {
+    Ok(spec_path.file_name().context("spec has no file name")?.to_string_lossy().into_owned())
+}
+
+/// The ssh alias when `host` is another machine. A rooted run is always a local dry run.
+fn remote_alias(host: &Host, this: &str, paths: &Paths, local: bool) -> Option<String> {
+    match fspec_remote::target(host, this) {
+        Target::Remote { alias } if is_live(paths) && !local => Some(alias),
+        _ => None,
+    }
+}
+
+fn plan_local(paths: &Paths, host: &Host, spec_dir: &Path) -> Result<Plan> {
+    let env = Env::new(paths, host, spec_dir)?;
+    let mut plans = Vec::new();
+    for scope in SCOPES {
+        let state = State::load(&state_dir(paths, scope).join("state.json"))?;
+        plans.push(plan_scope(&env.cx(scope, &state), &backends::all(), &host.desired(), &state)?);
+    }
+    Ok(merge(plans))
+}
+
+fn plan_all(spec: &fspec_eval::Spec, paths: &Paths, spec_path: &Path, dirty: bool) -> Result<()> {
+    let spec_dir = spec_path.parent().context("spec has no parent directory")?;
+    let this = local_hostname();
+    let remote =
+        Remote { runner: &LiveRunner, spec_dir: spec_dir.to_path_buf(), spec_file: file_name(spec_path)?, dirty };
+    let mut failed = 0;
+    for host in &spec.hosts {
+        let outcome = match remote_alias(host, &this, paths, false) {
+            Some(alias) => remote.plan(host, &alias).map(|p| match p {
+                Planned::Plan(plan) => plan.to_string(),
+                Planned::Unreachable => format!("host {}\n  unreachable, skipped", host.name),
+            }),
+            None => check_declared(host).and_then(|()| plan_local(paths, host, spec_dir)).map(|p| p.to_string()),
+        };
+        match outcome {
+            Ok(text) => println!("{text}"),
+            Err(e) => {
+                failed += 1;
+                println!("host {}\n  error: {e:#}", host.name);
+            }
+        }
+    }
+    if failed > 0 {
+        bail!("{failed} host(s) could not be planned");
+    }
+    Ok(())
+}
+
+fn apply_local(paths: &Paths, spec_path: &Path, spec_dir: &Path, host: &Host, scope: Option<ScopeArg>) -> Result<()> {
+    let env = Env::new(paths, host, spec_dir)?;
+    let scopes: Vec<Scope> = scope.map(|s| vec![s.into()]).unwrap_or(SCOPES.to_vec());
+    for scope in scopes {
+        if scope == Scope::System && is_live(paths) && !is_root(env.runner.as_ref())? {
+            sudo_system(spec_path, &host.name, paths, &["apply", "--local"])?;
+            continue;
+        }
+        let state = State::load(&state_dir(paths, scope).join("state.json"))?;
+        let plan = apply_scope(&env.cx(scope, &state), &backends::all(), &host.desired())?;
+        println!("{plan}");
+    }
+    Ok(())
 }
 
 fn adopt(env: &Env, host: &Host, path: &str) -> Result<()> {
