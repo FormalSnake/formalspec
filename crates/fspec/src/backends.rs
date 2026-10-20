@@ -1,7 +1,9 @@
 use fspec_core::Backend;
 use fspec_files::FileBackend;
 use fspec_image::ImageBackend;
-use fspec_os::{DefaultsBackend, LaunchdBackend, SystemdBackend, UsersBackend};
+use fspec_os::{
+    DefaultsBackend, DinitBackend, LaunchdBackend, OpenrcBackend, RunitBackend, S6Backend, SystemdBackend, UsersBackend,
+};
 use fspec_pkgmgr::{BrewBackend, DnfBackend, FlatpakBackend};
 use fspec_store::StoreBackend;
 
@@ -15,6 +17,10 @@ pub fn all() -> Vec<&'static dyn Backend> {
         &BrewBackend,
         &DnfBackend,
         &SystemdBackend,
+        &RunitBackend,
+        &OpenrcBackend,
+        &DinitBackend,
+        &S6Backend,
         &LaunchdBackend,
         &DefaultsBackend,
         &ImageBackend,

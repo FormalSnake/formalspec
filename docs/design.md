@@ -385,12 +385,14 @@ service("syncthing", exec = "syncthing serve --no-browser",
 | Init | Rendered as |
 | --- | --- |
 | systemd | unit files, user units under `~/.config/systemd/user` |
-| runit (Void) | `/etc/sv/<name>/run`, linked into `/var/service`; user services under a per-user `runsvdir ~/.local/service` |
-| OpenRC, dinit, s6 | their service scripts |
+| runit (Void) | `/etc/sv/fspec-<name>/run`, linked into `/var/service`; user services under a per-user `runsvdir ~/.local/service` |
+| OpenRC | `/etc/init.d/fspec-<name>` with `supervise-daemon`; no user services |
+| dinit | `/etc/dinit.d/fspec-<name>`, user services in `~/.config/dinit.d` |
+| s6 | an s6-rc longrun source directory under `/etc/s6/sv`, recompiled on every change; no user services |
 | launchd | plists in `/Library/LaunchDaemons` or `~/Library/LaunchAgents` |
 
 A timer's `schedule` is a five-field cron expression or one of `@hourly`,
-`@daily`, `@weekly` and `@monthly`. Timers become systemd timers, cron entries (snooze or cronie) or launchd
+`@daily`, `@weekly` and `@monthly`. Timers become systemd timers, cron entries or launchd
 calendar intervals. Features only systemd has (socket activation, cgroup
 limits, `graphical-session.target`) go under `systemd = {...}`; on another init
 `plan` fails and says which field, rather than dropping it.
@@ -411,6 +413,60 @@ launchd jobs are `fspec.<name>` plists. `exec` is split with shell rules into
 runs as `/bin/sh -c`. `after` and `description` have no launchd equivalent and
 are ignored. A timer becomes one `StartCalendarInterval` entry per combination of
 listed values, capped at 64 entries.
+
+runit, OpenRC, dinit and s6 share two rules. `after = ["network"]` maps where the
+init has a network service (OpenRC `need net`, dinit `depends-on = network` for
+system services) and is ignored on runit and s6; a literal `*.target` fails
+`plan`. Another service name orders after `fspec-<name>`. `description` is
+written where the init has a place for it (OpenRC, a dinit comment) and dropped
+elsewhere. `exec` is run as written by runit and s6 (`exec <exec>` at the end of
+a `#!/bin/sh` script with `exec 2>&1` and `export K=V` lines before it). OpenRC
+and dinit get an argument vector: shell syntax runs as `/bin/sh -c`, a bare
+command name goes through `/usr/bin/env`, and dinit sets `env` through a leading
+`/usr/bin/env K=V`.
+
+runit services are `/etc/sv/fspec-<name>/run`, linked into `/var/service`.
+runsvdir starts a new link within five seconds, so an add runs no `sv` command;
+an update runs `sv restart` and a removal `sv down` before unlinking. runit
+always restarts, so `restart = "no"` adds a `finish` running `sv down .` and
+`on_failure` one that does so only on exit status 0. A dependency becomes an
+`sv check ../fspec-<dep> || exit 1` line in `run`. User services are plain
+directories in `~/.local/service`, scanned by `runsvdir` running as the system
+service `fspec-runsvdir-<user>` (`/etc/sv/fspec-runsvdir-<user>/run`, started
+with `chpst -u <user>`). The first user service creates it, so that first apply
+needs the privileges to write `/etc/sv` and `/var/service`; the runsvdir service
+is not part of the user state and stays when the last user service goes.
+
+OpenRC services are `/etc/init.d/fspec-<name>` (`#!/sbin/openrc-run`) with
+`supervisor=supervise-daemon`, `command`, `command_args` and a `depend()` block,
+added with `rc-update add fspec-<name> default` and started with `rc-service`.
+supervise-daemon respawns on any exit, so `on_failure` behaves as `always`;
+`restart = "no"` drops the supervisor and uses `command_background`. OpenRC has
+no user services, so `user = True` fails `plan`.
+
+dinit services are `/etc/dinit.d/fspec-<name>` (or `~/.config/dinit.d/`) with
+`type = process`, `command`, `restart = true | on-failure | false` and
+`depends-on`. Apply runs `dinitctl [--user] enable` and `start`; an update runs
+`reload` then `restart`, since dinit keeps the description it loaded. `enable`
+needs the `boot` service to have a `waits-for.d` directory.
+
+s6 services are s6-rc longrun source directories, `/etc/s6/sv/fspec-<name>/`
+with `type`, `run`, an optional `finish` (exit 125 stops s6-supervise from
+restarting) and `dependencies.d/fspec-<dep>`. Every fspec service is also listed
+in the bundle `/etc/s6/sv/fspec`, which the host's boot bundle must include.
+After the files change, fspec compiles all of `/etc/s6/sv` into
+`/etc/s6/db/fspec-g<generation>-<a|r>` with `s6-rc-compile`, switches to it with
+`s6-rc-update`, and starts the bundle with `s6-rc -u change fspec`. Old
+databases stay in `/etc/s6/db`. fspec sets up no per-user s6 tree, so
+`user = True` fails `plan`.
+
+Timers on these four inits are cron entries with the schedule written as given.
+A system timer is `/etc/cron.d/fspec-<name>` (run as root); a user timer is a
+block between `# BEGIN fspec:<name>` and `# END fspec:<name>` in the user's
+crontab, read with `crontab -l` and written with `crontab -`. A timer name with a
+`.` fails `plan` (run-parts crons skip such files), and `%` in `exec` is
+escaped. fspec assumes a cron that reads `/etc/cron.d` (cronie, vixie-cron) and
+does not detect the flavour; dcron, busybox crond and snooze are out of scope.
 
 `user` creates Linux accounts with `useradd` and adds missing groups with
 `usermod -aG` (it never removes a group). On macOS it only sets the login shell

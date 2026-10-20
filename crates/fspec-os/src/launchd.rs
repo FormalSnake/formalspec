@@ -1,15 +1,14 @@
 //! launchd plists for `service` and `timer` resources.
 //!
-//! `exec` is split with shell rules into `ProgramArguments`. When it holds shell syntax (pipes,
-//! redirects, `$`, globs, `;`, `&`, backticks) the whole string runs as `/bin/sh -c <exec>`
-//! instead. launchd does not search `PATH`, so a bare command name goes through `/usr/bin/env`.
+//! `exec` becomes `ProgramArguments` through [`argv`](crate::argv).
 //! Launchd has no ordering between jobs and no description key, so `after` and `description`
 //! have no effect there.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use fspec_core::apply::{Backend, Cx, Op, Phase, Records};
 use fspec_core::facts::Init;
 use fspec_core::journal::{Journal, Undo, remove_any};
@@ -21,7 +20,7 @@ use plist::{Dictionary, Value};
 use serde_json::{Map, json};
 
 use crate::cron::Schedule;
-use crate::{check_line, check_name, read_or_empty, reject_systemd_extras, write_file};
+use crate::{argv, check_name, read_or_empty, reject_systemd_extras, write_file};
 
 pub struct LaunchdBackend;
 
@@ -201,20 +200,7 @@ fn timer(t: &Timer, d: &mut Dictionary) -> Result<()> {
 }
 
 fn program_arguments(exec: &str) -> Result<Value> {
-    check_line("exec", exec)?;
-    let exec = exec.trim();
-    let words = if exec.contains(['|', '&', ';', '<', '>', '(', ')', '$', '`', '*', '?', '[', '{', '~', '!', '#']) {
-        vec!["/bin/sh".to_string(), "-c".into(), exec.into()]
-    } else {
-        let mut words = shell_words::split(exec).with_context(|| format!("exec `{exec}`"))?;
-        match words.first() {
-            None => bail!("exec is empty"),
-            Some(first) if !first.starts_with('/') => words.insert(0, "/usr/bin/env".into()),
-            Some(_) => {}
-        }
-        words
-    };
-    Ok(Value::Array(words.into_iter().map(Value::from).collect()))
+    Ok(Value::Array(argv(exec, &BTreeMap::new())?.into_iter().map(Value::from).collect()))
 }
 
 #[cfg(test)]
