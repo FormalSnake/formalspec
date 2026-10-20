@@ -295,6 +295,30 @@ calendar intervals. Features only systemd has (socket activation, cgroup
 limits, `graphical-session.target`) go under `systemd = {...}`; on another init
 `plan` fails and says which field, rather than dropping it.
 
+systemd units are `fspec-<name>.service` (and `.timer`) under
+`/etc/systemd/system` or `~/.config/systemd/user`. A bare command name in `exec`
+runs through `/usr/bin/env`, since systemd does not search `PATH`. `after =
+["network"]` becomes `network-online.target`, another name `fspec-<name>.service`,
+and a literal `*.target` stays as written. Under `systemd = {...}`, the keys
+`unit`, `service` and `install` are dicts merged into those sections and any
+other key is a `[Service]` directive; an extra replaces a generated directive of
+the same name, and a list repeats the directive. A timer is a oneshot service plus
+a timer with `Persistent=true`. A cron schedule that restricts both day-of-month
+and day-of-week fails `plan` (cron ORs them, systemd ANDs them).
+
+launchd jobs are `fspec.<name>` plists. `exec` is split with shell rules into
+`ProgramArguments`; when it holds shell syntax (pipes, redirects, `$`, globs) it
+runs as `/bin/sh -c`. `after` and `description` have no launchd equivalent and
+are ignored. A timer becomes one `StartCalendarInterval` entry per combination of
+listed values, capped at 64 entries.
+
+`user` creates Linux accounts with `useradd` and adds missing groups with
+`usermod -aG` (it never removes a group). On macOS it only sets the login shell
+and checks the account and uid; it never creates accounts. Removing a `user`
+stops managing it and leaves the account. `defaults` journals the previous value
+of each key so a failed apply restores it, and removal deletes a key only while
+it still holds the value fspec wrote.
+
 ## System layer
 
 The system layer is the kernel, bootloader, drivers and base packages.
