@@ -11,6 +11,7 @@ anyhow.workspace = true
 clap.workspace = true
 fspec-core.workspace = true
 fspec-eval.workspace = true
+fspec-store.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
