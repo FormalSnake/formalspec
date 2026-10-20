@@ -1,0 +1,17 @@
+[package]
+name = "fspec-os"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+fspec-core.workspace = true
+plist.workspace = true
+serde_json.workspace = true
+shell-words.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+fspec-eval.workspace = true

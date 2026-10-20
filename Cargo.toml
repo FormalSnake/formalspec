@@ -25,6 +25,7 @@ plist = "1.10.2"
 serde_yaml_ng = "0.10.0"
 similar = "3.2.0"
 serde_yaml = "0.9.34"
+shell-words = "1.1.1"
 starlark = "0.14.2"
 tar = "0.4.46"
 tempfile = "3"
@@ -37,3 +38,4 @@ fspec-store = { path = "crates/fspec-store" }
 fspec-files = { path = "crates/fspec-files" }
 fspec-sources = { path = "crates/fspec-sources" }
 fspec-pkgmgr = { path = "crates/fspec-pkgmgr" }
+fspec-os = { path = "crates/fspec-os" }

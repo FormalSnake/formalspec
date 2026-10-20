@@ -1133,6 +1133,7 @@ dependencies = [
  "fspec-core",
  "fspec-eval",
  "fspec-files",
+ "fspec-os",
  "fspec-pkgmgr",
  "fspec-sources",
  "fspec-store",
@@ -1180,6 +1181,19 @@ dependencies = [
  "similar",
  "tempfile",
  "toml 1.1.8+spec-1.1.0",
+]
+
+[[package]]
+name = "fspec-os"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fspec-core",
+ "fspec-eval",
+ "plist",
+ "serde_json",
+ "shell-words",
+ "tempfile",
 ]
 
 [[package]]
@@ -2811,6 +2825,12 @@ dependencies = [
  "digest 0.10.7",
  "keccak",
 ]
+
+[[package]]
+name = "shell-words"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc6fe69c597f9c37bfeeeeeb33da3530379845f10be461a66d16d03eca2ded77"
 
 [[package]]
 name = "shlex"

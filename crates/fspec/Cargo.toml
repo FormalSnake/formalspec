@@ -15,6 +15,7 @@ fspec-store.workspace = true
 fspec-files.workspace = true
 fspec-sources.workspace = true
 fspec-pkgmgr.workspace = true
+fspec-os.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
