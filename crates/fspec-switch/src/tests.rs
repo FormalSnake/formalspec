@@ -412,6 +412,8 @@ fn reset_var_rejects_relative_and_dotdot_paths() {
 }
 
 #[test]
+// The script uses GNU `rm --one-file-system`; it only ever runs on bootc Linux hosts.
+#[cfg(target_os = "linux")]
 fn reset_script_keeps_listed_paths_and_their_parents() {
     let dir = tempfile::tempdir().unwrap();
     let t = dir.path().display().to_string();
