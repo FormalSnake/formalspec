@@ -25,6 +25,9 @@ pub struct Host {
     /// Paths kept when `fspec switch --reset-var` resets `/etc` and `/var`.
     #[serde(default)]
     pub persist: Vec<String>,
+    /// Packages resolve to the newest release at least this old (`3d`, `12h`), unless bleeding.
+    #[serde(default)]
+    pub release_age: Option<String>,
 }
 
 /// A resource as `plan` and the state file see it: flat, with the package that owns it.

@@ -46,6 +46,11 @@ enum Command {
         #[arg(long)]
         scope: Option<ScopeArg>,
     },
+    /// Resolve versions and hashes into fspec.lock, next to the spec.
+    Update {
+        /// Only re-resolve these packages, default every package.
+        pkgs: Vec<String>,
+    },
     /// Pull an app's edit of a managed file back into the repo.
     Adopt {
         /// The file as written in the spec (`~/.config/x`) or its path on disk.
@@ -119,6 +124,24 @@ fn main() -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&plan)?);
             } else {
                 println!("{plan}");
+            }
+            Ok(())
+        }
+        Command::Update { pkgs } => {
+            let spec = fspec_eval::evaluate(&spec_path)?;
+            let lock_path = spec_dir.join("fspec.lock");
+            let old = Lock::load(&lock_path)?;
+            let (fetch, runner) = (LiveFetch::new(), LiveRunner);
+            let result =
+                fspec_sources::update::update(&spec.hosts, &old, pkgs, &fspec_sources::Cx::new(&fetch, &runner))?;
+            if result.lock != old {
+                result.lock.save(&lock_path)?;
+            }
+            for line in &result.changes {
+                println!("{line}");
+            }
+            if !result.errors.is_empty() {
+                bail!("{} package(s) failed:\n{}", result.errors.len(), result.errors.join("\n"));
             }
             Ok(())
         }

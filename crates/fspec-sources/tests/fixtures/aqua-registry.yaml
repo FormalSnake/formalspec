@@ -1,0 +1,50 @@
+packages:
+  - type: github_release
+    repo_owner: BurntSushi
+    repo_name: ripgrep
+    description: fast grep
+    version_constraint: "false"
+    version_overrides:
+      - version_constraint: semver("<= 0.8.1")
+        asset: ripgrep-{{.Version}}-{{.Arch}}-{{.OS}}.{{.Format}}
+        format: tar.gz
+        replacements:
+          amd64: x86_64
+          darwin: apple-darwin
+          linux: unknown-linux-musl
+      - version_constraint: "true"
+        asset: ripgrep-{{.Version}}-{{.Arch}}-{{.OS}}.{{.Format}}
+        format: tar.gz
+        files:
+          - name: rg
+            src: ripgrep-{{.Version}}-{{.Arch}}-{{.OS}}/rg
+        replacements:
+          amd64: x86_64
+          arm64: aarch64
+          darwin: apple-darwin
+          linux: unknown-linux-gnu
+        overrides:
+          - goos: linux
+            goarch: amd64
+            replacements:
+              linux: unknown-linux-musl
+        supported_envs: [darwin, linux, amd64, arm64]
+  - type: github_release
+    repo_owner: cli
+    repo_name: cli
+    aliases:
+      - name: github/gh
+    asset: gh_{{trimV .Version}}_{{.OS}}_{{.Arch}}.{{.Format}}
+    format: tar.gz
+    format_overrides:
+      - goos: darwin
+        format: zip
+    replacements:
+      darwin: macOS
+    files:
+      - name: gh
+        src: gh_{{trimV .Version}}_{{.OS}}_{{.Arch}}/bin/gh
+  - type: github_release
+    repo_owner: sharkdp
+    repo_name: fd
+    asset: fd-{{.Version}}-{{.Arch}}-{{.OS}}.tar.gz

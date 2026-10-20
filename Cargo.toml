@@ -24,6 +24,7 @@ notify = "8.2.0"
 plist = "1.10.2"
 serde_yaml_ng = "0.10.0"
 similar = "3.2.0"
+serde_yaml = "0.9.34"
 starlark = "0.14.2"
 tar = "0.4.46"
 tempfile = "3"
@@ -34,3 +35,4 @@ fspec-core = { path = "crates/fspec-core" }
 fspec-eval = { path = "crates/fspec-eval" }
 fspec-store = { path = "crates/fspec-store" }
 fspec-files = { path = "crates/fspec-files" }
+fspec-sources = { path = "crates/fspec-sources" }
