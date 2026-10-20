@@ -282,10 +282,42 @@ App data is found three ways, in order:
   shows up in `fspec orphans` for you to claim or delete.
 
 Trash lives under `/var/lib/fspec/trash/<generation>/` and
-`~/.local/state/fspec/trash/<generation>/`. `fspec rollback` puts the data back
-with the package. `fspec gc --older-than 14d` deletes old generations, their
-store paths and their trash for good. A package can opt out with
-`keep_data = True`.
+`~/.local/state/fspec/trash/<generation>/`, chosen by where the path lives, with a
+`manifest.json` per generation that remembers each item's package and original
+path. When the system scope trashes a path in the home (Flatpak data), the
+directory is named `system-<generation>`, so it never collides with the user
+scope's own numbering. The engine does the moving, after every backend has
+removed the package and under the apply's journal, so every package source
+behaves the same and a failing apply puts the data back. Plan lists the paths
+that will move on the package's removal line (`data to trash: ...`).
+
+A package that returns, whether through `fspec rollback` or a plain re-add,
+gets back the data the newest generation trashed for it, unless something
+exists at the path again, in which case the trashed copy stays. A package can
+opt out with `keep_data = True`.
+
+Attribution runs during every user-scope apply, even one with nothing to
+change. The user state keeps the set of entries seen under the four XDG
+directories; the first apply only records it, and later ones claim entries
+that are new since and named like a package (its name, a Flatpak id or its last
+segment, an npm scope or the name after it, case-insensitive). Claims live in
+the user state under `data` and are dropped once the package or the path is
+gone. Source-known data without a Flatpak id is a small built-in table of XDG
+directory names keyed by package name; `data = [...]` covers the rest.
+
+`fspec orphans` lists entries directly under those four directories that no
+package claims (declared, source-known or attributed) and no managed file
+sits inside. `fspec orphans --claim <path> <pkg>` records one as the package's
+data. `fspec orphans --delete <path>` moves one to the user trash.
+
+`fspec gc --older-than 14d` (units `s`, `m`, `h`, `d`, `w`) works per scope. A
+generation is kept when it is the current one or its snapshot is newer than
+the cutoff. Everything else last modified at or before the cutoff goes: its
+`generations/<n>.json` snapshot, its trash directory, and, in the system
+scope, store paths that no kept snapshot and nothing under `current` links to,
+plus their `<dir>.json` sidecars and old `generations/<n>` link directories.
+It prints each deletion and the space freed. `--older-than 0s` deletes
+everything the current generation does not need.
 
 ## Files
 
@@ -425,7 +457,10 @@ settings (Secure Boot, TPM) stay manual.
 
 Personal files are never managed. FormalSpec only touches paths it declared or
 attributed to a package, and `protect = ["/home", "/var/home"]` makes it refuse
-any action under those paths. The spec pins your UID so ownership survives a
+any action under those paths. The list is exactly what the host declares, with
+no default. Plan fails on a file, secret or data path under an entry. An entry
+that is an ancestor of the applying user's home leaves that home usable, since
+the spec has to manage it; other users' homes stay refused. The spec pins your UID so ownership survives a
 hop.
 
 Between bootc distros, change `image(base = ...)` and apply. FormalSpec
@@ -485,7 +520,7 @@ A cargo workspace under `crates/`:
 | --- | --- |
 | `fspec-core` | Resource types, host facts, `Paths`, the state file, the lock, the plan diff, the apply engine, the journal, the `Runner` and `Fetch` seams |
 | `fspec-eval` | Starlark builtins and evaluation into `Host` values |
-| `fspec-store` | The store backend: hash check, unpack, generations, `current`, npm and nix packages, project pins |
+| `fspec-store` | The store backend: hash check, unpack, generations, `current`, npm and nix packages, project pins, `gc` |
 | `fspec-sources` | Resolvers (aqua, github, npm, cargo, flatpak, brew, git, nix) and `fspec update` |
 | `fspec` | The CLI |
 

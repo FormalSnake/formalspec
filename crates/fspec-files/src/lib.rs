@@ -43,8 +43,12 @@ impl Backend for FileBackend {
 
     fn check(&self, cx: &Cx, r: &Resource) -> Result<()> {
         match r {
-            Resource::File(f) => check_file(cx, f).with_context(|| f.path.clone()),
+            Resource::File(f) => {
+                cx.check_path(&cx.resolve(&f.path)?).with_context(|| f.path.clone())?;
+                check_file(cx, f).with_context(|| f.path.clone())
+            }
             Resource::Secret(s) => {
+                cx.check_path(&cx.resolve(&s.path)?).with_context(|| s.path.clone())?;
                 parse_perms(&s.perms).with_context(|| s.path.clone())?;
                 require_src(cx, &s.src).with_context(|| s.path.clone())
             }

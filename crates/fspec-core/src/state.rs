@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::Path;
@@ -21,11 +21,19 @@ pub struct State {
     pub generation: u64,
     #[serde(default)]
     pub entries: BTreeMap<Key, Entry>,
+    /// App data attributed to each package, as spec paths (`~/.config/foo`). Only the user state
+    /// has any.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub data: BTreeMap<String, Vec<String>>,
+    /// The entries under the XDG directories at the last user-scope apply; what appears beyond
+    /// them is new. `None` until the first apply, which only takes the baseline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seen: Option<BTreeSet<String>>,
 }
 
 impl Default for State {
     fn default() -> State {
-        State { version: VERSION, generation: 0, entries: BTreeMap::new() }
+        State { version: VERSION, generation: 0, entries: BTreeMap::new(), data: BTreeMap::new(), seen: None }
     }
 }
 

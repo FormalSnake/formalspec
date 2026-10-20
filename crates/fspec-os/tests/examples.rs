@@ -40,6 +40,7 @@ fn apply(host: &str) -> Run {
             fetch: &fetch,
             generation: state.generation + 1,
             scope,
+            protect: &[],
         };
         apply_scope(&cx, &backends, &desired).unwrap();
 

@@ -3,6 +3,7 @@
 //! symlinks into the store and switches `current` to it.
 
 mod archive;
+pub mod gc;
 mod generation;
 mod npm;
 mod pins;

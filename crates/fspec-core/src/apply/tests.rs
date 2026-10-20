@@ -103,6 +103,7 @@ impl World {
             fetch: &self.fetch,
             generation,
             scope,
+            protect: &[],
         }
     }
 
@@ -172,4 +173,145 @@ fn unclaimed_resource_fails_the_plan() {
     assert_eq!(p.unsupported, ["no backend applies pkg:rg on h (fedora, systemd)"]);
     let err = apply_scope(&w.cx(Scope::System), &[&FakeFiles], &[pkg]).unwrap_err();
     assert!(err.to_string().contains("cannot apply"), "{err}");
+}
+
+/// Claims every package and records it, without touching the machine.
+struct FakePkgs;
+
+impl Backend for FakePkgs {
+    fn name(&self) -> &'static str {
+        "fake-pkgs"
+    }
+    fn handles(&self, _cx: &Cx, r: &Resource) -> bool {
+        matches!(r, Resource::Pkg(_))
+    }
+    fn phase(&self) -> Phase {
+        Phase::Packages
+    }
+    fn commit(&self, _cx: &Cx, ops: &[Op], _staging: &Path, _journal: &mut Journal) -> Result<Records> {
+        Ok(ops.iter().filter(|o| !o.is_removal()).map(|o| (o.key.clone(), Map::new())).collect())
+    }
+}
+
+fn pkg(name: &str, extra: serde_json::Value) -> Desired {
+    let mut value = serde_json::json!({"kind": "pkg", "name": name, "source": {"kind": "aqua", "name": name}});
+    value.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+    Desired { resource: serde_json::from_value(value).unwrap(), owner: None }
+}
+
+fn data(w: &World, rel: &str) -> std::path::PathBuf {
+    let path = w.paths.home.join(rel);
+    fs::create_dir_all(&path).unwrap();
+    fs::write(path.join("save"), "game").unwrap();
+    path
+}
+
+const BOTH: &[&dyn Backend] = &[&FakePkgs, &FakeFiles];
+
+#[test]
+fn removing_a_package_trashes_its_data_unless_keep_data() {
+    let w = World::new();
+    let steam = data(&w, ".local/share/Steam");
+    let kept = data(&w, ".local/share/Kept");
+    let want = vec![
+        pkg("steam", serde_json::json!({"data": ["~/.local/share/Steam"]})),
+        pkg("kept", serde_json::json!({"data": ["~/.local/share/Kept"], "keep_data": true})),
+    ];
+    apply_scope(&w.cx(Scope::System), BOTH, &want).unwrap();
+
+    let state = w.state(Scope::System);
+    let plan = plan_scope(&w.cx(Scope::System), BOTH, &[], &state).unwrap();
+    let steam_line = plan.changes.iter().find(|c| c.key.id == "steam").unwrap();
+    assert!(steam_line.detail.contains("data to trash: ~/.local/share/Steam"), "{}", steam_line.detail);
+    assert!(!plan.changes.iter().find(|c| c.key.id == "kept").unwrap().detail.contains("trash"));
+
+    apply_scope(&w.cx(Scope::System), BOTH, &[]).unwrap();
+    assert!(!steam.exists());
+    assert!(kept.join("save").exists());
+    let trashed = w.paths.home.join(".local/state/fspec/trash/system-2/steam/0-Steam/save");
+    assert_eq!(fs::read_to_string(trashed).unwrap(), "game");
+}
+
+#[test]
+fn a_failing_apply_puts_trashed_data_back() {
+    let w = World::new();
+    let steam = data(&w, ".local/share/Steam");
+    let steam_pkg = pkg("steam", serde_json::json!({"data": ["~/.local/share/Steam"]}));
+    apply_scope(&w.cx(Scope::System), BOTH, std::slice::from_ref(&steam_pkg)).unwrap();
+
+    let err = apply_scope(&w.cx(Scope::System), BOTH, &[file("/etc/fail", "x")]).unwrap_err();
+    assert!(format!("{err:#}").contains("rolled back"), "{err:#}");
+    assert_eq!(fs::read_to_string(steam.join("save")).unwrap(), "game");
+    assert_eq!(w.state(Scope::System).generation, 1);
+    assert!(w.state(Scope::System).entries.contains_key(&steam_pkg.resource.key()));
+}
+
+#[test]
+fn a_returning_package_gets_its_data_back() {
+    let w = World::new();
+    let steam = data(&w, ".local/share/Steam");
+    let want = vec![pkg("steam", serde_json::json!({"data": ["~/.local/share/Steam"]}))];
+    apply_scope(&w.cx(Scope::System), BOTH, &want).unwrap();
+    apply_scope(&w.cx(Scope::System), BOTH, &[]).unwrap();
+    assert!(!steam.exists());
+
+    apply_scope(&w.cx(Scope::System), BOTH, &want).unwrap();
+    assert_eq!(fs::read_to_string(steam.join("save")).unwrap(), "game");
+}
+
+#[test]
+fn data_under_a_protected_path_fails_the_plan() {
+    let w = World::new();
+    data(&w, ".local/share/Steam");
+    let want = [pkg("steam", serde_json::json!({"data": ["~/.local/share/Steam"]}))];
+    let protect = ["~/.local/share".to_string()];
+    let cx = Cx { protect: &protect, ..w.cx(Scope::System) };
+    let err = plan_scope(&cx, BOTH, &want, &State::default()).unwrap_err();
+    assert!(format!("{err:#}").contains("protected path"), "{err:#}");
+
+    let other_home = ["/home".to_string()];
+    let cx = Cx { protect: &other_home, ..w.cx(Scope::System) };
+    assert!(cx.check_path(&w.paths.home.join("x")).is_ok(), "the applying user's own home stays usable");
+    assert!(cx.check_path(&w.paths.system("/home/other/x")).is_err());
+    assert!(cx.check_path(&w.paths.system("/home/u/../other/x")).is_err());
+}
+
+#[test]
+fn new_entries_named_like_a_package_are_attributed_and_trashed_with_it() {
+    let w = World::new();
+    let want = vec![pkg("steam", serde_json::json!({}))];
+    fs::create_dir_all(w.paths.home.join(".config/preexisting")).unwrap();
+    apply_scope(&w.cx(Scope::System), BOTH, &want).unwrap();
+    apply_scope(&w.cx(Scope::User), BOTH, &want).unwrap();
+    assert!(w.state(Scope::User).data.is_empty(), "the first user apply only takes the baseline");
+
+    for dir in [".config/Steam", ".cache/steam", ".config/unrelated", ".local/share/preexisting"] {
+        fs::create_dir_all(w.paths.home.join(dir)).unwrap();
+    }
+    apply_scope(&w.cx(Scope::User), BOTH, &want).unwrap();
+    let user = w.state(Scope::User);
+    assert_eq!(user.data["steam"], ["~/.cache/steam", "~/.config/Steam"]);
+
+    let orphans = crate::attribute::orphans(&w.paths, &w.state(Scope::System), &user);
+    assert_eq!(orphans, ["~/.config/preexisting", "~/.config/unrelated", "~/.local/share/preexisting"]);
+
+    apply_scope(&w.cx(Scope::System), BOTH, &[]).unwrap();
+    assert!(!w.paths.home.join(".config/Steam").exists());
+    assert!(!w.paths.home.join(".cache/steam").exists());
+    assert!(w.paths.home.join(".config/unrelated").exists());
+
+    // The next user apply drops claims of packages that are gone.
+    apply_scope(&w.cx(Scope::User), BOTH, &[]).unwrap();
+    assert!(w.state(Scope::User).data.is_empty());
+}
+
+#[test]
+fn claiming_an_orphan_makes_it_the_packages_data() {
+    let w = World::new();
+    fs::create_dir_all(w.paths.home.join(".local/share/oddname")).unwrap();
+    let mut user = State::default();
+    let spec = crate::attribute::claim(&w.paths, &mut user, "~/.local/share/oddname", "steam").unwrap();
+    assert_eq!(spec, "~/.local/share/oddname");
+    assert!(crate::attribute::orphans(&w.paths, &State::default(), &user).is_empty());
+    assert!(crate::attribute::claim(&w.paths, &mut user, "~/Documents", "steam").is_err());
 }

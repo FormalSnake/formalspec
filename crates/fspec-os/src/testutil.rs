@@ -53,6 +53,7 @@ impl World {
             fetch: &self.fetch,
             generation,
             scope,
+            protect: &[],
         }
     }
 }
