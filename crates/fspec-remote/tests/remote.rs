@@ -114,7 +114,7 @@ fn plan_returns_the_remote_plan() {
         panic!("expected a plan")
     };
     assert_eq!(plan.host, "g815");
-    assert!(runner.lines().last().unwrap().ends_with("plan --json --host g815'"));
+    assert!(runner.lines().last().unwrap().ends_with("plan --json --local --host g815'"));
 }
 
 #[test]

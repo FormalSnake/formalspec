@@ -44,6 +44,9 @@ enum Command {
         /// Ship a spec tree with uncommitted changes to remote hosts anyway.
         #[arg(long)]
         dirty: bool,
+        /// Plan on this machine whatever the host is called. Set on the remote end of an ssh plan.
+        #[arg(long, hide = true)]
+        local: bool,
     },
     /// Converge a host, over ssh when it is not this machine.
     Apply {
@@ -234,13 +237,27 @@ fn main() -> Result<()> {
     let spec_path = std::path::absolute(&cli.spec)?;
     let spec_dir = spec_path.parent().context("spec has no parent directory")?.to_path_buf();
     match &cli.command {
-        Command::Plan { host, json, all, dirty } => {
+        Command::Plan { host, json, all, dirty, local } => {
             let spec = fspec_eval::evaluate(&spec_path)?;
             if *all {
                 return plan_all(&spec, &paths, &spec_path, *dirty);
             }
-            let host = select(&spec, host.as_deref(), &paths)?;
-            let plan = plan_local(&paths, host, &spec_dir)?;
+            let host = named(&spec, host.as_deref())?;
+            let plan = match remote_alias(host, &local_hostname(), &paths, *local) {
+                Some(alias) => {
+                    let remote = Remote {
+                        runner: &LiveRunner,
+                        spec_dir: spec_dir.clone(),
+                        spec_file: file_name(&spec_path)?,
+                        dirty: *dirty,
+                    };
+                    match remote.plan(host, &alias)? {
+                        Planned::Plan(plan) => plan,
+                        Planned::Unreachable => bail!("host {} is unreachable over ssh ({alias})", host.name),
+                    }
+                }
+                None => plan_local(&paths, host, &spec_dir)?,
+            };
             if *json {
                 println!("{}", serde_json::to_string_pretty(&plan)?);
             } else {
@@ -373,8 +390,7 @@ fn main() -> Result<()> {
                 }
                 return fspec_remote::apply_all(&spec.hosts, &this, apply_one);
             }
-            let host = select(&spec, host.as_deref(), &paths)?;
-            apply_one(host)
+            apply_one(named(&spec, host.as_deref())?)
         }
         Command::Adopt { path, host } => {
             let spec = fspec_eval::evaluate(&spec_path)?;
@@ -600,6 +616,9 @@ fn remote_alias(host: &Host, this: &str, paths: &Paths, local: bool) -> Option<S
 }
 
 fn plan_local(paths: &Paths, host: &Host, spec_dir: &Path) -> Result<Plan> {
+    if is_live(paths) {
+        check_declared(host)?;
+    }
     let env = Env::new(paths, host, spec_dir)?;
     let mut plans = Vec::new();
     for scope in SCOPES {
@@ -621,7 +640,7 @@ fn plan_all(spec: &fspec_eval::Spec, paths: &Paths, spec_path: &Path, dirty: boo
                 Planned::Plan(plan) => plan.to_string(),
                 Planned::Unreachable => format!("host {}\n  unreachable, skipped", host.name),
             }),
-            None => check_declared(host).and_then(|()| plan_local(paths, host, spec_dir)).map(|p| p.to_string()),
+            None => plan_local(paths, host, spec_dir).map(|p| p.to_string()),
         };
         match outcome {
             Ok(text) => println!("{text}"),
@@ -678,6 +697,9 @@ fn orphans(env: &Env, claim: Option<&[String]>, delete: Option<&str>) -> Result<
 }
 
 fn apply_local(paths: &Paths, spec_path: &Path, spec_dir: &Path, host: &Host, scope: Option<ScopeArg>) -> Result<()> {
+    if is_live(paths) {
+        check_declared(host)?;
+    }
     let env = Env::new(paths, host, spec_dir)?;
     let scopes: Vec<Scope> = scope.map(|s| vec![s.into()]).unwrap_or(SCOPES.to_vec());
     for scope in scopes {
@@ -797,9 +819,14 @@ fn merge(plans: Vec<Plan>) -> Plan {
     all
 }
 
+/// The host named on the command line, or this machine's.
+fn named<'s>(spec: &'s fspec_eval::Spec, host: Option<&str>) -> Result<&'s Host> {
+    spec.host(&host.map(str::to_owned).unwrap_or_else(local_hostname))
+}
+
+/// [`named`], for commands that only ever act on this machine.
 fn select<'s>(spec: &'s fspec_eval::Spec, host: Option<&str>, paths: &Paths) -> Result<&'s Host> {
-    let name = host.map(str::to_owned).unwrap_or_else(local_hostname);
-    let host = spec.host(&name)?;
+    let host = named(spec, host)?;
     if is_live(paths) {
         check_declared(host)?;
     }

@@ -72,7 +72,7 @@ pub fn apply(alias: &str, dest: &str, spec_file: &str, host: &str, scope: Option
 }
 
 pub fn plan(alias: &str, dest: &str, spec_file: &str, host: &str) -> Cmd {
-    batch(alias).arg(fspec(dest, spec_file, &["plan", "--json", "--host", host]))
+    batch(alias).arg(fspec(dest, spec_file, &["plan", "--json", "--local", "--host", host]))
 }
 
 #[cfg(test)]
@@ -157,7 +157,7 @@ mod tests {
         assert!(scoped.args[2].ends_with("apply --local --host g815 --scope user"));
         assert_eq!(
             plan("g815", &dest, "spec.star", "g815").args[5],
-            "fspec --spec \"$HOME/.cache/fspec/spec/abc123\"/spec.star plan --json --host g815"
+            "fspec --spec \"$HOME/.cache/fspec/spec/abc123\"/spec.star plan --json --local --host g815"
         );
     }
 }
