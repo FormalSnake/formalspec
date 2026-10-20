@@ -1,0 +1,107 @@
+use std::fmt;
+
+use anyhow::{Result, bail};
+use serde::{Deserialize, Serialize};
+
+use crate::resource::System;
+
+/// What a spec knows about a host, derived from its `host()` declaration so evaluation stays pure.
+/// Module functions receive this. `apply` probes the machine only to check it matches.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Facts {
+    pub name: String,
+    pub os: Os,
+    /// `x86_64` or `aarch64`.
+    pub arch: String,
+    /// `fedora`, `bazzite`, `arch`, `void`, `macos`, …
+    pub distro: String,
+    pub init: Init,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Os {
+    Linux,
+    Darwin,
+}
+
+impl fmt::Display for Os {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str(match self {
+            Os::Linux => "linux",
+            Os::Darwin => "darwin",
+        })
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Init {
+    Systemd,
+    Runit,
+    Openrc,
+    Dinit,
+    S6,
+    Launchd,
+}
+
+impl fmt::Display for Init {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let s = serde_json::to_value(self).ok().and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default();
+        f.write_str(&s)
+    }
+}
+
+impl Facts {
+    /// `platform` is `<arch>-<os>`, e.g. `x86_64-linux` or `aarch64-darwin`.
+    pub fn declared(name: &str, platform: &str, system: Option<&System>) -> Result<Facts> {
+        let Some((arch, os)) = platform.split_once('-') else {
+            bail!("host {name}: platform `{platform}` is not <arch>-<os>, e.g. x86_64-linux")
+        };
+        if !matches!(arch, "x86_64" | "aarch64") {
+            bail!("host {name}: unknown arch `{arch}` in platform `{platform}`");
+        }
+        let os = match os {
+            "linux" => Os::Linux,
+            "darwin" => Os::Darwin,
+            _ => bail!("host {name}: unknown os `{os}` in platform `{platform}`"),
+        };
+        let (distro, init) = match (os, system) {
+            (Os::Darwin, None) => ("macos".into(), Init::Launchd),
+            (Os::Darwin, Some(_)) => bail!("host {name}: macOS hosts take no system layer"),
+            (Os::Linux, Some(System::Image(i))) => (i.distro(), Init::Systemd),
+            (Os::Linux, Some(System::Distro(d))) => (d.distro.clone(), d.init),
+            (Os::Linux, None) => bail!("host {name}: a Linux host needs system = image(...) or a distro"),
+        };
+        Ok(Facts { name: name.into(), os, arch: arch.into(), distro, init })
+    }
+
+    /// Platform as the lock writes it, e.g. `aarch64-darwin`.
+    pub fn platform(&self) -> String {
+        format!("{}-{}", self.arch, self.os)
+    }
+
+    /// The machine this process runs on, for checking a declaration against reality.
+    pub fn probe_local() -> (String, String) {
+        let os = if cfg!(target_os = "macos") { "darwin" } else { "linux" };
+        let distro = match os {
+            "darwin" => "macos".into(),
+            _ => std::fs::read_to_string("/etc/os-release")
+                .ok()
+                .and_then(|s| os_release_id(&s))
+                .unwrap_or_else(|| "linux".into()),
+        };
+        (format!("{}-{os}", std::env::consts::ARCH), distro)
+    }
+}
+
+pub fn os_release_id(contents: &str) -> Option<String> {
+    contents.lines().find_map(|l| l.strip_prefix("ID=")).map(|v| v.trim_matches('"').to_string())
+}
+
+/// This machine's short host name, as `host(name = …)` usually spells it.
+pub fn local_hostname() -> String {
+    let out = std::process::Command::new("hostname").arg("-s").output();
+    let name = out.ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+    name.to_lowercase()
+}

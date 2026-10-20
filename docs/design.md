@@ -32,8 +32,14 @@ the same plan. Lua was the runner-up; it has a bigger ecosystem, but the
 determinism would have to be enforced by stripping its stdlib, and something
 would eventually reach for `os.getenv`.
 
-Host facts (name, platform, distro) are passed in as arguments, so conditionals
-stay pure:
+Host facts come from the `host()` declaration itself, never from the network,
+so evaluation stays pure and `plan --all` works offline. `platform` is a
+required argument (`"x86_64-linux"`, `"aarch64-darwin"`); `distro` and `init`
+follow from `system` (`image(...)` gives the image's distro and systemd,
+`fedora(...)`, `arch(...)`, `debian(...)` and `void(...)` give their own, and an
+`aarch64-darwin` platform implies macOS and launchd). An entry in `modules` can
+be a resource, a list of them, or a function, which FormalSpec calls with the
+host's facts:
 
 ```python
 def cli(host):
@@ -41,7 +47,16 @@ def cli(host):
     if host.platform.is_darwin:
         tools.append(pkg("aerospace", source = brew(cask = True)))
     return tools
+
+hosts = [host("macbook", platform = "aarch64-darwin", modules = [cli])]
 ```
+
+The host struct carries `name`, `distro`, `init` and `platform` (`name`, `os`,
+`arch`, `is_darwin`, `is_linux`). `apply` probes the machine only to check that
+it matches the declaration, and fails with a clear error when it does not.
+
+`load("//modules/cli.star", "cli")` resolves from the directory holding
+`spec.star`; there are no relative loads.
 
 ## Resources
 
@@ -49,8 +64,8 @@ A config evaluates to a list of resources:
 
 | Resource | What it is |
 | --- | --- |
-| `host` | Name, `system`, users, modules |
-| `pkg` | A package from some source, pinned in the lock |
+| `host` | Name, `platform`, `system`, users, modules |
+| `pkg` | A package from some source, pinned in the lock, with the files, services and timers that belong to it |
 | `file` | A file FormalSpec writes, links, seeds or patches |
 | `service` | A system or user service, rendered for the host's init |
 | `user` | Account, UID, shell, groups |
@@ -60,6 +75,18 @@ A config evaluates to a list of resources:
 | `timer` | A scheduled job (systemd timer, cron, launchd) |
 
 Modules are plain Starlark functions that return lists of resources.
+
+A package names the things that exist only for it, and they go when it goes:
+
+```python
+pkg("syncthing", source = github("syncthing/syncthing"),
+    services = [service("syncthing", exec = "syncthing serve", user = True)],
+    files = [file("~/.config/syncthing/config.xml", src = "files/syncthing.xml")])
+```
+
+A `file`, `service` or `timer` declared on its own is its own resource and is
+removed when its own line disappears. Two declarations of the same file path,
+package name or service name fail the plan.
 
 ## Package sources
 
@@ -179,10 +206,12 @@ app data goes too.
 
 When a `pkg` disappears from the config, apply:
 
-1. Stops and removes its services and timers.
+1. Stops and removes the services and timers declared on it
+   (`pkg(services = [...], timers = [...])`).
 2. Uninstalls it (drops it from the generation, or asks the package manager).
-3. Deletes files FormalSpec wrote for it, if they still match the hash it
-   wrote. A file you or the app edited is kept and reported.
+3. Deletes the files declared on it (`pkg(files = [...])`), if they still match
+   the hash it wrote. A file you or the app edited is kept and reported. Which
+   module returned a file never ties it to a package; only `files = [...]` does.
 4. Moves its app data to the generation trash.
 
 App data is found three ways, in order:
@@ -260,7 +289,8 @@ service("syncthing", exec = "syncthing serve --no-browser",
 | OpenRC, dinit, s6 | their service scripts |
 | launchd | plists in `/Library/LaunchDaemons` or `~/Library/LaunchAgents` |
 
-Timers become systemd timers, cron entries (snooze or cronie) or launchd
+A timer's `schedule` is a five-field cron expression or one of `@hourly`,
+`@daily`, `@weekly` and `@monthly`. Timers become systemd timers, cron entries (snooze or cronie) or launchd
 calendar intervals. Features only systemd has (socket activation, cgroup
 limits, `graphical-session.target`) go under `systemd = {...}`; on another init
 `plan` fails and says which field, rather than dropping it.
@@ -353,6 +383,42 @@ files/             static config files
 patches/           .patch files referenced by packages
 fspec.lock         generated, committed
 ```
+
+## Implementation
+
+A cargo workspace under `crates/`:
+
+| Crate | Holds |
+| --- | --- |
+| `fspec-core` | Resource types, host facts, `Paths`, the state file, the lock, the plan diff, the apply engine, the journal, the `Runner` and `Fetch` seams |
+| `fspec-eval` | Starlark builtins and evaluation into `Host` values |
+| `fspec` | The CLI |
+
+Builtins validate their arguments against the `fspec-core` types as soon as
+they run, so an unknown field fails at the line that wrote it. State keys are
+`kind:id` (`pkg:ripgrep`, `file:~/.config/fish/config.fish`); each entry keeps
+the resource as last applied, the package that owns it, and a `record` object
+whose shape belongs to the backend that applied it.
+
+Backends implement one trait: `handles` claims resources on a host (exactly
+one backend per resource, or `plan` lists it as unsupported and `apply`
+refuses), `drift` reports live divergence for unchanged resources, `prepare`
+fetches and renders into a staging directory, and `commit` makes changes live,
+journaling an undo step before each mutation. The engine commits removals in
+reverse phase order, then adds and updates in phase order (users, files, store,
+packages, services, defaults, system), and writes the new state and
+`generations/<n>.json` only after every commit succeeded. Each scope (system,
+user) is its own transaction with its own journal. A non-root `fspec apply`
+runs the system scope through `sudo fspec apply --scope system`, then the user
+scope as the user. Every external command goes through a `Runner` and every
+HTTP read through `Fetch`, so tests record them instead of touching the
+machine or the network. With `--root` set to anything but `/`, the CLI logs
+commands to `<root>/var/log/fspec-commands.log` instead of running them, and
+`Fetch` also reads `file://` URLs for fixtures.
+
+Every path goes through `Paths`, rooted at `--root` (default `/`) with the
+home at `--home`, so tests and dry runs work in a temp directory and never
+touch the live system.
 
 ## Build order
 

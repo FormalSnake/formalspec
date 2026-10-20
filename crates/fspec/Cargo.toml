@@ -1,0 +1,17 @@
+[package]
+name = "fspec"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Declare your machines in Starlark and keep them identical"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+fspec-core.workspace = true
+fspec-eval.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

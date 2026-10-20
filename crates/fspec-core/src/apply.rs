@@ -1,0 +1,288 @@
+//! The apply transaction. Backends claim resources; the engine plans, prepares every backend
+//! (fetch, verify, render: nothing live changes), then commits them in phase order under a
+//! journal, and writes the new state only when every commit succeeded.
+
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result, bail};
+use serde_json::{Map, Value};
+
+use crate::facts::Facts;
+use crate::fetch::Fetch;
+use crate::journal::{Journal, remove_any};
+use crate::lock::Lock;
+use crate::paths::Paths;
+use crate::plan::{Action, Change, Plan, plan};
+use crate::resource::{Desired, Key, Resource, Scope};
+use crate::runner::Runner;
+use crate::state::{Entry, State};
+
+/// What a backend may read while planning and applying.
+pub struct Cx<'a> {
+    pub paths: &'a Paths,
+    pub facts: &'a Facts,
+    /// The directory holding `spec.star`; `src = "files/x"` resolves against it.
+    pub spec_dir: &'a Path,
+    pub lock: &'a Lock,
+    pub runner: &'a dyn Runner,
+    pub fetch: &'a dyn Fetch,
+    /// The generation this apply creates (the state's current one plus one).
+    pub generation: u64,
+    pub scope: Scope,
+}
+
+impl Cx<'_> {
+    /// Resolve a spec path (`~/…` or `/…`) under the rooted paths.
+    pub fn resolve(&self, spec_path: &str) -> Result<PathBuf> {
+        self.paths.resolve(spec_path)
+    }
+
+    /// The state directory for this scope.
+    pub fn state_dir(&self) -> PathBuf {
+        state_dir(self.paths, self.scope)
+    }
+}
+
+pub fn state_dir(paths: &Paths, scope: Scope) -> PathBuf {
+    match scope {
+        Scope::System => paths.system_state_dir(),
+        Scope::User => paths.user_state_dir(),
+    }
+}
+
+/// Commit order. Removals run in reverse, so services stop before their packages go.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Phase {
+    Users,
+    Files,
+    Store,
+    Packages,
+    Services,
+    Defaults,
+    System,
+}
+
+/// One resource to change. `desired` is `None` for a removal, `current` is `None` for an add.
+#[derive(Clone, Debug)]
+pub struct Op {
+    pub key: Key,
+    pub desired: Option<Desired>,
+    pub current: Option<Entry>,
+    /// Set when the config is unchanged but the live system drifted from the record.
+    pub drift: Vec<String>,
+}
+
+impl Op {
+    pub fn resource(&self) -> &Resource {
+        match (&self.desired, &self.current) {
+            (Some(d), _) => &d.resource,
+            (None, Some(e)) => &e.resource,
+            (None, None) => unreachable!("an op has a desired or a current resource"),
+        }
+    }
+
+    pub fn is_removal(&self) -> bool {
+        self.desired.is_none()
+    }
+
+    pub fn owner(&self) -> Option<&str> {
+        match (&self.desired, &self.current) {
+            (Some(d), _) => d.owner.as_deref(),
+            (None, Some(e)) => e.owner.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// The record the last apply left, empty for an add.
+    pub fn record(&self) -> Map<String, Value> {
+        self.current.as_ref().map(|e| e.record.clone()).unwrap_or_default()
+    }
+}
+
+/// What each backend's commit returns: the new record per applied (not removed) key.
+pub type Records = BTreeMap<Key, Map<String, Value>>;
+
+pub trait Backend {
+    fn name(&self) -> &'static str;
+
+    /// Whether this backend applies `r` on this host. Exactly one backend must claim each resource.
+    fn handles(&self, cx: &Cx, r: &Resource) -> bool;
+
+    fn phase(&self) -> Phase;
+
+    /// How the live system diverged from what the last apply recorded, one line per finding.
+    /// Called only for resources whose config did not change.
+    fn drift(&self, _cx: &Cx, _entry: &Entry) -> Result<Vec<String>> {
+        Ok(vec![])
+    }
+
+    /// Fail the plan early when the host cannot apply this resource (a systemd-only field on runit).
+    fn check(&self, _cx: &Cx, _r: &Resource) -> Result<()> {
+        Ok(())
+    }
+
+    /// Fetch, verify and render into `staging`. Must not change the live system.
+    fn prepare(&self, _cx: &Cx, _ops: &[Op], _staging: &Path) -> Result<()> {
+        Ok(())
+    }
+
+    /// Make `ops` live. Journal an undo step before each live mutation. Called once with the
+    /// removals and once with the adds and updates.
+    fn commit(&self, cx: &Cx, ops: &[Op], staging: &Path, journal: &mut Journal) -> Result<Records>;
+}
+
+/// Plan for one scope: the config diff plus drift that backends report on unchanged resources.
+pub fn plan_scope(cx: &Cx, backends: &[&dyn Backend], desired: &[Desired], state: &State) -> Result<Plan> {
+    let desired: Vec<Desired> = desired.iter().filter(|d| d.resource.scope() == cx.scope).cloned().collect();
+    let empty = State::default();
+    let (system, user) = match cx.scope {
+        Scope::System => (state, &empty),
+        Scope::User => (&empty, state),
+    };
+    let mut p = plan(&cx.facts.name, &desired, system, user)?;
+    for d in &desired {
+        match backend_for(cx, backends, &d.resource) {
+            Ok(b) => b.check(cx, &d.resource)?,
+            Err(e) => p.unsupported.push(e.to_string()),
+        }
+    }
+    let changed: Vec<Key> = p.changes.iter().map(|c| c.key.clone()).collect();
+    for (key, entry) in &state.entries {
+        if changed.contains(key) {
+            continue;
+        }
+        let Ok(b) = backend_for(cx, backends, &entry.resource) else { continue };
+        let notes = b.drift(cx, entry)?;
+        if !notes.is_empty() {
+            let detail = String::new();
+            p.changes.push(Change { key: key.clone(), scope: cx.scope, action: Action::Drift { notes }, detail });
+        }
+    }
+    p.changes.sort_by(|a, b| a.key.cmp(&b.key));
+    Ok(p)
+}
+
+fn backend_for<'b>(cx: &Cx, backends: &[&'b dyn Backend], r: &Resource) -> Result<&'b dyn Backend> {
+    let claimed: Vec<_> = backends.iter().filter(|b| b.handles(cx, r)).collect();
+    match claimed.as_slice() {
+        [b] => Ok(**b),
+        [] => bail!("no backend applies {} on {} ({}, {})", r.key(), cx.facts.name, cx.facts.distro, cx.facts.init),
+        many => {
+            let names: Vec<_> = many.iter().map(|b| b.name()).collect();
+            bail!("{} is claimed by several backends: {}", r.key(), names.join(", "))
+        }
+    }
+}
+
+/// Converge one scope. Recovers an interrupted apply first. On failure the journal is replayed
+/// and the state file is left as it was.
+pub fn apply_scope(cx: &Cx, backends: &[&dyn Backend], desired: &[Desired]) -> Result<Plan> {
+    let dir = cx.state_dir();
+    let state_path = dir.join("state.json");
+    Journal::recover(&dir, cx.runner)?;
+    let state = State::load(&state_path)?;
+    if cx.generation != state.generation + 1 {
+        bail!("apply for generation {} but the state is at {}", cx.generation, state.generation);
+    }
+    let p = plan_scope(cx, backends, desired, &state)?;
+    if !p.unsupported.is_empty() {
+        bail!("cannot apply:\n  {}", p.unsupported.join("\n  "));
+    }
+    if p.changes.is_empty() {
+        return Ok(p);
+    }
+
+    let wanted: BTreeMap<Key, &Desired> = desired.iter().map(|d| (d.resource.key(), d)).collect();
+    let ops: Vec<Op> = p
+        .changes
+        .iter()
+        .map(|c| Op {
+            key: c.key.clone(),
+            desired: wanted.get(&c.key).map(|d| (*d).clone()),
+            current: state.entries.get(&c.key).cloned(),
+            drift: match &c.action {
+                Action::Drift { notes } => notes.clone(),
+                _ => vec![],
+            },
+        })
+        .collect();
+
+    let mut by_backend: Vec<(&dyn Backend, Vec<Op>)> = Vec::new();
+    for op in ops {
+        let b = backend_for(cx, backends, op.resource())?;
+        match by_backend.iter_mut().find(|(x, _)| x.name() == b.name()) {
+            Some((_, list)) => list.push(op),
+            None => by_backend.push((b, vec![op])),
+        }
+    }
+    by_backend.sort_by_key(|(b, _)| b.phase());
+
+    let staging = dir.join("staging").join(cx.generation.to_string());
+    remove_any(&staging)?;
+    fs::create_dir_all(&staging).with_context(|| format!("creating {}", staging.display()))?;
+    for (b, ops) in &by_backend {
+        b.prepare(cx, ops, &staging).with_context(|| format!("preparing {}", b.name()))?;
+    }
+
+    let mut journal = Journal::begin(&dir, cx.generation)?;
+    let result = commit_all(cx, &by_backend, &staging, &mut journal);
+    let records = match result {
+        Ok(r) => r,
+        Err(e) => {
+            let rollback = journal.rollback(cx.runner);
+            remove_any(&staging)?;
+            return match rollback {
+                Ok(()) => Err(e.context("apply failed and was rolled back")),
+                Err(r) => Err(e.context(format!("apply failed and rollback was incomplete: {r:#}"))),
+            };
+        }
+    };
+
+    let mut next = State { generation: cx.generation, ..state.clone() };
+    for (_, ops) in &by_backend {
+        for op in ops {
+            match &op.desired {
+                None => {
+                    next.entries.remove(&op.key);
+                }
+                Some(d) => {
+                    let record = records.get(&op.key).cloned().unwrap_or_default();
+                    next.entries
+                        .insert(op.key.clone(), Entry { resource: d.resource.clone(), owner: d.owner.clone(), record });
+                }
+            }
+        }
+    }
+    next.save(&state_path)?;
+    next.save(&dir.join("generations").join(format!("{}.json", cx.generation)))?;
+    journal.finish()?;
+    remove_any(&staging)?;
+    Ok(p)
+}
+
+fn commit_all(
+    cx: &Cx,
+    by_backend: &[(&dyn Backend, Vec<Op>)],
+    staging: &Path,
+    journal: &mut Journal,
+) -> Result<Records> {
+    let mut records = Records::new();
+    for (b, ops) in by_backend.iter().rev() {
+        let removals: Vec<Op> = ops.iter().filter(|o| o.is_removal()).cloned().collect();
+        if !removals.is_empty() {
+            b.commit(cx, &removals, staging, journal).with_context(|| format!("{}: removing", b.name()))?;
+        }
+    }
+    for (b, ops) in by_backend {
+        let rest: Vec<Op> = ops.iter().filter(|o| !o.is_removal()).cloned().collect();
+        if !rest.is_empty() {
+            records.extend(b.commit(cx, &rest, staging, journal).with_context(|| format!("{}: applying", b.name()))?);
+        }
+    }
+    Ok(records)
+}
+
+#[cfg(test)]
+mod tests;

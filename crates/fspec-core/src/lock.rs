@@ -1,0 +1,122 @@
+use std::collections::BTreeMap;
+use std::fs;
+use std::io::ErrorKind;
+use std::path::Path;
+
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+
+/// `fspec.lock`: every version FormalSpec installs, written by `fspec update` and committed.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct Lock {
+    #[serde(default)]
+    pub pkg: Vec<LockedPkg>,
+    /// Per host: the system layer's pinned digest.
+    #[serde(default)]
+    pub system: BTreeMap<String, LockedSystem>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct LockedPkg {
+    pub name: String,
+    /// `Source`'s display form, e.g. `aqua:BurntSushi/ripgrep`. A spec whose source no longer
+    /// matches needs `fspec update`.
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rev: Option<String>,
+    /// Hash over the package's patch files, for patched source builds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub patches: Option<String>,
+    /// Keyed by platform (`x86_64-linux`, `aarch64-darwin`), or `any` for platform-independent
+    /// artifacts such as npm tarballs.
+    #[serde(flatten)]
+    pub artifacts: BTreeMap<String, Artifact>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct Artifact {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// `sha256-<base64>`, SRI style.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hash: Option<String>,
+    /// `registry/repo@sha256:…` for CI-built artifacts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oci: Option<String>,
+    /// Flatpak commit, git rev, or another source-specific exact id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    /// Executables inside the unpacked artifact, relative to its root (`rg`,
+    /// `ripgrep-15.1.0-x86_64-unknown-linux-musl/rg`). Empty: link every executable regular
+    /// file in the top two levels.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bins: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct LockedSystem {
+    pub image: String,
+}
+
+impl Lock {
+    /// A missing lock is empty; `plan` then reports packages that need `fspec update`.
+    pub fn load(path: &Path) -> Result<Lock> {
+        match fs::read_to_string(path) {
+            Ok(t) => toml::from_str(&t).with_context(|| format!("parsing {}", path.display())),
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(Lock::default()),
+            Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
+        }
+    }
+
+    pub fn save(&self, path: &Path) -> Result<()> {
+        let tmp = path.with_extension("lock.tmp");
+        fs::write(&tmp, toml::to_string(self)?).with_context(|| format!("writing {}", tmp.display()))?;
+        fs::rename(&tmp, path).with_context(|| format!("renaming {} into place", tmp.display()))
+    }
+
+    pub fn pkg(&self, name: &str) -> Option<&LockedPkg> {
+        self.pkg.iter().find(|p| p.name == name)
+    }
+
+    /// Insert or replace by name, keeping the file sorted so diffs stay small.
+    pub fn upsert(&mut self, locked: LockedPkg) {
+        self.pkg.retain(|p| p.name != locked.name);
+        self.pkg.push(locked);
+        self.pkg.sort_by(|a, b| a.name.cmp(&b.name));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn design_example_parses() {
+        let text = r#"
+[[pkg]]
+name = "ripgrep"
+source = "aqua:BurntSushi/ripgrep"
+version = "15.1.0"
+x86_64-linux = { url = "https://example/rg-x86.tar.gz", hash = "sha256-AAAA" }
+aarch64-darwin = { url = "https://example/rg-arm.tar.gz", hash = "sha256-BBBB" }
+
+[[pkg]]
+name = "librepods"
+source = "git:https://example/librepods@main"
+rev = "4f1c2a9"
+patches = "sha256-CCCC"
+x86_64-linux = { oci = "ghcr.io/formalsnake/fspec-cache/librepods@sha256:dd" }
+
+[system.g815]
+image = "ghcr.io/ublue-os/bazzite-nvidia@sha256:ee"
+"#;
+        let lock: Lock = toml::from_str(text).unwrap();
+        assert_eq!(lock.pkg("ripgrep").unwrap().artifacts["aarch64-darwin"].hash.as_deref(), Some("sha256-BBBB"));
+        assert!(lock.pkg("librepods").unwrap().artifacts["x86_64-linux"].oci.is_some());
+        assert_eq!(lock.system["g815"].image, "ghcr.io/ublue-os/bazzite-nvidia@sha256:ee");
+        let again: Lock = toml::from_str(&toml::to_string(&lock).unwrap()).unwrap();
+        assert_eq!(again, lock);
+    }
+}

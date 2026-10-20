@@ -35,9 +35,9 @@ Claude Code, keep doing that.
 └──────────────────────┘                 └──────────────────────────┘
 ```
 
-**Design stage.** Nothing is implemented yet.
+**Early.** Evaluation and `fspec plan` work; apply does not yet.
 [`docs/design.md`](docs/design.md) is the spec, and its build order says what
-comes first.
+comes next.
 
 ## What it manages
 
@@ -72,6 +72,7 @@ load("//modules/cli.star", "cli")
 def laptop(name, extra = []):
     return host(
         name = name,
+        platform = "x86_64-linux",
         system = image(base = "ghcr.io/ublue-os/bazzite-nvidia:stable"),
         users = [user("kyandesutter", uid = 1000, shell = "fish")],
         modules = [cli()] + extra,
