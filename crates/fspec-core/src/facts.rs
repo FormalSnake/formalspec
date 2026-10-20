@@ -16,6 +16,9 @@ pub struct Facts {
     /// `fedora`, `bazzite`, `arch`, `void`, `macos`, …
     pub distro: String,
     pub init: Init,
+    /// The system layer is an `image(...)`: distro packages belong to the image, not to a live package manager.
+    #[serde(default)]
+    pub image: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,7 +76,8 @@ impl Facts {
             (Os::Linux, Some(System::Distro(d))) => (d.distro.clone(), d.init),
             (Os::Linux, None) => bail!("host {name}: a Linux host needs system = image(...) or a distro"),
         };
-        Ok(Facts { name: name.into(), os, arch: arch.into(), distro, init })
+        let image = matches!(system, Some(System::Image(_)));
+        Ok(Facts { name: name.into(), os, arch: arch.into(), distro, init, image })
     }
 
     /// Platform as the lock writes it, e.g. `aarch64-darwin`.

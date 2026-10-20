@@ -1,0 +1,48 @@
+//! Package manager backends: Flatpak and Homebrew everywhere they exist, dnf on classic Fedora.
+//! Each one journals the inverse command before it changes anything.
+
+mod brew;
+mod dnf;
+mod flatpak;
+#[cfg(test)]
+mod tests;
+
+use anyhow::{Result, bail};
+use fspec_core::Cx;
+use fspec_core::lock::LockedPkg;
+use fspec_core::resource::{Pkg, Resource};
+use fspec_core::runner::{Cmd, Output};
+use serde_json::{Map, Value};
+
+pub use brew::BrewBackend;
+pub use dnf::DnfBackend;
+pub use flatpak::FlatpakBackend;
+
+fn pkg(r: &Resource) -> Result<&Pkg> {
+    match r {
+        Resource::Pkg(p) => Ok(p),
+        other => bail!("{} is not a package", other.key()),
+    }
+}
+
+/// The lock entry for `p`. Fails when the lock was written for a different source, which
+/// `fspec update` fixes.
+fn locked<'a>(cx: &'a Cx, p: &Pkg) -> Result<Option<&'a LockedPkg>> {
+    let Some(l) = cx.lock.pkg(&p.name) else { return Ok(None) };
+    if l.source != p.source.to_string() {
+        bail!("fspec.lock has pkg:{} from `{}` but the spec says `{}`; run `fspec update`", p.name, l.source, p.source);
+    }
+    Ok(Some(l))
+}
+
+/// Trimmed stdout of a successful query, `None` when the command failed or printed nothing.
+/// A rooted apply logs commands and answers with empty output, so empty never means an error.
+fn query(cx: &Cx, cmd: &Cmd) -> Result<Option<String>> {
+    let Output { status, stdout, .. } = cx.runner.run(cmd)?;
+    let out = stdout.trim();
+    Ok((status == 0 && !out.is_empty()).then(|| out.to_string()))
+}
+
+fn text(rec: &Map<String, Value>, key: &str) -> Option<String> {
+    rec.get(key).and_then(Value::as_str).map(str::to_string)
+}

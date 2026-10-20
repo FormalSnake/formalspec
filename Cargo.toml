@@ -36,3 +36,4 @@ fspec-eval = { path = "crates/fspec-eval" }
 fspec-store = { path = "crates/fspec-store" }
 fspec-files = { path = "crates/fspec-files" }
 fspec-sources = { path = "crates/fspec-sources" }
+fspec-pkgmgr = { path = "crates/fspec-pkgmgr" }

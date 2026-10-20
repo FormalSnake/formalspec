@@ -1133,6 +1133,7 @@ dependencies = [
  "fspec-core",
  "fspec-eval",
  "fspec-files",
+ "fspec-pkgmgr",
  "fspec-sources",
  "fspec-store",
  "serde_json",
@@ -1179,6 +1180,19 @@ dependencies = [
  "similar",
  "tempfile",
  "toml 1.1.8+spec-1.1.0",
+]
+
+[[package]]
+name = "fspec-pkgmgr"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.23.1",
+ "fspec-core",
+ "fspec-eval",
+ "serde_json",
+ "sha2 0.11.1",
+ "tempfile",
 ]
 
 [[package]]

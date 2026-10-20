@@ -163,6 +163,12 @@ the named ones), keeps the other entries, drops entries no host declares and
 prints one line per change. A package gets an artifact for each platform its
 hosts declare. Distro sources (`dnf`, `pacman`, `apt`, `xbps`) lock only the
 name until step 8 adds their pins.
+The lock entry for a distro package holds one artifact per platform, so the
+cached file is used for single-name packages; a multi-name `dnf([...])` package
+installs by name. Flatpak pins live in `any = { commit = … }`, brew records
+`version`; Homebrew can only install the current version, so the brew pin is
+checked (drift, then `brew upgrade`), not enforced, and an upgrade is not
+reversed on rollback.
 
 A nightly CI job can run `fspec update` and open a PR with each bump and a
 changelog link. Merging it is the auto-update.
