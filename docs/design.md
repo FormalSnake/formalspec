@@ -729,10 +729,12 @@ A cargo workspace under `crates/`:
 | --- | --- |
 | `fspec-core` | Resource types, host facts, `Paths`, the state file, the lock, the plan diff, the apply engine, the journal, the `Runner` and `Fetch` seams |
 | `fspec-eval` | Starlark builtins and evaluation into `Host` values |
+| `fspec-files` | The `file` and `secret` backend: the four modes, format writers, the three-way patch merge, `adopt`, `watch` |
 | `fspec-store` | The store backend: hash check, unpack, generations, `current`, npm and nix packages, project pins, `gc` |
 | `fspec-image` | Containerfile and workflow generation, ghcr digest resolution, the bootc `image` backend |
 | `fspec-sources` | Resolvers (aqua, github, npm, cargo, flatpak, brew, git, nix, dnf, pacman, apt, xbps) and `fspec update` |
 | `fspec-pkgmgr` | Flatpak, Homebrew and the distro package backends (dnf, pacman, apt, xbps), and the base packages of a classic distro |
+| `fspec-os` | Services and timers per init (systemd, launchd, runit, OpenRC, dinit, s6, cron), users, macOS `defaults` |
 | `fspec-remote` | Remote hosts: ssh and tar command lines, the spec shipment, the probe check, `--all` ordering |
 | `fspec-build` | Source builds: recipe detection, the `.tar.zst` packer, the `ci packages` workflow, `update --cache` |
 | `fspec` | The CLI |
