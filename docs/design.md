@@ -821,6 +821,9 @@ touch the live system.
 
 ## Build order
 
+All eight steps are implemented; each was tested against temp roots with
+recorded commands, not yet on a live host.
+
 1. Starlark evaluation, resources, state file, `plan`.
 2. `file` with all four modes, three-way merge for `patch`.
 3. Store, generations, rollback; aqua, github and npm sources; `update` and the
@@ -828,7 +831,7 @@ touch the live system.
 4. Flatpak, brew, dnf backends; systemd and launchd services.
 5. Removal with data trash and `gc`.
 6. Remote apply over ssh.
-7. `image` with bootc, the OCI cache for patched builds (the cache and patched-build half is done: `glob`, the patches hash, `fspec build`, `fspec ci packages`, `fspec update --cache`, oras pulls in the store).
+7. `image` with bootc, the OCI cache for patched builds.
 8. Other distros and inits, `fspec switch`.
 
 Steps 1 to 4 replace a home-manager setup on a single machine and are the

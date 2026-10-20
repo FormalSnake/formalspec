@@ -11,7 +11,7 @@
 
 [![Rust](https://img.shields.io/badge/built_with-rust-4a9eda?style=for-the-badge&labelColor=161616&logo=rust&logoColor=white)](docs/design.md)
 [![Config](https://img.shields.io/badge/config-starlark-4a9eda?style=for-the-badge&labelColor=161616)](docs/design.md#config-language-starlark)
-[![Status](https://img.shields.io/badge/status-design-d35f5f?style=for-the-badge&labelColor=161616)](docs/design.md#build-order)
+[![Status](https://img.shields.io/badge/status-untested-d3a35f?style=for-the-badge&labelColor=161616)](docs/design.md#build-order)
 [![License](https://img.shields.io/badge/license-MIT-cccccc?style=for-the-badge&labelColor=161616)](LICENSE)
 
 Declare your machines in code and keep them identical, on any Linux distro
@@ -35,9 +35,10 @@ Claude Code, keep doing that.
 └──────────────────────┘                 └──────────────────────────┘
 ```
 
-**Early.** Evaluation and `fspec plan` work; apply does not yet.
-[`docs/design.md`](docs/design.md) is the spec, and its build order says what
-comes next.
+**Untested on real hosts.** Every step of the build order is implemented and
+covered by tests that run against temp roots, with package managers, init
+systems and bootc calls recorded instead of run. Nothing has converged a live
+machine yet. [`docs/design.md`](docs/design.md) is the spec.
 
 ## What it manages
 
