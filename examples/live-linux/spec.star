@@ -24,4 +24,12 @@ hosts = [
     host("arch", platform = "x86_64-linux", system = arch(packages = ["jq"] if live else []), modules = [probe]),
     host("debian", platform = "x86_64-linux", system = debian(packages = ["jq"] if live else []), modules = [probe]),
     host("void", platform = "x86_64-linux", system = void(packages = ["jq"] if live else []), modules = [probe]),
+    # The Debian container again, applied over ssh from the machine running the containers.
+    host(
+        "debian-remote",
+        ssh = "ssh://root@127.0.0.1:22922",
+        platform = "x86_64-linux",
+        system = debian(packages = ["jq"] if live else []),
+        modules = [probe],
+    ),
 ]

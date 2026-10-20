@@ -822,8 +822,8 @@ touch the live system.
 ## Build order
 
 All eight steps are implemented and tested against temp roots with recorded
-commands. Steps 1 to 5 have also run live on macOS and on the four classic
-distros; bootc, remote apply and `fspec switch` have not.
+commands. Steps 1 to 6 have also run live on macOS and on the four classic
+distros; bootc and `fspec switch` have not.
 
 1. Starlark evaluation, resources, state file, `plan`.
 2. `file` with all four modes, three-way merge for `patch`.

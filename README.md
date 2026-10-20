@@ -37,10 +37,10 @@ Claude Code, keep doing that.
 
 **Early.** Every step of the build order is implemented. Apply, drift repair,
 removal, rollback and `gc` have run for real on macOS and on Fedora 44, Arch,
-Debian 13 and Void (systemd and runit) in containers, using
-[`examples/live-macos`](examples/live-macos) and
-[`examples/live-linux`](examples/live-linux). bootc images, remote apply and
-`fspec switch` have only run against temp roots so far.
+Debian 13 and Void (systemd and runit) in containers, locally and over ssh,
+using [`examples/live-macos`](examples/live-macos) and
+[`examples/live-linux`](examples/live-linux). bootc images and `fspec switch`
+have only run against temp roots so far.
 [`docs/design.md`](docs/design.md) is the spec.
 
 ## What it manages
