@@ -105,7 +105,13 @@ pub fn os_release_id(contents: &str) -> Option<String> {
 
 /// This machine's short host name, as `host(name = …)` usually spells it.
 pub fn local_hostname() -> String {
-    let out = std::process::Command::new("hostname").arg("-s").output();
-    let name = out.ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
-    name.to_lowercase()
+    // Void's `hostname` has no `-s`, and minimal Arch and Fedora installs ship no `hostname` at all.
+    #[cfg(target_os = "linux")]
+    let name = std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap_or_default();
+    #[cfg(not(target_os = "linux"))]
+    let name = std::process::Command::new("hostname")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    name.trim().split('.').next().unwrap_or_default().to_lowercase()
 }
