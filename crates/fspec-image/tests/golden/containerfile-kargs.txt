@@ -1,0 +1,3 @@
+FROM ghcr.io/ublue-os/aurora:stable
+RUN mkdir -p /usr/lib/bootc/kargs.d && printf '%s\n' 'kargs = ["iommu=force"]' > /usr/lib/bootc/kargs.d/fspec.toml
+RUN bootc container lint

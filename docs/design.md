@@ -402,9 +402,26 @@ system = image(
 )
 ```
 
-FormalSpec generates the Containerfile, CI builds and pushes it, the digest
-goes in the lock, and apply runs `bootc switch` when it changes. Rollback is
-the previous deployment in the boot menu.
+`fspec image containerfile --host g815` prints the Containerfile: `FROM` the
+base, `dnf install -y` for the `dnf(...)` packages (other package managers are
+an error), the kernel arguments as `/usr/lib/bootc/kargs.d/fspec.toml`
+(`kargs = [...]`), and `bootc container lint` last.
+
+`fspec ci init` writes `.github/workflows/fspec-images.yml` next to the spec.
+The workflow `fspec-images` runs on pushes to main, weekly and on demand. For
+each host with an `image(...)` it renders the Containerfile, builds it with
+podman and pushes `ghcr.io/<owner>/fspec-<host>:latest`. The owner comes from
+the `origin` remote, or `--registry ghcr.io/<owner>`. A second job runs
+`fspec update --images --registry …`, which resolves each tag to its digest
+(anonymous ghcr token, then the manifest request; the packages must be public)
+and opens a PR with the new `[system.<host>] image = "<repo>@sha256:…"`. Rerun
+`fspec ci init` when hosts are added.
+
+Apply runs `bootc switch <repo>@<digest>` when the locked digest differs from
+the staged or booted one in `bootc status --json`, journaling `bootc rollback`
+as the undo, and prints that a reboot activates it. With no lock entry, `plan`
+says to run `fspec ci init`, let the workflow push, then `fspec update
+--images`. Rollback is the previous deployment in the boot menu.
 
 On classic distros (Fedora Workstation, Arch, Debian, Void) it is
 `fedora(...)`, `arch(...)` and so on, driving the package manager directly with
@@ -456,6 +473,9 @@ distro, so the `system` block is where those names live.
 | Command | Does |
 | --- | --- |
 | `fspec update [pkg]` | Resolve upstream, rewrite the lock |
+| `fspec update --images` | Pin each image host's pushed digest |
+| `fspec image containerfile --host h` | Print the Containerfile for a bootc host |
+| `fspec ci init [--registry r]` | Write the image build workflow |
 | `fspec plan [--all]` | Diff config against state, per host |
 | `fspec apply [--host h] [--all]` | Converge, over ssh for remote hosts |
 | `fspec rollback [gen]` | Previous generation, data included |
@@ -486,6 +506,7 @@ A cargo workspace under `crates/`:
 | `fspec-core` | Resource types, host facts, `Paths`, the state file, the lock, the plan diff, the apply engine, the journal, the `Runner` and `Fetch` seams |
 | `fspec-eval` | Starlark builtins and evaluation into `Host` values |
 | `fspec-store` | The store backend: hash check, unpack, generations, `current`, npm and nix packages, project pins |
+| `fspec-image` | Containerfile and workflow generation, ghcr digest resolution, the bootc `image` backend |
 | `fspec-sources` | Resolvers (aqua, github, npm, cargo, flatpak, brew, git, nix) and `fspec update` |
 | `fspec` | The CLI |
 

@@ -157,7 +157,11 @@ pub fn plan_scope(cx: &Cx, backends: &[&dyn Backend], desired: &[Desired], state
     let mut p = plan(&cx.facts.name, &desired, system, user)?;
     for d in &desired {
         match backend_for(cx, backends, &d.resource) {
-            Ok(b) => b.check(cx, &d.resource)?,
+            Ok(b) => {
+                if let Err(e) = b.check(cx, &d.resource) {
+                    p.unsupported.push(format!("{}: {e:#}", d.resource.key()));
+                }
+            }
             Err(e) => p.unsupported.push(e.to_string()),
         }
     }
