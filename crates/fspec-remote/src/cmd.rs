@@ -1,0 +1,163 @@
+//! Command construction for remote hosts. Pure, so the exact argument lists are unit tested.
+
+use std::path::Path;
+
+use fspec_core::Host;
+use fspec_core::runner::Cmd;
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Target {
+    Local,
+    Remote { alias: String },
+}
+
+/// A host is remote unless it is named after this machine.
+pub fn target(host: &Host, local_name: &str) -> Target {
+    if host.name.eq_ignore_ascii_case(local_name) {
+        Target::Local
+    } else {
+        Target::Remote { alias: host.ssh.clone().unwrap_or_else(|| host.name.clone()) }
+    }
+}
+
+/// Where a shipped spec lands on the remote, as a shell word. A dirty tree gets its own directory
+/// that is wiped on every ship, since its contents are not pinned by the commit.
+pub fn spec_dir(commit: &str, dirty: bool) -> String {
+    let leaf = if dirty { format!("{commit}-dirty") } else { commit.to_string() };
+    format!("\"$HOME/.cache/fspec/spec/{leaf}\"")
+}
+
+fn batch(alias: &str) -> Cmd {
+    Cmd::new("ssh").args(["-o", "ConnectTimeout=5", "-o", "BatchMode=yes"]).arg(alias)
+}
+
+pub fn probe(alias: &str) -> Cmd {
+    batch(alias).arg("fspec facts --json")
+}
+
+pub fn git_commit(spec_dir: &Path) -> Cmd {
+    Cmd::new("git").arg("-C").arg(spec_dir.display().to_string()).args(["rev-parse", "HEAD"])
+}
+
+pub fn git_status(spec_dir: &Path) -> Cmd {
+    Cmd::new("git").arg("-C").arg(spec_dir.display().to_string()).args(["status", "--porcelain", "--", "."])
+}
+
+pub fn git_files(spec_dir: &Path) -> Cmd {
+    Cmd::new("git").arg("-C").arg(spec_dir.display().to_string()).args(["ls-files", "--full-name", "--", "."])
+}
+
+/// Archives the listed files (one path per line on stdin) relative to the spec dir.
+pub fn tar_create(spec_dir: &Path, archive: &Path, files: &[String]) -> Cmd {
+    Cmd::new("tar")
+        .args(["-cf", &archive.display().to_string(), "-C", &spec_dir.display().to_string(), "-T", "-"])
+        .stdin(files.join("\n"))
+}
+
+pub fn ship(alias: &str, dest: &str, archive: &Path, dirty: bool) -> Cmd {
+    let wipe = if dirty { format!("rm -rf {dest} && ") } else { String::new() };
+    batch(alias).arg(format!("{wipe}mkdir -p {dest} && tar -xf - -C {dest}")).stdin_file(archive)
+}
+
+fn fspec(dest: &str, spec_file: &str, args: &[&str]) -> String {
+    format!("fspec --spec {dest}/{spec_file} {}", args.join(" "))
+}
+
+pub fn apply(alias: &str, dest: &str, spec_file: &str, host: &str, scope: Option<&str>) -> Cmd {
+    let mut args = vec!["apply", "--local", "--host", host];
+    if let Some(scope) = scope {
+        args.extend(["--scope", scope]);
+    }
+    Cmd::new("ssh").args(["-t", alias]).arg(fspec(dest, spec_file, &args)).interactive()
+}
+
+pub fn plan(alias: &str, dest: &str, spec_file: &str, host: &str) -> Cmd {
+    batch(alias).arg(fspec(dest, spec_file, &["plan", "--json", "--host", host]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn host(name: &str, ssh: Option<&str>) -> Host {
+        serde_json::from_value(serde_json::json!({"name": name, "platform": "x86_64-linux", "ssh": ssh})).unwrap()
+    }
+
+    #[test]
+    fn local_when_named_after_this_machine() {
+        assert_eq!(target(&host("macbook", None), "macbook"), Target::Local);
+        assert_eq!(target(&host("MacBook", None), "macbook"), Target::Local);
+    }
+
+    #[test]
+    fn remote_uses_ssh_alias_or_host_name() {
+        assert_eq!(target(&host("g815", None), "macbook"), Target::Remote { alias: "g815".into() });
+        assert_eq!(
+            target(&host("g815", Some("kyan@g815.lan")), "macbook"),
+            Target::Remote { alias: "kyan@g815.lan".into() }
+        );
+    }
+
+    #[test]
+    fn probe_line() {
+        assert_eq!(probe("g815").to_string(), "ssh -o ConnectTimeout=5 -o BatchMode=yes g815 'fspec facts --json'");
+    }
+
+    #[test]
+    fn git_lines() {
+        let d = Path::new("/r/spec");
+        assert_eq!(git_commit(d).to_string(), "git -C /r/spec rev-parse HEAD");
+        assert_eq!(git_status(d).to_string(), "git -C /r/spec status --porcelain -- .");
+        assert_eq!(git_files(d).to_string(), "git -C /r/spec ls-files --full-name -- .");
+    }
+
+    #[test]
+    fn tar_and_ship_lines() {
+        let tar = tar_create(Path::new("/r/spec"), Path::new("/t/s.tar"), &["spec.star".into(), "a/b.star".into()]);
+        assert_eq!(tar.to_string(), "tar -cf /t/s.tar -C /r/spec -T -");
+        assert_eq!(tar.stdin.as_deref(), Some("spec.star\na/b.star"));
+
+        let dest = spec_dir("abc123", false);
+        let ship = ship("g815", &dest, Path::new("/t/s.tar"), false);
+        assert_eq!(
+            ship.args,
+            [
+                "-o",
+                "ConnectTimeout=5",
+                "-o",
+                "BatchMode=yes",
+                "g815",
+                "mkdir -p \"$HOME/.cache/fspec/spec/abc123\" && tar -xf - -C \"$HOME/.cache/fspec/spec/abc123\""
+            ]
+        );
+        assert_eq!(ship.stdin_file.as_deref(), Some(Path::new("/t/s.tar")));
+    }
+
+    #[test]
+    fn dirty_ship_wipes_first() {
+        let dest = spec_dir("abc123", true);
+        let ship = ship("g815", &dest, Path::new("/t/s.tar"), true);
+        assert_eq!(
+            ship.args.last().unwrap(),
+            "rm -rf \"$HOME/.cache/fspec/spec/abc123-dirty\" && mkdir -p \"$HOME/.cache/fspec/spec/abc123-dirty\" && tar -xf - -C \"$HOME/.cache/fspec/spec/abc123-dirty\""
+        );
+    }
+
+    #[test]
+    fn apply_and_plan_lines() {
+        let dest = spec_dir("abc123", false);
+        let apply = apply("g815", &dest, "spec.star", "g815", None);
+        assert_eq!(apply.program, "ssh");
+        assert_eq!(
+            apply.args,
+            ["-t", "g815", "fspec --spec \"$HOME/.cache/fspec/spec/abc123\"/spec.star apply --local --host g815"]
+        );
+        assert!(apply.interactive);
+        let scoped = super::apply("g815", &dest, "spec.star", "g815", Some("user"));
+        assert!(scoped.args[2].ends_with("apply --local --host g815 --scope user"));
+        assert_eq!(
+            plan("g815", &dest, "spec.star", "g815").args[5],
+            "fspec --spec \"$HOME/.cache/fspec/spec/abc123\"/spec.star plan --json --host g815"
+        );
+    }
+}

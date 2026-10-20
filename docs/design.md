@@ -33,7 +33,7 @@ determinism would have to be enforced by stripping its stdlib, and something
 would eventually reach for `os.getenv`.
 
 Host facts come from the `host()` declaration itself, never from the network,
-so evaluation stays pure and `plan --all` works offline. `platform` is a
+so evaluation stays pure. `platform` is a
 required argument (`"x86_64-linux"`, `"aarch64-darwin"`); `distro` and `init`
 follow from `system` (`image(...)` gives the image's distro and systemd,
 `fedora(...)`, `arch(...)`, `debian(...)` and `void(...)` give their own, and an
@@ -456,8 +456,8 @@ distro, so the `system` block is where those names live.
 | Command | Does |
 | --- | --- |
 | `fspec update [pkg]` | Resolve upstream, rewrite the lock |
-| `fspec plan [--all]` | Diff config against state, per host |
-| `fspec apply [--host h] [--all]` | Converge, over ssh for remote hosts |
+| `fspec plan [--all] [--dirty]` | Diff config against state, per host; `--all` asks each remote host over ssh |
+| `fspec apply [--host h] [--all] [--dirty]` | Converge, over ssh for remote hosts |
 | `fspec rollback [gen]` | Previous generation, data included |
 | `fspec shell-hook <fish\|zsh\|bash>` | Shell code that applies `.fspec.toml` pins |
 | `fspec gc --older-than 14d` | Drop old generations, store paths and trash |
@@ -466,6 +466,39 @@ distro, so the `system` block is where those names live.
 | `fspec watch` | Report drift live |
 | `fspec switch --distro d` | Install another distro beside this one |
 | `fspec forget <distro>` | Delete an old distro root |
+
+## Remote hosts
+
+A host is remote when its name is not this machine's short host name. It is
+reached by the ssh alias in its `ssh` field (`host(name = "g815", ssh =
+"kyan@g815.lan", ...)`), which defaults to the host name, so `~/.ssh/config`
+decides keys, ports and jump hosts.
+
+`fspec apply --host h` on a remote host does four things, every command going
+through the `Runner`:
+
+1. Probe: `ssh -o ConnectTimeout=5 -o BatchMode=yes h fspec facts --json`
+   prints the machine's platform and distro. They must equal what the
+   declaration implies, otherwise apply fails before touching anything:
+   `host g815 is declared as x86_64-linux/bazzite but the machine is
+   aarch64-linux/fedora`. The probe is a check, never an input to evaluation.
+   A missing `fspec` on the remote fails with an install hint.
+2. Refuse a dirty spec tree. Hosts that apply the same commit end up with the
+   same software, so uncommitted changes under the spec directory stop the
+   apply unless `--dirty` is passed.
+3. Ship: `git ls-files` in the spec directory plus `fspec.lock` go through
+   `tar` and ssh into `~/.cache/fspec/spec/<commit>/` on the remote. A dirty
+   tree lands in `<commit>-dirty/`, wiped first.
+4. Run `ssh -t h fspec --spec <dir>/spec.star apply --local --host h` with the
+   terminal handed over, so sudo can prompt. `--local` stops the remote end
+   from forwarding the apply again if its host name differs from the declared one.
+
+`fspec apply --all` applies the remote hosts in spec order, then this machine,
+and stops at the first failure with the hosts that converged and the ones not
+attempted. `fspec plan --all` probes each host: a reachable remote host is
+shipped the spec and runs `fspec plan --json --host h`, whose plan is rendered
+locally; an unreachable one prints `unreachable, skipped`, since its state lives
+on the host. Runs under `--root` never go remote.
 
 ## Repo layout
 
@@ -487,6 +520,7 @@ A cargo workspace under `crates/`:
 | `fspec-eval` | Starlark builtins and evaluation into `Host` values |
 | `fspec-store` | The store backend: hash check, unpack, generations, `current`, npm and nix packages, project pins |
 | `fspec-sources` | Resolvers (aqua, github, npm, cargo, flatpak, brew, git, nix) and `fspec update` |
+| `fspec-remote` | Remote hosts: ssh and tar command lines, the spec shipment, the probe check, `--all` ordering |
 | `fspec` | The CLI |
 
 Builtins validate their arguments against the `fspec-core` types as soon as

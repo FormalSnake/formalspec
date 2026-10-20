@@ -17,11 +17,17 @@ pub struct Cmd {
     pub env: Vec<(String, String)>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stdin: Option<String>,
+    /// A file streamed to stdin, for archives too large to hold as a `String`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stdin_file: Option<std::path::PathBuf>,
+    /// Hand the terminal to the command (`ssh -t` for a sudo prompt); output is not captured.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub interactive: bool,
 }
 
 impl Cmd {
     pub fn new(program: impl Into<String>) -> Cmd {
-        Cmd { program: program.into(), args: vec![], env: vec![], stdin: None }
+        Cmd { program: program.into(), args: vec![], env: vec![], stdin: None, stdin_file: None, interactive: false }
     }
 
     pub fn arg(mut self, a: impl Into<String>) -> Cmd {
@@ -41,6 +47,16 @@ impl Cmd {
 
     pub fn stdin(mut self, input: impl Into<String>) -> Cmd {
         self.stdin = Some(input.into());
+        self
+    }
+
+    pub fn stdin_file(mut self, path: impl Into<std::path::PathBuf>) -> Cmd {
+        self.stdin_file = Some(path.into());
+        self
+    }
+
+    pub fn interactive(mut self) -> Cmd {
+        self.interactive = true;
         self
     }
 }
@@ -81,6 +97,20 @@ impl Runner for LiveRunner {
     fn run(&self, cmd: &Cmd) -> Result<Output> {
         let mut c = Command::new(&cmd.program);
         c.args(&cmd.args).envs(cmd.env.iter().map(|(k, v)| (k, v)));
+        if cmd.interactive {
+            let status = c.status().with_context(|| format!("running `{cmd}`"))?;
+            return Ok(Output { status: status.code().unwrap_or(-1), ..Output::default() });
+        }
+        if let Some(path) = &cmd.stdin_file {
+            let file = std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
+            c.stdin(file).stdout(Stdio::piped()).stderr(Stdio::piped());
+            let out = c.output().with_context(|| format!("running `{cmd}`"))?;
+            return Ok(Output {
+                status: out.status.code().unwrap_or(-1),
+                stdout: String::from_utf8_lossy(&out.stdout).into(),
+                stderr: String::from_utf8_lossy(&out.stderr).into(),
+            });
+        }
         c.stdin(if cmd.stdin.is_some() { Stdio::piped() } else { Stdio::null() });
         c.stdout(Stdio::piped()).stderr(Stdio::piped());
         let mut child = c.spawn().with_context(|| format!("running `{cmd}`"))?;

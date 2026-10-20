@@ -1,0 +1,169 @@
+//! Applying and planning hosts that are not this machine: ship the spec over ssh, check the
+//! machine matches its declaration, run `fspec` there.
+
+pub mod cmd;
+
+use std::path::PathBuf;
+
+use anyhow::{Context, Result, bail};
+use fspec_core::runner::{Output, Runner};
+use fspec_core::{Facts, Host, Plan};
+use serde::{Deserialize, Serialize};
+
+pub use cmd::{Target, target};
+
+/// What `fspec facts --json` prints: the machine as it is, to compare against its declaration.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Probe {
+    pub hostname: String,
+    pub platform: String,
+    pub distro: String,
+}
+
+impl Probe {
+    pub fn local(hostname: String) -> Probe {
+        let (platform, distro) = Facts::probe_local();
+        Probe { hostname, platform, distro }
+    }
+}
+
+/// Fails when the machine is not what the host declares.
+pub fn verify(host: &Host, probe: &Probe) -> Result<()> {
+    let facts = Facts::declared(&host.name, &host.platform, host.system.as_ref())?;
+    let declared = (facts.platform(), facts.distro);
+    if declared != (probe.platform.clone(), probe.distro.clone()) {
+        bail!(
+            "host {} is declared as {}/{} but the machine is {}/{}",
+            host.name,
+            declared.0,
+            declared.1,
+            probe.platform,
+            probe.distro
+        );
+    }
+    Ok(())
+}
+
+pub enum Reach {
+    Reachable(Probe),
+    Unreachable(String),
+}
+
+pub enum Planned {
+    Plan(Plan),
+    Unreachable,
+}
+
+pub struct Remote<'a> {
+    pub runner: &'a dyn Runner,
+    pub spec_dir: PathBuf,
+    /// The entry point's file name inside `spec_dir`.
+    pub spec_file: String,
+    /// Ship a tree with uncommitted changes anyway.
+    pub dirty: bool,
+}
+
+impl Remote<'_> {
+    pub fn probe(&self, alias: &str) -> Result<Reach> {
+        let out = self.runner.run(&cmd::probe(alias))?;
+        match out.status {
+            0 => Ok(Reach::Reachable(
+                serde_json::from_str(&out.stdout)
+                    .with_context(|| format!("`fspec facts --json` on {alias} printed: {}", out.stdout.trim()))?,
+            )),
+            255 => Ok(Reach::Unreachable(out.stderr.trim().to_string())),
+            127 => bail!(
+                "fspec is not installed on {alias} (not on PATH for a non-interactive ssh shell); install it there first, e.g. `cargo install --git https://github.com/FormalSnake/formalspec fspec`"
+            ),
+            _ => bail!("`fspec facts --json` failed on {alias}: {}", failure(&out)),
+        }
+    }
+
+    /// Probes `alias` and checks it is the machine `host` declares.
+    fn reach(&self, host: &Host, alias: &str) -> Result<Reach> {
+        let reach = self.probe(alias)?;
+        if let Reach::Reachable(probe) = &reach {
+            verify(host, probe)?;
+        }
+        Ok(reach)
+    }
+
+    /// Copies the git-tracked files of the spec dir, plus `fspec.lock`, to the remote. Returns the
+    /// remote directory as a shell word.
+    pub fn ship(&self, alias: &str) -> Result<String> {
+        let git = |c| self.runner.check(&c).context("the spec must live in a git repository to be shipped");
+        let commit = git(cmd::git_commit(&self.spec_dir))?.stdout.trim().to_string();
+        let tree_dirty = !git(cmd::git_status(&self.spec_dir))?.stdout.trim().is_empty();
+        if tree_dirty && !self.dirty {
+            bail!(
+                "the spec tree has uncommitted changes; commit them so every host applies the same commit, or pass --dirty"
+            );
+        }
+        let mut files: Vec<String> = git(cmd::git_files(&self.spec_dir))?.stdout.lines().map(str::to_string).collect();
+        if self.spec_dir.join("fspec.lock").exists() && !files.iter().any(|f| f == "fspec.lock") {
+            files.push("fspec.lock".into());
+        }
+        let dest = cmd::spec_dir(&commit, tree_dirty);
+        let tmp = tempfile::tempdir()?;
+        let archive = tmp.path().join("spec.tar");
+        self.runner.check(&cmd::tar_create(&self.spec_dir, &archive, &files))?;
+        self.runner.check(&cmd::ship(alias, &dest, &archive, tree_dirty))?;
+        Ok(dest)
+    }
+
+    pub fn apply(&self, host: &Host, alias: &str, scope: Option<&str>) -> Result<()> {
+        if let Reach::Unreachable(why) = self.reach(host, alias)? {
+            bail!("host {} is unreachable over ssh ({alias}): {why}", host.name);
+        }
+        let dest = self.ship(alias)?;
+        let out = self.runner.run(&cmd::apply(alias, &dest, &self.spec_file, &host.name, scope))?;
+        if out.status != 0 {
+            bail!("apply on {} exited {}", host.name, out.status);
+        }
+        Ok(())
+    }
+
+    pub fn plan(&self, host: &Host, alias: &str) -> Result<Planned> {
+        if let Reach::Unreachable(_) = self.reach(host, alias)? {
+            return Ok(Planned::Unreachable);
+        }
+        let dest = self.ship(alias)?;
+        let out = self.runner.check(&cmd::plan(alias, &dest, &self.spec_file, &host.name))?;
+        let plan = serde_json::from_str(&out.stdout)
+            .with_context(|| format!("`fspec plan --json` on {alias} printed: {}", out.stdout.trim()))?;
+        Ok(Planned::Plan(plan))
+    }
+}
+
+fn failure(out: &Output) -> String {
+    format!("exit {}: {}", out.status, out.stderr.trim())
+}
+
+/// Hosts in the order `--all` applies them: remote hosts as declared, then this machine.
+pub fn order<'h>(hosts: &'h [Host], local_name: &str) -> Vec<&'h Host> {
+    let (local, remote): (Vec<_>, Vec<_>) = hosts.iter().partition(|h| target(h, local_name) == Target::Local);
+    remote.into_iter().chain(local).collect()
+}
+
+/// Runs `apply_one` per host in [`order`], stopping at the first failure.
+pub fn apply_all(hosts: &[Host], local_name: &str, mut apply_one: impl FnMut(&Host) -> Result<()>) -> Result<()> {
+    let ordered = order(hosts, local_name);
+    let mut converged = Vec::new();
+    for (i, host) in ordered.iter().enumerate() {
+        if let Err(e) = apply_one(host) {
+            let pending: Vec<_> = ordered[i + 1..].iter().map(|h| h.name.as_str()).collect();
+            bail!(
+                "host {} failed: {e:#}\nconverged: {}\nnot attempted: {}",
+                host.name,
+                list(&converged),
+                list(&pending)
+            );
+        }
+        converged.push(host.name.as_str());
+    }
+    Ok(())
+}
+
+fn list(names: &[&str]) -> String {
+    if names.is_empty() { "none".into() } else { names.join(", ") }
+}
