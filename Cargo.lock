@@ -1149,6 +1149,7 @@ dependencies = [
  "fspec-remote",
  "fspec-sources",
  "fspec-store",
+ "fspec-switch",
  "serde_json",
  "tempfile",
 ]
@@ -1297,6 +1298,16 @@ dependencies = [
  "tempfile",
  "toml 1.1.8+spec-1.1.0",
  "zip",
+]
+
+[[package]]
+name = "fspec-switch"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fspec-core",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
