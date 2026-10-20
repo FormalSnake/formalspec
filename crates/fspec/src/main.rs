@@ -46,6 +46,15 @@ enum Command {
         #[arg(long)]
         scope: Option<ScopeArg>,
     },
+    /// Pull an app's edit of a managed file back into the repo.
+    Adopt {
+        /// The file as written in the spec (`~/.config/x`) or its path on disk.
+        path: String,
+        #[arg(long)]
+        host: Option<String>,
+    },
+    /// Report drift on managed files as it happens.
+    Watch,
     /// Re-apply an earlier generation as a new one. Store packages come back by moving
     /// `current`, since their old store paths are still there.
     Rollback {
@@ -129,6 +138,16 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
+        Command::Adopt { path, host } => {
+            let spec = fspec_eval::evaluate(&spec_path)?;
+            let host = select(&spec, host.as_deref(), &paths)?;
+            let env = Env::new(&paths, host, &spec_dir)?;
+            adopt(&env, host, path)
+        }
+        Command::Watch => {
+            let stop = std::sync::atomic::AtomicBool::new(false);
+            fspec_files::watch::run(&paths, &mut |line| println!("{line}"), &stop)
+        }
         Command::Rollback { generation, host, scope } => {
             let spec = fspec_eval::evaluate(&spec_path)?;
             let host = select(&spec, host.as_deref(), &paths)?;
@@ -175,6 +194,52 @@ fn main() -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn adopt(env: &Env, host: &Host, path: &str) -> Result<()> {
+    use fspec_core::Resource;
+    use fspec_files::adopt::{Outcome, adopt};
+    let wanted = std::path::absolute(path)?;
+    let (file, scope) = host
+        .desired()
+        .into_iter()
+        .find_map(|d| match d.resource {
+            Resource::File(f) => {
+                let hit = f.path == path || env.paths.resolve(&f.path).is_ok_and(|p| p == wanted);
+                hit.then(|| {
+                    let scope = Resource::File(f.clone()).scope();
+                    (f, scope)
+                })
+            }
+            _ => None,
+        })
+        .with_context(|| format!("host {} declares no file at {path}", host.name))?;
+    let state_path = state_dir(env.paths, scope).join("state.json");
+    let mut state = State::load(&state_path)?;
+    let key = Resource::File(file.clone()).key();
+    let record = state.entries.get(&key).map(|e| e.record.clone()).unwrap_or_default();
+    match adopt(&env.cx(scope, &state), &file, &record)? {
+        Outcome::InSync => println!("{} is what fspec wrote, nothing to adopt", file.path),
+        Outcome::Copied { to, record } => {
+            if let Some(entry) = state.entries.get_mut(&key) {
+                entry.record = record;
+                state.save(&state_path)?;
+            }
+            println!("copied {} into {}", file.path, to.display());
+        }
+        Outcome::Patch { notes } => {
+            println!("{} owns keys, not the file; these changed on disk:", file.path);
+            notes.iter().for_each(|n| println!("  {n}"));
+        }
+        Outcome::Generated { diff } => {
+            print!("{diff}");
+            bail!(
+                "{} is generated from the spec, so there is no repo file to update; edit the spec to match",
+                file.path
+            );
+        }
+    }
+    Ok(())
 }
 
 /// What every scope's `Cx` borrows.

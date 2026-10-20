@@ -10,6 +10,7 @@ repository = "https://github.com/FormalSnake/formalspec"
 
 [workspace.dependencies]
 allocative = "0.3.6"
+age = { version = "0.12.1", features = ["armor"] }
 anyhow = "1.0.104"
 base64 = "0.23.1"
 clap = { version = "4.6.7", features = ["derive"] }
@@ -19,6 +20,10 @@ ruzstd = "0.9.1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
 sha2 = "0.11.1"
+notify = "8.2.0"
+plist = "1.10.2"
+serde_yaml_ng = "0.10.0"
+similar = "3.2.0"
 starlark = "0.14.2"
 tar = "0.4.46"
 tempfile = "3"
@@ -28,3 +33,4 @@ zip = { version = "9.0.5", default-features = false, features = ["deflate"] }
 fspec-core = { path = "crates/fspec-core" }
 fspec-eval = { path = "crates/fspec-eval" }
 fspec-store = { path = "crates/fspec-store" }
+fspec-files = { path = "crates/fspec-files" }

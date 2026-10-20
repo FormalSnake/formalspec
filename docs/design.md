@@ -310,8 +310,19 @@ State keeps the value FormalSpec last wrote for each owned key, like
 Keys FormalSpec never declared are never read or written. Dropping a key from
 `owns` deletes it only if it still holds the last-applied value.
 
+A key with no last-applied value that already exists on disk is a conflict, except
+for `list_union` and `list_keyed`, which join the existing list. Rewriting a patched file
+reserializes it, so comments in it are lost. A conflict under `on_conflict = "fail"` aborts
+`apply` during prepare, before anything live changes.
+
 Lists need a strategy: `list_union` (ensure these items, keep others),
 `list_replace` (exact list) or `list_keyed(field)` (merge objects by a field).
+
+State records the sha256 of each managed file and secret, and `plan` also reports `source changed`
+when the repo `src` differs from what was written. Removal deletes a file only while it still
+matches that hash (a link: while it is still our symlink); otherwise it is kept with a warning.
+`secret` decrypts with `<home>/.config/fspec/age.key`. After `fspec adopt` copies a file into the
+repo it rewrites the state hash, so the file stops reading as drifted.
 
 `fspec watch` uses inotify or FSEvents to report drift on managed files as it
 happens and stays quiet about writes to keys a patch does not own.
