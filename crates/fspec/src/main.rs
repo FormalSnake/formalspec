@@ -117,6 +117,33 @@ enum Command {
         #[arg(long)]
         scope: Option<ScopeArg>,
     },
+    /// Install another distro beside this one, or reset a bootc host's /etc and /var.
+    Switch {
+        /// Bootstrap this distro into a new btrfs root subvolume. The host's `system` must already
+        /// declare it.
+        #[arg(long, value_parser = fspec_switch::DISTROS, conflicts_with_all = ["reset_var", "to_image"])]
+        distro: Option<String>,
+        /// Stage a reset of /etc and /var to the staged image's defaults for the next boot, keeping
+        /// the host's `persist` paths.
+        #[arg(long, conflicts_with = "to_image")]
+        reset_var: bool,
+        /// Convert this classic system to the bootc image the host declares (destructive).
+        #[arg(long)]
+        to_image: bool,
+        #[arg(long)]
+        host: Option<String>,
+        /// Fedora release number or Debian suite to bootstrap.
+        #[arg(long, requires = "distro")]
+        release: Option<String>,
+        /// Confirm --to-image, which reinitialises /boot.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Delete a distro root created by `fspec switch --distro`, and its boot entry.
+    Forget {
+        #[arg(value_parser = fspec_switch::DISTROS)]
+        distro: String,
+    },
     /// Print what this machine is, as `apply` compares it with the declaration.
     #[command(hide = true)]
     Facts {
@@ -389,6 +416,14 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
+        Command::Switch { distro, reset_var, to_image, host, release, yes } => {
+            let opts = Switch { distro: distro.as_deref(), reset_var: *reset_var, to_image: *to_image };
+            let spec = fspec_eval::evaluate(&spec_path)?;
+            let name = host.clone().unwrap_or_else(local_hostname);
+            let host = spec.host(&name)?;
+            switch(&paths, &spec_path, host, &opts, release.as_deref(), *yes)
+        }
+        Command::Forget { distro } => forget(&paths, distro),
         Command::Facts { json } => {
             let probe = Probe::local(local_hostname());
             if *json {
@@ -438,6 +473,112 @@ fn main() -> Result<()> {
             Ok(())
         }
     }
+}
+
+struct Switch<'a> {
+    distro: Option<&'a str>,
+    reset_var: bool,
+    to_image: bool,
+}
+
+/// Commands run for real only on a live root; under `--root` they are logged.
+fn switch_runner(paths: &Paths) -> Result<Box<dyn Runner>> {
+    if !is_live(paths) {
+        return Ok(Box::new(LogRunner { log: paths.system("/var/log/fspec-commands.log") }));
+    }
+    if !is_root(&LiveRunner)? {
+        bail!("this changes the boot setup; run it as root (`sudo fspec ...`)");
+    }
+    Ok(Box::new(LiveRunner))
+}
+
+fn run_plan(paths: &Paths, runner: &dyn Runner, plan: &fspec_switch::Plan) -> Result<()> {
+    if is_live(paths) {
+        return plan.execute(runner);
+    }
+    plan.log(runner)?;
+    println!("logged {} commands to {}", plan.lines().len(), paths.system("/var/log/fspec-commands.log").display());
+    Ok(())
+}
+
+fn machine(paths: &Paths, runner: &dyn Runner) -> Result<fspec_switch::Machine> {
+    if is_live(paths) { fspec_switch::detect(runner, paths) } else { Ok(fspec_switch::assumed()) }
+}
+
+fn switch(paths: &Paths, spec_path: &Path, host: &Host, opts: &Switch, release: Option<&str>, yes: bool) -> Result<()> {
+    let runner = switch_runner(paths)?;
+    let spec_dir = spec_path.parent().context("spec has no parent directory")?;
+    let live = is_live(paths);
+    if let Some(distro) = opts.distro {
+        match &host.system {
+            Some(System::Distro(d)) if d.distro == distro => {}
+            _ => bail!(
+                "host {} does not declare {distro} as its system. Edit `system =` to {distro}(...) first: the new \
+                 root is built from that block",
+                host.name
+            ),
+        }
+        let arch = host.platform.split('-').next().unwrap_or_default();
+        let exe = std::env::current_exe()?;
+        let target = fspec_switch::Target {
+            distro,
+            host: &host.name,
+            arch,
+            release,
+            spec_dir,
+            spec_file: &file_name(spec_path)?,
+            exe: &exe,
+        };
+        let plan = fspec_switch::switch_distro(paths, &machine(paths, runner.as_ref())?, &target)?;
+        run_plan(paths, runner.as_ref(), &plan)?;
+        if live {
+            println!("{distro} is installed in @{distro}: reboot and pick \"{distro} (fspec)\" from the boot menu");
+        }
+    } else if opts.reset_var {
+        let Some(System::Image(_)) = &host.system else { bail!("host {} has no image(...) system layer", host.name) };
+        if live {
+            if !fspec_switch::is_bootc(runner.as_ref())? {
+                bail!("this machine is not a bootc deployment, so there is no image default to reset to");
+            }
+            if !fspec_switch::has_staged(runner.as_ref())? {
+                bail!("no image is staged; change image(base = ...), run `fspec apply`, then switch --reset-var");
+            }
+        }
+        let reset = fspec_switch::reset_var(paths, &host.persist)?;
+        reset.warnings.iter().for_each(|w| eprintln!("warning: {w}"));
+        run_plan(paths, runner.as_ref(), &reset.plan)?;
+        if live {
+            println!("/etc and /var reset at the next boot; remove /var/lib/fspec/reset-var/pending to cancel");
+        }
+    } else if opts.to_image {
+        let Some(System::Image(_)) = &host.system else { bail!("host {} has no image(...) system layer", host.name) };
+        let lock = Lock::load(&spec_dir.join("fspec.lock"))?;
+        let Some(locked) = lock.system.get(&host.name) else {
+            bail!("fspec.lock has no image for host {}; run `fspec update --images` first", host.name)
+        };
+        if live {
+            if fspec_switch::is_bootc(runner.as_ref())? {
+                bail!("this machine already runs bootc; change image(base = ...) and apply instead");
+            }
+            if !yes {
+                bail!("bootc install to-existing-root reinitialises /boot and replaces this system; rerun with --yes");
+            }
+        }
+        run_plan(paths, runner.as_ref(), &fspec_switch::to_image(paths, &locked.image))?;
+    } else {
+        bail!("pick one of --distro <distro>, --reset-var or --to-image");
+    }
+    Ok(())
+}
+
+fn forget(paths: &Paths, distro: &str) -> Result<()> {
+    let runner = switch_runner(paths)?;
+    let plan = fspec_switch::forget(paths, &machine(paths, runner.as_ref())?, distro)?;
+    run_plan(paths, runner.as_ref(), &plan)?;
+    if is_live(paths) {
+        println!("{distro} and its boot entry are deleted");
+    }
+    Ok(())
 }
 
 fn scope_name(s: ScopeArg) -> &'static str {

@@ -44,3 +44,4 @@ fspec-pkgmgr = { path = "crates/fspec-pkgmgr" }
 fspec-os = { path = "crates/fspec-os" }
 fspec-remote = { path = "crates/fspec-remote" }
 fspec-image = { path = "crates/fspec-image" }
+fspec-switch = { path = "crates/fspec-switch" }

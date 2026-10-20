@@ -638,20 +638,70 @@ Between bootc distros, change `image(base = ...)` and apply. FormalSpec
 rebuilds your image on the new base and runs `bootc switch`; you reboot into
 the new distro with the old one still in the boot menu. Home, Flatpaks, store
 packages and user services are outside the image and carry over.
-`fspec switch --reset-var` resets `/etc` and `/var` to the new image's
-defaults, except paths listed in `persist`.
 
-To or from a classic distro, `fspec switch --distro void`:
+`fspec switch --reset-var` (run after that apply, as root) resets `/etc` and
+`/var` to the new image's defaults. The running system cannot reset its own
+`/etc`, so the command only stages the reset for the next boot. It refuses
+unless the machine is a bootc deployment with a staged image. It writes, under
+`/var/lib/fspec/reset-var/`, a `keep` list (fspec's own state `/var/lib/fspec`,
+`/opt/fspec` and `/var/opt/fspec`, the homes `/home`, `/var/home` and
+`/var/roothome`, then the host's `persist` paths), a `reset.sh`, and finally a
+`pending` marker. It also installs and enables `fspec-reset-var.service`, a
+oneshot ordered after `local-fs.target` and before `sysinit.target` and
+`systemd-tmpfiles-setup.service`, which only runs while `pending` exists. The
+script deletes everything under `/var` and `/etc` that is neither in `keep` nor
+a parent of something in it (it descends into parents instead of deleting
+them), copies `/usr/etc` over `/etc`, and removes `pending` last, so an
+interrupted run repeats on the next boot. tmpfiles then recreates the image's
+`/var` defaults. Remove `pending` to cancel. `/etc/passwd`, `/etc/shadow` and
+`/etc/group` are reset like the rest: the command warns when they are not in
+`persist`, since `apply` recreates the declared users but not their passwords.
 
-1. Creates a new btrfs root subvolume.
-2. Bootstraps the base system into it from the running OS (`dnf --installroot`,
-   `pacstrap`, `xbps-install -r`, `debootstrap`).
-3. Applies the spec inside it with the new distro's backends.
-4. Adds a boot entry. `/home` is a shared subvolume.
+To or from a classic distro, `fspec switch --distro void` (fedora, arch, debian
+or void). The host's `system` must already declare the target distro, so edit
+`system =` to `void(...)` first and pass `--host` for that host; the command
+refuses any other host. Nothing is built from a second declaration. The root
+must be btrfs and `/home` must be its own subvolume, else the command stops
+before touching anything. It reads the bootloader through the runner
+(`bootctl is-installed`, else `/boot/grub2` or `/boot/grub`) and refuses a
+GRUB setup whose `/boot` is a separate filesystem. Then it:
 
-The old root stays bootable until `fspec forget <distro>` deletes it, which also
-deletes every leftover system file it had. Getting a non-bootc machine onto a
-bootc image uses `bootc install to-existing-root`.
+1. Mounts the btrfs top level and refuses if `@<distro>` already exists.
+2. Creates the subvolume `@<distro>` and mounts it under `/run/fspec/switch/`.
+3. Bootstraps the base system from the running OS: `dnf --installroot` (needs
+   `--release <n>`), `pacstrap -K`, `debootstrap` (`--release` is the suite,
+   default `stable`) or `xbps-install -r`.
+4. Writes the new root's `fstab` with `/` on `@<distro>` and `/home` on the
+   shared home subvolume, and copies `resolv.conf`.
+5. Applies the spec inside it. `--root` only logs commands, so the apply runs as
+   `chroot <new root> fspec --spec <copy of the spec> apply --local --scope
+   system --host <host>` with the running `fspec` and the spec directory copied
+   in, and the new distro's backends do the work. The binary must run in the
+   new root, so a glibc build does not suit a musl Void. The user scope applies
+   at first login there.
+6. Copies the newest kernel and initramfs into `fspec/<distro>/` on the ESP
+   (systemd-boot, with a `loader/entries/fspec-<distro>.conf`) or in `/boot`
+   (GRUB, with an executable `/etc/grub.d/42_fspec_<distro>` and a regenerated
+   config). The kernel is copied once; a later kernel update inside the new
+   distro needs the copy repeated by hand.
+7. Unmounts, also after a failure.
+
+Under `--root` the btrfs and bootloader probes are skipped and btrfs with
+systemd-boot on `/boot` is assumed, so the plan is logged to
+`<root>/var/log/fspec-commands.log` without running anything.
+
+`fspec switch --to-image` turns a classic machine into the host's bootc image
+with `podman run ... <locked image> bootc install to-existing-root
+--acknowledge-destructive`. It needs an `image(...)` host with a digest in
+`fspec.lock`, refuses a machine that already runs bootc, and needs `--yes`
+because the install reinitialises `/boot`.
+
+The old root stays bootable until `fspec forget <distro>` deletes it. It
+refuses the running distro and a root booted from `@<distro>`, and stops when
+that subvolume does not exist. It removes the boot entry and kernel copy, then
+runs `btrfs subvolume delete --recursive` on the subvolume, which takes every
+leftover system file with it. All of these need root; every step is a pure
+planning function in `fspec-switch` that returns the command list.
 
 Only the `system` block differs per distro. Everything from FormalSpec's own
 sources, Flatpaks and files moves unchanged. Base packages are named per
@@ -675,7 +725,9 @@ distro, so the `system` block is where those names live.
 | `fspec adopt <path>` | Pull an app's edit of a managed file into the repo |
 | `fspec orphans` | Unattributed app data |
 | `fspec watch` | Report drift live |
-| `fspec switch --distro d` | Install another distro beside this one |
+| `fspec switch --distro d [--release r]` | Install another distro beside this one |
+| `fspec switch --reset-var` | Stage a reset of `/etc` and `/var` for the next boot of a bootc host |
+| `fspec switch --to-image --yes` | Convert a classic machine to the host's bootc image |
 | `fspec forget <distro>` | Delete an old distro root |
 
 ## Remote hosts
@@ -736,6 +788,7 @@ A cargo workspace under `crates/`:
 | `fspec-pkgmgr` | Flatpak, Homebrew and the distro package backends (dnf, pacman, apt, xbps), and the base packages of a classic distro |
 | `fspec-os` | Services and timers per init (systemd, launchd, runit, OpenRC, dinit, s6, cron), users, macOS `defaults` |
 | `fspec-remote` | Remote hosts: ssh and tar command lines, the spec shipment, the probe check, `--all` ordering |
+| `fspec-switch` | `fspec switch` and `forget`: btrfs and bootloader detection, the command plans per distro, the `--reset-var` staging |
 | `fspec-build` | Source builds: recipe detection, the `.tar.zst` packer, the `ci packages` workflow, `update --cache` |
 | `fspec` | The CLI |
 
