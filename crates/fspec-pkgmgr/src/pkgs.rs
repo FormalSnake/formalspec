@@ -1,0 +1,306 @@
+//! Install, cache, journal and drift logic shared by the four distro package backends and
+//! the base packages of a classic distro.
+
+use std::fs;
+use std::path::PathBuf;
+
+use anyhow::{Context, Result, bail};
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
+use fspec_core::apply::{Cx, Op, Records};
+use fspec_core::facts::Os;
+use fspec_core::journal::{Journal, Undo, remove_any};
+use fspec_core::resource::{Pkg, PkgMode, Resource, Source};
+use fspec_core::runner::Cmd;
+use fspec_core::state::Entry;
+use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
+
+use crate::family::Family;
+use crate::{locked, pkg, text};
+
+/// A locked package file: where it comes from and the file name it is cached under.
+pub(crate) struct Cached {
+    pub url: String,
+    pub hash: String,
+    pub file: String,
+}
+
+struct Want {
+    names: Vec<String>,
+    /// The cached file to install instead of the names. Only for a single-name package, since
+    /// the lock holds one artifact per package.
+    cached: Option<Cached>,
+}
+
+fn names(fam: Family, p: &Pkg) -> Result<Vec<String>> {
+    let (Source::Dnf(d) | Source::Pacman(d) | Source::Apt(d) | Source::Xbps(d)) = &p.source else {
+        bail!("pkg:{} is not a {} package", p.name, fam.label())
+    };
+    Ok(if d.names.is_empty() { vec![p.name.clone()] } else { d.names.clone() })
+}
+
+fn want(fam: Family, cx: &Cx, p: &Pkg) -> Result<Want> {
+    let names = names(fam, p)?;
+    let artifact = locked(cx, p)?.and_then(|l| l.artifacts.get(&cx.facts.platform()));
+    let cached = match (p.mode, artifact, names.len()) {
+        (PkgMode::Pinned, Some(a), 1) => match (&a.url, &a.hash) {
+            (Some(url), Some(hash)) => {
+                let file = url.split(['?', '#']).next().and_then(|u| u.rsplit('/').next()).unwrap_or_default();
+                if file.is_empty() || file.starts_with('.') {
+                    bail!("pkg:{}: cannot derive a package file name from {url}", p.name);
+                }
+                Some(Cached { url: url.clone(), hash: hash.clone(), file: file.to_string() })
+            }
+            _ => None,
+        },
+        _ => None,
+    };
+    Ok(Want { names, cached })
+}
+
+pub(crate) fn cache_dir(cx: &Cx) -> PathBuf {
+    cx.paths.system("/var/cache/fspec/pkgs")
+}
+
+fn sri(bytes: &[u8]) -> String {
+    format!("sha256-{}", STANDARD.encode(Sha256::digest(bytes)))
+}
+
+/// `{"names": [...], "versions": {name: version}}` from the live system.
+pub(crate) fn record_names(cx: &Cx, fam: Family, names: &[String]) -> Result<Map<String, Value>> {
+    let mut versions = Map::new();
+    for n in names {
+        let out = cx.runner.run(&fam.version(n))?;
+        let v = fam.parse_version(n, &out.stdout);
+        if out.status == 0 && !v.is_empty() {
+            versions.insert(n.clone(), v.into());
+        }
+    }
+    let mut rec = Map::new();
+    rec.insert("names".into(), names.to_vec().into());
+    if !versions.is_empty() {
+        rec.insert("versions".into(), versions.into());
+    }
+    Ok(rec)
+}
+
+/// Notes for names that are gone or at another version than the record says.
+pub(crate) fn drift_names(cx: &Cx, fam: Family, names: &[String], rec: &Map<String, Value>) -> Result<Vec<String>> {
+    let mut notes = Vec::new();
+    let versions = rec.get("versions").and_then(Value::as_object);
+    for n in names {
+        let out = cx.runner.run(&fam.version(n))?;
+        if out.status != 0 {
+            notes.push(format!("{n} is not installed"));
+            continue;
+        }
+        let live = fam.parse_version(n, &out.stdout);
+        match versions.and_then(|v| v.get(n)).and_then(Value::as_str) {
+            Some(r) if !live.is_empty() && live != r => notes.push(format!("{n} is {live}, applied {r}")),
+            _ => {}
+        }
+    }
+    Ok(notes)
+}
+
+pub(crate) fn recorded_names(rec: &Map<String, Value>) -> Option<Vec<String>> {
+    let list = rec.get("names")?.as_array()?;
+    Some(list.iter().filter_map(Value::as_str).map(str::to_string).collect())
+}
+
+/// The package file the last apply installed, while it is still in the cache.
+fn cached_file(cx: &Cx, rec: &Map<String, Value>) -> Option<PathBuf> {
+    text(rec, "file").map(|f| cache_dir(cx).join(f)).filter(|p| p.exists())
+}
+
+fn run_all(cx: &Cx, cmds: &[Cmd]) -> Result<()> {
+    cmds.iter().try_for_each(|c| cx.runner.check(c).map(drop))
+}
+
+/// Records `cmds` so a rollback, which replays in reverse, runs them in the given order.
+fn journal_all(journal: &mut Journal, cmds: Vec<Cmd>) -> Result<()> {
+    cmds.into_iter().rev().try_for_each(|cmd| journal.record(Undo::Run { cmd }))
+}
+
+fn install_cmds(cx: &Cx, fam: Family, names: &[String], cached: Option<&Cached>) -> Vec<Cmd> {
+    match cached {
+        Some(c) => fam.install_file(&cache_dir(cx).join(&c.file), names),
+        None => fam.install_names(names),
+    }
+}
+
+/// Install `names` (from `cached` when set), journaling their removal first.
+pub(crate) fn install(
+    cx: &Cx,
+    journal: &mut Journal,
+    fam: Family,
+    names: &[String],
+    cached: Option<&Cached>,
+) -> Result<()> {
+    journal.record(Undo::Run { cmd: fam.remove(names) })?;
+    run_all(cx, &install_cmds(cx, fam, names, cached))
+}
+
+/// Installing over an existing package can only be reversed when the previous file is cached.
+fn upgrade(cx: &Cx, journal: &mut Journal, fam: Family, w: &Want, rec: &Map<String, Value>) -> Result<()> {
+    if let Some(prev) = cached_file(cx, rec) {
+        journal_all(journal, fam.install_file(&prev, &w.names))?;
+    }
+    run_all(cx, &install_cmds(cx, fam, &w.names, w.cached.as_ref()))
+}
+
+/// Remove `names`, journaling the install that puts them back: the cached file when the record
+/// names one that is still around, the names otherwise.
+pub(crate) fn remove(
+    cx: &Cx,
+    journal: &mut Journal,
+    fam: Family,
+    names: &[String],
+    rec: &Map<String, Value>,
+) -> Result<()> {
+    let back = match cached_file(cx, rec) {
+        Some(path) => fam.install_file(&path, names),
+        None => fam.install_names(names),
+    };
+    journal_all(journal, back)?;
+    cx.runner.check(&fam.remove(names))?;
+    Ok(())
+}
+
+fn entry_names(fam: Family, e: &Entry) -> Result<Vec<String>> {
+    match recorded_names(&e.record) {
+        Some(n) => Ok(n),
+        None => names(fam, pkg(&e.resource)?),
+    }
+}
+
+/// A `pkg` backend for one distro family.
+pub(crate) struct PkgEngine(pub Family);
+
+impl PkgEngine {
+    pub fn handles(&self, cx: &Cx, r: &Resource) -> bool {
+        cx.facts.os == Os::Linux
+            && !cx.facts.image
+            && Family::of_distro(&cx.facts.distro) == Some(self.0)
+            && matches!(r, Resource::Pkg(p) if Family::of_source(&p.source) == Some(self.0))
+    }
+
+    pub fn check(&self, cx: &Cx, r: &Resource) -> Result<()> {
+        want(self.0, cx, pkg(r)?).map(drop)
+    }
+
+    pub fn drift(&self, cx: &Cx, entry: &Entry) -> Result<Vec<String>> {
+        let fam = self.0;
+        let mut notes = drift_names(cx, fam, &entry_names(fam, entry)?, &entry.record)?;
+        if let Some(c) = want(fam, cx, pkg(&entry.resource)?)?.cached
+            && text(&entry.record, "file").as_deref() != Some(&c.file)
+        {
+            notes.push(format!("lock moved to {}", c.file));
+        }
+        Ok(notes)
+    }
+
+    pub fn prepare(&self, cx: &Cx, ops: &[Op]) -> Result<()> {
+        for op in ops {
+            let Some(d) = &op.desired else { continue };
+            let Some(c) = want(self.0, cx, pkg(&d.resource)?)?.cached else { continue };
+            cache(cx, &d.resource.key().to_string(), &c)?;
+        }
+        Ok(())
+    }
+
+    pub fn commit(&self, cx: &Cx, ops: &[Op], journal: &mut Journal) -> Result<Records> {
+        let fam = self.0;
+        let mut records = Records::new();
+        for op in ops {
+            let had = match &op.current {
+                Some(e) => Some((entry_names(fam, e)?, e.record.clone())),
+                None => None,
+            };
+            let Some(d) = &op.desired else {
+                if let Some((n, rec)) = had {
+                    remove(cx, journal, fam, &n, &rec)?;
+                }
+                continue;
+            };
+            let w = want(fam, cx, pkg(&d.resource)?)?;
+            match had {
+                None => install(cx, journal, fam, &w.names, w.cached.as_ref())?,
+                Some((n, rec)) if n == w.names => upgrade(cx, journal, fam, &w, &rec)?,
+                Some((n, rec)) => {
+                    remove(cx, journal, fam, &n, &rec)?;
+                    install(cx, journal, fam, &w.names, w.cached.as_ref())?;
+                }
+            }
+            let mut rec = record_names(cx, fam, &w.names)?;
+            if let Some(c) = &w.cached {
+                rec.insert("file".into(), c.file.clone().into());
+            }
+            records.insert(op.key.clone(), rec);
+        }
+        Ok(records)
+    }
+}
+
+/// Download `c` into the cache unless a file with the locked hash is already there.
+fn cache(cx: &Cx, what: &str, c: &Cached) -> Result<()> {
+    let dir = cache_dir(cx);
+    let dest = dir.join(&c.file);
+    if fs::read(&dest).is_ok_and(|b| sri(&b) == c.hash) {
+        return Ok(());
+    }
+    let bytes = cx.fetch.get(&c.url)?;
+    let got = sri(&bytes);
+    if got != c.hash {
+        bail!("{what}: downloaded {} hashes to {got}, the lock says {}", c.url, c.hash);
+    }
+    fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    let tmp = dest.with_extension("tmp");
+    fs::write(&tmp, bytes).with_context(|| format!("writing {}", tmp.display()))?;
+    if let Err(e) = fs::rename(&tmp, &dest) {
+        remove_any(&tmp)?;
+        return Err(e).with_context(|| format!("caching {}", dest.display()));
+    }
+    Ok(())
+}
+
+/// Declares a unit-struct backend that forwards to [`PkgEngine`].
+macro_rules! family_backend {
+    ($(#[$doc:meta])* $ty:ident, $name:literal, $fam:expr) => {
+        $(#[$doc])*
+        pub struct $ty;
+
+        impl Backend for $ty {
+            fn name(&self) -> &'static str {
+                $name
+            }
+
+            /// On an image host these packages belong to `image(packages = ...)`.
+            fn handles(&self, cx: &Cx, r: &Resource) -> bool {
+                PkgEngine($fam).handles(cx, r)
+            }
+
+            fn phase(&self) -> Phase {
+                Phase::Packages
+            }
+
+            fn check(&self, cx: &Cx, r: &Resource) -> Result<()> {
+                PkgEngine($fam).check(cx, r)
+            }
+
+            fn drift(&self, cx: &Cx, entry: &Entry) -> Result<Vec<String>> {
+                PkgEngine($fam).drift(cx, entry)
+            }
+
+            fn prepare(&self, cx: &Cx, ops: &[Op], _staging: &Path) -> Result<()> {
+                PkgEngine($fam).prepare(cx, ops)
+            }
+
+            fn commit(&self, cx: &Cx, ops: &[Op], _staging: &Path, journal: &mut Journal) -> Result<Records> {
+                PkgEngine($fam).commit(cx, ops, journal)
+            }
+        }
+    };
+}
+pub(crate) use family_backend;

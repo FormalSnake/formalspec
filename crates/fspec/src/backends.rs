@@ -1,7 +1,7 @@
 use fspec_core::Backend;
 use fspec_files::FileBackend;
 use fspec_os::{DefaultsBackend, LaunchdBackend, SystemdBackend, UsersBackend};
-use fspec_pkgmgr::{BrewBackend, DnfBackend, FlatpakBackend};
+use fspec_pkgmgr::{AptBackend, BrewBackend, DistroBackend, DnfBackend, FlatpakBackend, PacmanBackend, XbpsBackend};
 use fspec_store::StoreBackend;
 
 /// Every backend this build knows. Each claims the resources it can apply on a given host.
@@ -13,6 +13,10 @@ pub fn all() -> Vec<&'static dyn Backend> {
         &FlatpakBackend,
         &BrewBackend,
         &DnfBackend,
+        &PacmanBackend,
+        &AptBackend,
+        &XbpsBackend,
+        &DistroBackend,
         &SystemdBackend,
         &LaunchdBackend,
         &DefaultsBackend,
