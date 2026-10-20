@@ -116,6 +116,9 @@ impl Flavor for Runit {
             if !s.user {
                 initsvc::unlink(cx, journal, &live)?;
             }
+            // runsv keeps rewriting supervise/ inside the directory until it exits.
+            let exit = Cmd::new("sv").args(["-v", "exit"]).arg(cx.resolve(&dir)?.to_string_lossy().into_owned());
+            cx.runner.run(&exit)?;
             initsvc::reset_dir(cx, journal, &dir)?;
             return Ok(Map::new());
         }

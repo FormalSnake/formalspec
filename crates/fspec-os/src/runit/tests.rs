@@ -96,7 +96,7 @@ fn add_update_remove_command_sequences() {
 
     w.runner.calls.lock().unwrap().clear();
     apply_scope(&w.cx(Scope::System), backends, &[]).unwrap();
-    assert_eq!(w.runner.lines(), [sv(&w, "down var/service/fspec-web")]);
+    assert_eq!(w.runner.lines(), [sv(&w, "down var/service/fspec-web"), format!("sv -v exit {}", dir.display())]);
     assert!(!dir.exists() && fs::symlink_metadata(&link).is_err());
 }
 

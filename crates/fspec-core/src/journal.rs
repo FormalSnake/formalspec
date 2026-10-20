@@ -161,12 +161,18 @@ pub fn copy_any(from: &Path, to: &Path) -> Result<()> {
         fs::create_dir_all(to)?;
         for entry in fs::read_dir(from)? {
             let entry = entry?;
-            copy_any(&entry.path(), &to.join(entry.file_name()))?;
+            // A supervisor renames its status files in place, so an entry can vanish mid-copy.
+            match copy_any(&entry.path(), &to.join(entry.file_name())) {
+                Err(e) if e.downcast_ref::<std::io::Error>().is_some_and(|e| e.kind() == ErrorKind::NotFound) => {}
+                r => r?,
+            }
         }
         fs::set_permissions(to, meta.permissions())?;
-    } else {
+    } else if meta.is_file() {
         fs::copy(from, to)?;
     }
+    // FIFOs and sockets, like the `supervise/` pipes in a running runit or s6 service directory,
+    // belong to the supervisor, which recreates them.
     Ok(())
 }
 
@@ -211,5 +217,22 @@ mod tests {
         assert_eq!(runner.lines(), ["flatpak uninstall -y x"]);
         assert!(!state.join("journal.json").exists());
         assert!(!Journal::recover(&state, &runner).unwrap());
+    }
+
+    #[test]
+    fn backup_skips_fifos_in_a_service_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = dir.path().join("sv/web");
+        fs::create_dir_all(svc.join("supervise")).unwrap();
+        fs::write(svc.join("run"), "#!/bin/sh\n").unwrap();
+        let fifo = svc.join("supervise/control");
+        assert!(std::process::Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+
+        let mut j = Journal::begin(&dir.path().join("state"), 1).unwrap();
+        j.backup(&svc).unwrap();
+        remove_any(&svc).unwrap();
+        j.rollback(&RecordingRunner::default()).unwrap();
+        assert_eq!(fs::read_to_string(svc.join("run")).unwrap(), "#!/bin/sh\n");
+        assert!(svc.join("supervise").is_dir() && !fifo.exists());
     }
 }
