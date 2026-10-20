@@ -53,6 +53,7 @@ impl World {
             fetch: &self.fetch,
             generation: self.state().generation + 1,
             scope: Scope::User,
+            protect: &[],
         }
     }
 
@@ -616,4 +617,27 @@ fn adopt_copies_src_files_refuses_generated_and_lists_patch_keys() {
     fs::write(w.at("p.json"), r#"{"model": "haiku"}"#).unwrap();
     let out = adopt(&w.cx(), &patch, &record(&patch)).unwrap();
     assert_eq!(out, Outcome::Patch { notes: vec!["`model` changed".into()] });
+}
+
+#[test]
+fn protected_paths_fail_the_plan() {
+    let w = World::new();
+    let protect = vec!["~/.ssh".to_string()];
+    let cx = Cx { protect: &protect, ..w.cx() };
+    for path in ["~/.ssh/config", "~/.ssh/../.ssh/config"] {
+        let plan = plan_scope(&cx, &[&FileBackend], &want([text(path, "x")]), &State::default()).unwrap();
+        assert!(plan.unsupported.iter().any(|u| u.contains("protected path")), "{path}: {plan:?}");
+    }
+    let secret = Desired {
+        resource: Resource::Secret(Secret {
+            path: "~/.ssh/key".into(),
+            src: "secrets/k.age".into(),
+            perms: "0600".into(),
+            owner: None,
+        }),
+        owner: None,
+    };
+    assert!(!plan_scope(&cx, &[&FileBackend], &[secret], &State::default()).unwrap().unsupported.is_empty());
+    let ok = plan_scope(&cx, &[&FileBackend], &want([text("~/.config/ok", "x")]), &State::default()).unwrap();
+    assert!(ok.unsupported.is_empty());
 }

@@ -41,6 +41,17 @@ impl Paths {
         }
     }
 
+    /// The inverse of [`Paths::resolve`]: `~/…` under the home, `/…` under the root.
+    pub fn to_spec(&self, abs: &Path) -> String {
+        if let Ok(rest) = abs.strip_prefix(&self.home) {
+            return if rest.as_os_str().is_empty() { "~".into() } else { format!("~/{}", rest.display()) };
+        }
+        match abs.strip_prefix(&self.root) {
+            Ok(rest) => format!("/{}", rest.display()),
+            Err(_) => abs.display().to_string(),
+        }
+    }
+
     pub fn system_state_dir(&self) -> PathBuf {
         self.system("/var/lib/fspec")
     }

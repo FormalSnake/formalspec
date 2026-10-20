@@ -1,4 +1,5 @@
 pub mod apply;
+pub mod attribute;
 pub mod facts;
 pub mod fetch;
 pub mod journal;
@@ -8,6 +9,7 @@ pub mod plan;
 pub mod resource;
 pub mod runner;
 pub mod state;
+pub mod trash;
 
 pub use apply::{Backend, Cx, Op, Phase};
 pub use facts::Facts;

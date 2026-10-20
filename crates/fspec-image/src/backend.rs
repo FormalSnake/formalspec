@@ -159,6 +159,7 @@ mod tests {
                 fetch: &self.fetch,
                 generation: state.generation + 1,
                 scope: Scope::System,
+                protect: &[],
             }
         }
 

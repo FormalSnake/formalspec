@@ -57,6 +57,7 @@ impl World {
             fetch: &self.fetch,
             generation,
             scope,
+            protect: &[],
         }
     }
 
@@ -458,4 +459,25 @@ fn dnf_is_left_to_the_image_on_image_hosts() {
         })),
     );
     assert!(!DnfBackend.handles(&arch.cx(Scope::System), &dnf("htop", &[], "pinned").resource));
+}
+
+#[test]
+fn flatpak_removal_trashes_the_app_data_under_var_app() {
+    let mut w = World::linux();
+    w.lock.upsert(locked("firefox", "flatpak:org.mozilla.firefox", None, &[("any", commit("aaa"))]));
+    let want = [flatpak("firefox", "org.mozilla.firefox")];
+    let data = w.paths.home.join(".var/app/org.mozilla.firefox");
+    fs::create_dir_all(data.join("config")).unwrap();
+    fs::write(data.join("config/prefs"), "x").unwrap();
+
+    w.apply(Scope::System, &want).unwrap();
+    let plan = w.plan(Scope::System, &[]).unwrap();
+    assert!(plan.to_string().contains("data to trash: ~/.var/app/org.mozilla.firefox"), "{plan}");
+    w.apply(Scope::System, &[]).unwrap();
+    assert!(!data.exists());
+    let trashed = w.paths.home.join(".local/state/fspec/trash/system-2/firefox/0-org.mozilla.firefox/config/prefs");
+    assert!(trashed.exists());
+
+    w.apply(Scope::System, &want).unwrap();
+    assert!(data.join("config/prefs").exists());
 }

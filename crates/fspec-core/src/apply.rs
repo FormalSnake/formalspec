@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde_json::{Map, Value};
 
+use crate::attribute;
 use crate::facts::Facts;
 use crate::fetch::Fetch;
 use crate::journal::{Journal, remove_any};
@@ -18,6 +19,7 @@ use crate::plan::{Action, Change, Plan, plan};
 use crate::resource::{Desired, Key, Resource, Scope};
 use crate::runner::Runner;
 use crate::state::{Entry, State};
+use crate::trash::{data_paths, restore_pkg, trash_paths};
 
 /// What a backend may read while planning and applying.
 pub struct Cx<'a> {
@@ -31,6 +33,8 @@ pub struct Cx<'a> {
     /// The generation this apply creates (the state's current one plus one).
     pub generation: u64,
     pub scope: Scope,
+    /// The host's `protect` list, as written in the spec.
+    pub protect: &'a [String],
 }
 
 impl Cx<'_> {
@@ -39,10 +43,41 @@ impl Cx<'_> {
         self.paths.resolve(spec_path)
     }
 
+    /// Refuse a path under one of the host's `protect` entries. When a protected entry is an
+    /// ancestor of the applying user's home (`/home`), that home stays usable, since the spec
+    /// has to manage it; other users' homes do not.
+    pub fn check_path(&self, path: &Path) -> Result<()> {
+        let path = lexical(path);
+        let home = lexical(&self.paths.home);
+        for entry in self.protect {
+            let guard = lexical(&self.paths.resolve(entry)?);
+            let own_home = guard != home && home.starts_with(&guard) && path.starts_with(&home);
+            if path.starts_with(&guard) && !own_home {
+                bail!("{} is under protected path {entry}", path.display());
+            }
+        }
+        Ok(())
+    }
+
     /// The state directory for this scope.
     pub fn state_dir(&self) -> PathBuf {
         state_dir(self.paths, self.scope)
     }
+}
+
+fn lexical(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for c in path.components() {
+        match c {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// The resources a past generation had applied, for `rollback`. Generation 0 is the empty state.
@@ -155,7 +190,13 @@ pub fn plan_scope(cx: &Cx, backends: &[&dyn Backend], desired: &[Desired], state
         Scope::User => (&empty, state),
     };
     let mut p = plan(&cx.facts.name, &desired, system, user)?;
+    let claims = user_claims(cx)?;
     for d in &desired {
+        if let Resource::Pkg(pkg) = &d.resource {
+            for spec in &pkg.data {
+                cx.check_path(&cx.resolve(spec)?).with_context(|| format!("data of {}", d.resource.key()))?;
+            }
+        }
         match backend_for(cx, backends, &d.resource) {
             Ok(b) => {
                 if let Err(e) = b.check(cx, &d.resource) {
@@ -177,8 +218,27 @@ pub fn plan_scope(cx: &Cx, backends: &[&dyn Backend], desired: &[Desired], state
             p.changes.push(Change { key: key.clone(), scope: cx.scope, action: Action::Drift { notes }, detail });
         }
     }
+    for change in p.changes.iter_mut().filter(|c| c.action == Action::Remove) {
+        let Some(Entry { resource: Resource::Pkg(pkg), .. }) = state.entries.get(&change.key) else { continue };
+        if pkg.keep_data {
+            continue;
+        }
+        let paths = data_paths(cx, pkg, &claims)?;
+        for path in &paths {
+            cx.check_path(path).with_context(|| format!("data of {}", change.key))?;
+        }
+        if !paths.is_empty() {
+            let list: Vec<String> = paths.iter().map(|p| cx.paths.to_spec(p)).collect();
+            change.detail = format!("{} (data to trash: {})", change.detail, list.join(", "));
+        }
+    }
     p.changes.sort_by(|a, b| a.key.cmp(&b.key));
     Ok(p)
+}
+
+/// The data attributed to packages, kept in the user state whichever scope is applying.
+fn user_claims(cx: &Cx) -> Result<BTreeMap<String, Vec<String>>> {
+    Ok(State::load(&state_dir(cx.paths, Scope::User).join("state.json"))?.data)
 }
 
 fn backend_for<'b>(cx: &Cx, backends: &[&'b dyn Backend], r: &Resource) -> Result<&'b dyn Backend> {
@@ -199,7 +259,10 @@ pub fn apply_scope(cx: &Cx, backends: &[&dyn Backend], desired: &[Desired]) -> R
     let dir = cx.state_dir();
     let state_path = dir.join("state.json");
     Journal::recover(&dir, cx.runner)?;
-    let state = State::load(&state_path)?;
+    let mut state = State::load(&state_path)?;
+    if cx.scope == Scope::User && attribute::refresh(cx, &mut state, desired)? {
+        state.save(&state_path)?;
+    }
     if cx.generation != state.generation + 1 {
         bail!("apply for generation {} but the state is at {}", cx.generation, state.generation);
     }
@@ -263,6 +326,9 @@ pub fn apply_scope(cx: &Cx, backends: &[&dyn Backend], desired: &[Desired]) -> R
             match &op.desired {
                 None => {
                     next.entries.remove(&op.key);
+                    if op.key.kind == "pkg" {
+                        next.data.remove(&op.key.id);
+                    }
                 }
                 Some(d) => {
                     let record = records.get(&op.key).cloned().unwrap_or_default();
@@ -292,13 +358,42 @@ fn commit_all(
             b.commit(cx, &removals, staging, journal).with_context(|| format!("{}: removing", b.name()))?;
         }
     }
+    let ops = || by_backend.iter().flat_map(|(_, ops)| ops);
+    trash_removed(cx, ops().filter(|o| o.is_removal()), journal)?;
     for (b, ops) in by_backend {
         let rest: Vec<Op> = ops.iter().filter(|o| !o.is_removal()).cloned().collect();
         if !rest.is_empty() {
             records.extend(b.commit(cx, &rest, staging, journal).with_context(|| format!("{}: applying", b.name()))?);
         }
     }
+    restore_returned(cx, ops().filter(|o| o.current.is_none() && !o.is_removal()), journal)?;
     Ok(records)
+}
+
+/// Removed packages lose their app data to the trash once every backend has removed what it
+/// owned. This is the engine's job, not a backend's, so every package source behaves the same
+/// and the moves share the apply's journal.
+fn trash_removed<'o>(cx: &Cx, removals: impl Iterator<Item = &'o Op>, journal: &mut Journal) -> Result<()> {
+    let claims = user_claims(cx)?;
+    for op in removals {
+        if let Resource::Pkg(pkg) = op.resource()
+            && !pkg.keep_data
+        {
+            trash_paths(cx, journal, Some(&pkg.name), &data_paths(cx, pkg, &claims)?)
+                .with_context(|| format!("moving the data of {} to the trash", pkg.name))?;
+        }
+    }
+    Ok(())
+}
+
+/// A package that comes back (a rollback re-adds it) gets the data its removal trashed.
+fn restore_returned<'o>(cx: &Cx, adds: impl Iterator<Item = &'o Op>, journal: &mut Journal) -> Result<()> {
+    for op in adds {
+        if let Resource::Pkg(pkg) = op.resource() {
+            restore_pkg(cx, journal, &pkg.name).with_context(|| format!("restoring the data of {}", pkg.name))?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

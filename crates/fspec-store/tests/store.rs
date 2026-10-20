@@ -87,6 +87,7 @@ impl World {
             fetch: &self.fetch,
             generation,
             scope: Scope::System,
+            protect: &[],
         }
     }
 
@@ -361,4 +362,100 @@ fn project_pins_put_the_pinned_version_first() {
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "1.0.0");
 
     assert!(pin_dirs(&w.paths, &w.paths.root.join("elsewhere")).unwrap().is_empty());
+}
+
+fn with_data(d: Desired, data: &[&str]) -> Desired {
+    let mut value = serde_json::to_value(&d.resource).unwrap();
+    value["data"] = json!(data);
+    Desired { resource: serde_json::from_value(value).unwrap(), owner: None }
+}
+
+impl World {
+    fn add_tool(&mut self, name: &str) {
+        let url = format!("https://example/{name}.tar.gz");
+        let body = tgz(&[(&format!("{name}/{name}"), "#!/bin/sh\necho tool\n", 0o755)]);
+        self.lock.upsert(locked(name, &format!("aqua:{name}"), "1.0.0", &url, &body));
+        self.fetch = std::mem::take(&mut self.fetch).with(&url, body);
+    }
+
+    fn rollback_to(&mut self, n: u64) {
+        let dir = self.state_dir();
+        let past = State::load(&dir.join(format!("generations/{n}.json"))).unwrap();
+        let desired = desired_from_generation(&dir, n).unwrap();
+        self.lock = lock_from_state(&past);
+        self.fetch = MapFetch::default();
+        self.apply(&desired).unwrap();
+    }
+}
+
+#[test]
+fn rollback_brings_a_removed_packages_data_back() {
+    let mut w = World::new();
+    w.add_tool("extra");
+    let data = w.paths.system("/var/lib/extra");
+    fs::create_dir_all(&data).unwrap();
+    fs::write(data.join("db"), "rows").unwrap();
+    let want = [with_data(aqua("extra"), &["/var/lib/extra"])];
+
+    w.apply(&want).unwrap();
+    w.apply(&[]).unwrap();
+    assert!(!data.exists());
+    assert!(w.state_dir().join("trash/2/extra/0-extra/db").exists());
+
+    w.rollback_to(1);
+    assert_eq!(fs::read_to_string(data.join("db")).unwrap(), "rows");
+    assert_eq!(w.run("extra"), "tool");
+}
+
+#[test]
+fn gc_keeps_what_current_references_and_deletes_the_rest() {
+    let mut w = World::new();
+    w.add_tool("extra");
+    let data = w.paths.system("/var/lib/extra");
+    fs::create_dir_all(&data).unwrap();
+    fs::write(data.join("db"), "rows").unwrap();
+    let extra = with_data(aqua("extra"), &["/var/lib/extra"]);
+
+    w.add_hello("1.0.0");
+    w.apply(&[aqua("hello"), extra]).unwrap();
+    w.add_hello("2.0.0");
+    w.apply(&[aqua("hello")]).unwrap();
+    w.add_hello("3.0.0");
+    w.apply(&[aqua("hello")]).unwrap();
+    let dir = w.state_dir();
+    let now = std::time::SystemTime::now();
+    let day = std::time::Duration::from_secs(86_400);
+
+    let none = fspec_store::gc::run(&w.paths, Scope::System, now - 14 * day).unwrap();
+    assert!(none.removed.is_empty(), "{none:?}");
+
+    let old = fs::File::open(dir.join("generations/1.json")).unwrap();
+    old.set_modified(now - 30 * day).unwrap();
+    let some = fspec_store::gc::run(&w.paths, Scope::System, now - 14 * day).unwrap();
+    assert_eq!(some.removed.len(), 1, "{some:?}");
+    assert!(!dir.join("generations/1.json").exists());
+    assert!(dir.join("generations/2.json").exists());
+
+    let report = fspec_store::gc::run(&w.paths, Scope::System, now + day).unwrap();
+    assert!(report.freed > 0);
+    assert!(!dir.join("generations/2.json").exists());
+    assert!(dir.join("generations/3.json").exists());
+    assert!(!dir.join("trash/2").exists(), "{:?}", report.removed);
+    assert!(!w.root().join("generations/1").exists());
+    assert!(!w.root().join("generations/2").exists());
+    assert_eq!(w.current(), Path::new("generations/3"));
+    assert_eq!(w.run("hello"), "3.0.0");
+    // hello 3.0.0 and its sidecar are all that is left in the store.
+    assert_eq!(w.store_entries(), 2);
+    assert!(w.plan(&[aqua("hello")]).changes.is_empty());
+}
+
+#[test]
+fn durations_parse() {
+    use fspec_store::gc::parse_duration;
+    assert_eq!(parse_duration("14d").unwrap().as_secs(), 14 * 86_400);
+    assert_eq!(parse_duration("12h").unwrap().as_secs(), 43_200);
+    assert_eq!(parse_duration("0s").unwrap().as_secs(), 0);
+    assert!(parse_duration("14").is_err());
+    assert!(parse_duration("d").is_err());
 }

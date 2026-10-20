@@ -109,6 +109,28 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// List app data under ~/.config, ~/.local/share, ~/.local/state and ~/.cache that no
+    /// package claims and no managed file covers.
+    Orphans {
+        /// Record PATH as PKG's data, so removing PKG trashes it.
+        #[arg(long, num_args = 2, value_names = ["PATH", "PKG"], conflicts_with = "delete")]
+        claim: Option<Vec<String>>,
+        /// Move PATH to the trash.
+        #[arg(long, value_name = "PATH")]
+        delete: Option<String>,
+        #[arg(long)]
+        host: Option<String>,
+    },
+    /// Delete old generations, their snapshots, trash and store paths nothing kept references.
+    Gc {
+        /// Only things last touched longer ago than this: `14d`, `12h`, `30m`, `90s`, `2w`.
+        #[arg(long)]
+        older_than: String,
+        #[arg(long)]
+        host: Option<String>,
+        #[arg(long)]
+        scope: Option<ScopeArg>,
+    },
     /// Print shell code that puts `.fspec.toml` pinned tools on PATH. Run it from the shell's rc file.
     ShellHook { shell: ShellArg },
     /// Print the bin directories pinned for a directory, one per line. Called by the shell hook.
@@ -307,6 +329,30 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
+        Command::Orphans { claim, delete, host } => {
+            let spec = fspec_eval::evaluate(&spec_path)?;
+            let host = select(&spec, host.as_deref(), &paths)?;
+            let env = Env::new(&paths, host, &spec_dir)?;
+            orphans(&env, claim.as_deref(), delete.as_deref())
+        }
+        Command::Gc { older_than, host, scope } => {
+            let age = fspec_store::gc::parse_duration(older_than)?;
+            let cutoff = std::time::SystemTime::now().checked_sub(age).unwrap_or(std::time::UNIX_EPOCH);
+            let host = host.clone().unwrap_or_else(local_hostname);
+            let scopes: Vec<Scope> = scope.map(|s| vec![s.into()]).unwrap_or(SCOPES.to_vec());
+            for scope in scopes {
+                if scope == Scope::System && is_live(&paths) && !is_root(&LiveRunner)? {
+                    sudo_system(&spec_path, &host, &paths, &["gc", "--older-than", older_than])?;
+                    continue;
+                }
+                let report = fspec_store::gc::run(&paths, scope, cutoff)?;
+                for line in &report.removed {
+                    println!("removed {line}");
+                }
+                println!("{scope:?}: freed {}", fspec_store::gc::human(report.freed));
+            }
+            Ok(())
+        }
         Command::ShellHook { shell } => {
             let shell = match shell {
                 ShellArg::Fish => fspec_store::Shell::Fish,
@@ -378,6 +424,46 @@ fn plan_all(spec: &fspec_eval::Spec, paths: &Paths, spec_path: &Path, dirty: boo
     }
     if failed > 0 {
         bail!("{failed} host(s) could not be planned");
+    }
+    Ok(())
+}
+
+fn orphans(env: &Env, claim: Option<&[String]>, delete: Option<&str>) -> Result<()> {
+    use fspec_core::journal::Journal;
+    use fspec_core::{attribute, trash};
+    let system = State::load(&state_dir(env.paths, Scope::System).join("state.json"))?;
+    let dir = state_dir(env.paths, Scope::User);
+    let user_path = dir.join("state.json");
+    let mut user = State::load(&user_path)?;
+    let orphans = attribute::orphans(env.paths, &system, &user);
+    match (claim, delete) {
+        (Some([path, pkg]), _) => {
+            let key = fspec_core::Key { kind: "pkg".into(), id: pkg.clone() };
+            if !system.entries.contains_key(&key) && !user.entries.contains_key(&key) {
+                bail!("{key} is not installed");
+            }
+            let spec = attribute::claim(env.paths, &mut user, path, pkg)?;
+            user.save(&user_path)?;
+            println!("{spec} now belongs to {pkg}");
+        }
+        (_, Some(path)) => {
+            let spec = attribute::orphan_spec(env.paths, path)?;
+            if !orphans.contains(&spec) {
+                bail!("{spec} is claimed by a package or covered by a managed file, so it is not an orphan");
+            }
+            let cx = env.cx(Scope::User, &user);
+            Journal::recover(&dir, cx.runner)?;
+            let mut journal = Journal::begin(&dir, cx.generation)?;
+            match trash::trash_paths(&cx, &mut journal, None, &[env.paths.resolve(&spec)?]) {
+                Ok(()) => journal.finish()?,
+                Err(e) => {
+                    journal.rollback(cx.runner)?;
+                    return Err(e);
+                }
+            }
+            println!("moved {spec} to the trash");
+        }
+        _ => orphans.iter().for_each(|o| println!("{o}")),
     }
     Ok(())
 }
@@ -458,6 +544,7 @@ struct Env<'a> {
     lock: Lock,
     runner: Box<dyn Runner>,
     fetch: LiveFetch,
+    protect: Vec<String>,
 }
 
 impl<'a> Env<'a> {
@@ -473,6 +560,7 @@ impl<'a> Env<'a> {
                 Box::new(LogRunner { log: paths.system("/var/log/fspec-commands.log") })
             },
             fetch: LiveFetch::new(),
+            protect: host.protect.clone(),
         })
     }
 
@@ -486,6 +574,7 @@ impl<'a> Env<'a> {
             fetch: &self.fetch,
             generation: state.generation + 1,
             scope,
+            protect: &self.protect,
         }
     }
 }

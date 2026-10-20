@@ -98,7 +98,7 @@ impl Project {
             .arg("--home")
             .arg(self.root().join("home/u"))
             .args(args)
-            .args(if args[0] == "plan" || args[0] == "apply" || args[0] == "rollback" {
+            .args(if matches!(args[0], "plan" | "apply" | "rollback" | "orphans") {
                 vec!["--host", "macbook"]
             } else {
                 vec![]
@@ -171,4 +171,72 @@ fn shell_hook_and_pins() {
     for shell in ["fish", "zsh", "bash"] {
         assert!(p.ok(&["shell-hook", shell]).contains("fspec env --dir"));
     }
+}
+
+fn spec(greet: &str) -> String {
+    format!(
+        r#"hosts = [
+    host(
+        name = "macbook",
+        platform = "aarch64-darwin",
+        modules = [lambda host: [pkg("hello"){greet}]],
+    ),
+]
+"#
+    )
+}
+
+#[test]
+fn removal_trashes_data_rollback_restores_it_and_gc_keeps_current() {
+    let p = Project::new();
+    p.lock("1.0.0");
+    let with_greet = r#", pkg("greet", source = github("acme/greet"), data = ["/var/lib/greet-data"])"#;
+    fs::write(p.work().join("spec.star"), spec(with_greet)).unwrap();
+    let data = p.root().join("var/lib/greet-data");
+    p.ok(&["apply"]);
+    fs::create_dir_all(&data).unwrap();
+    fs::write(data.join("db"), "rows").unwrap();
+
+    fs::write(p.work().join("spec.star"), spec("")).unwrap();
+    let plan = p.ok(&["plan"]);
+    assert!(plan.contains("data to trash: /var/lib/greet-data"), "{plan}");
+    p.ok(&["apply"]);
+    assert!(!data.exists());
+    let trashed = p.root().join("var/lib/fspec/trash/2/greet/0-greet-data/db");
+    assert_eq!(fs::read_to_string(trashed).unwrap(), "rows");
+
+    p.ok(&["rollback"]);
+    assert_eq!(fs::read_to_string(data.join("db")).unwrap(), "rows");
+    assert_eq!(p.run("greet"), "greet");
+
+    let out = p.ok(&["gc", "--older-than", "0s"]);
+    assert!(out.contains("freed"), "{out}");
+    assert_eq!(p.current(), Path::new("generations/3"));
+    assert_eq!(p.run("hello"), "hello 1.0.0");
+    assert_eq!(p.run("greet"), "greet");
+    assert!(p.root().join("var/lib/fspec/generations/3.json").exists());
+    assert!(!p.root().join("var/lib/fspec/generations/1.json").exists());
+    assert!(!p.root().join("var/lib/fspec/trash/2").exists());
+}
+
+#[test]
+fn orphans_list_claim_and_delete() {
+    let p = Project::new();
+    p.lock("1.0.0");
+    p.ok(&["apply"]);
+    let config = p.root().join("home/u/.config");
+    for dir in ["mystery", "junk"] {
+        fs::create_dir_all(config.join(dir)).unwrap();
+        fs::write(config.join(dir).join("f"), dir).unwrap();
+    }
+    assert_eq!(p.ok(&["orphans"]), "~/.config/junk\n~/.config/mystery\n");
+
+    p.ok(&["orphans", "--claim", "~/.config/mystery", "hello"]);
+    assert_eq!(p.ok(&["orphans"]), "~/.config/junk\n");
+
+    p.ok(&["orphans", "--delete", "~/.config/junk"]);
+    assert!(!config.join("junk").exists());
+    assert!(p.root().join("home/u/.local/state/fspec/trash/1/orphans/0-junk/f").exists());
+    assert_eq!(p.ok(&["orphans"]), "");
+    assert!(!p.fspec(&["orphans", "--delete", "~/.config/mystery"]).status.success());
 }

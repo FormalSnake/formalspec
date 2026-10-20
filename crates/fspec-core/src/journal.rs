@@ -14,6 +14,8 @@ use crate::runner::{Cmd, Runner};
 pub enum Undo {
     /// Put `backup` back at `path`, or remove `path` when nothing was there before.
     RestorePath { path: PathBuf, backup: Option<PathBuf> },
+    /// Move `from` back to `to`, if `from` is still there. Used for app data in and out of the trash.
+    Move { from: PathBuf, to: PathBuf },
     /// Reverse a package manager, init or bootc operation.
     Run { cmd: Cmd },
 }
@@ -126,8 +128,25 @@ fn undo(step: &Undo, runner: &dyn Runner) -> Result<()> {
             }
             Ok(())
         }
+        Undo::Move { from, to } => {
+            if fs::symlink_metadata(from).is_ok() {
+                move_any(from, to)?;
+            }
+            Ok(())
+        }
         Undo::Run { cmd } => runner.check(cmd).map(drop),
     }
+}
+
+/// Rename `from` to `to`, copying across filesystems when a rename cannot.
+pub fn move_any(from: &Path, to: &Path) -> Result<()> {
+    if let Some(parent) = to.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    if fs::rename(from, to).is_ok() {
+        return Ok(());
+    }
+    copy_any(from, to).and_then(|()| remove_any(from)).with_context(|| format!("moving {}", from.display()))
 }
 
 /// Copy a file, symlink (as a symlink) or directory tree, preserving permissions.
