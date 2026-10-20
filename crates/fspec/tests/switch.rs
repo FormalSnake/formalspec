@@ -72,7 +72,6 @@ fn reset_var_stages_the_host_persist_list() {
     let out = fspec(dir.path(), &["switch", "--reset-var", "--host", "box"]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     assert!(log(dir.path()).last().unwrap().ends_with("/var/lib/fspec/reset-var/pending"));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("/etc/passwd is not in persist"));
 }
 
 #[test]

@@ -387,9 +387,14 @@ fn reset_var_stages_files_and_writes_the_marker_last() {
             "/home",
             "/var/home",
             "/var/roothome",
+            "/etc/passwd",
+            "/etc/shadow",
+            "/etc/group",
+            "/etc/gshadow",
+            "/etc/subuid",
+            "/etc/subgid",
             "/var/lib/docker",
-            "/etc/ssh",
-            "/etc/shadow"
+            "/etc/ssh"
         ]
     );
     let crate::Step::Run(keep) = &rv.plan.steps[1] else { panic!() };
@@ -398,10 +403,6 @@ fn reset_var_stages_files_and_writes_the_marker_last() {
     let unit = unit.stdin.as_deref().unwrap();
     assert!(unit.contains("ConditionPathExists=/var/lib/fspec/reset-var/pending"));
     assert!(unit.contains("Type=oneshot") && unit.contains("Before=sysinit.target"));
-    assert_eq!(
-        rv.warnings,
-        ["/etc/passwd is not in persist and will be reset", "/etc/group is not in persist and will be reset"]
-    );
 }
 
 #[test]

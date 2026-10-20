@@ -545,7 +545,6 @@ fn switch(paths: &Paths, spec_path: &Path, host: &Host, opts: &Switch, release: 
             }
         }
         let reset = fspec_switch::reset_var(paths, &host.persist)?;
-        reset.warnings.iter().for_each(|w| eprintln!("warning: {w}"));
         run_plan(paths, runner.as_ref(), &reset.plan)?;
         if live {
             println!("/etc and /var reset at the next boot; remove /var/lib/fspec/reset-var/pending to cancel");

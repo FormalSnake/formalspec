@@ -653,9 +653,10 @@ script deletes everything under `/var` and `/etc` that is neither in `keep` nor
 a parent of something in it (it descends into parents instead of deleting
 them), copies `/usr/etc` over `/etc`, and removes `pending` last, so an
 interrupted run repeats on the next boot. tmpfiles then recreates the image's
-`/var` defaults. Remove `pending` to cancel. `/etc/passwd`, `/etc/shadow` and
-`/etc/group` are reset like the rest: the command warns when they are not in
-`persist`, since `apply` recreates the declared users but not their passwords.
+`/var` defaults. Remove `pending` to cancel. The account databases
+(`/etc/passwd`, `/etc/shadow`, `/etc/group`, `/etc/gshadow`, `/etc/subuid`,
+`/etc/subgid`) are always kept, like the homes: `apply` recreates declared users
+but not their passwords.
 
 To or from a classic distro, `fspec switch --distro void` (fedora, arch, debian
 or void). The host's `system` must already declare the target distro, so edit

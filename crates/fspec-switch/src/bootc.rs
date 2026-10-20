@@ -5,12 +5,23 @@ use serde_json::Value;
 
 use crate::Plan;
 
-/// Never reset: fspec's own state, its store, and the user homes (`/home` is a symlink to
-/// `/var/home` on bootc systems).
-const ALWAYS: [&str; 6] = ["/var/lib/fspec", "/opt/fspec", "/var/opt/fspec", "/home", "/var/home", "/var/roothome"];
-
-/// Logins live in these; they are reset like any other `/etc` file unless listed in `persist`.
-const ACCOUNTS: [&str; 3] = ["/etc/passwd", "/etc/shadow", "/etc/group"];
+/// Never reset: fspec's own state, its store, the user homes (`/home` is a symlink to
+/// `/var/home` on bootc systems) and the account databases, since `apply` recreates declared
+/// users but not their passwords, and a home whose owner vanished is locked out.
+const ALWAYS: [&str; 12] = [
+    "/var/lib/fspec",
+    "/opt/fspec",
+    "/var/opt/fspec",
+    "/home",
+    "/var/home",
+    "/var/roothome",
+    "/etc/passwd",
+    "/etc/shadow",
+    "/etc/group",
+    "/etc/gshadow",
+    "/etc/subuid",
+    "/etc/subgid",
+];
 
 const DIR: &str = "/var/lib/fspec/reset-var";
 const UNIT: &str = "/etc/systemd/system/fspec-reset-var.service";
@@ -60,7 +71,6 @@ pub struct ResetVar {
     pub plan: Plan,
     /// Paths the reset keeps, `ALWAYS` first and then the host's `persist`.
     pub keep: Vec<String>,
-    pub warnings: Vec<String>,
 }
 
 /// Stage a reset of `/etc` and `/var` for the next boot. The running system cannot reset its own
@@ -77,12 +87,6 @@ pub fn reset_var(paths: &Paths, persist: &[String]) -> Result<ResetVar> {
             keep.push(clean.to_string());
         }
     }
-    let warnings = ACCOUNTS
-        .iter()
-        .filter(|a| !keep.iter().any(|k| k == *a))
-        .map(|a| format!("{a} is not in persist and will be reset"))
-        .collect();
-
     let at = |p: &str| paths.system(p).display().to_string();
     let mut plan = Plan::default();
     plan.run(Cmd::new("mkdir").arg("-p").arg(at(DIR)));
@@ -92,7 +96,7 @@ pub fn reset_var(paths: &Paths, persist: &[String]) -> Result<ResetVar> {
     plan.run(Cmd::new("tee").arg(at(UNIT)).stdin(SERVICE));
     plan.run(Cmd::new("systemctl").args(["enable", "fspec-reset-var.service"]));
     plan.run(Cmd::new("tee").arg(at(&format!("{DIR}/pending"))).stdin("1\n"));
-    Ok(ResetVar { plan, keep, warnings })
+    Ok(ResetVar { plan, keep })
 }
 
 fn bootc_status(runner: &dyn Runner) -> Result<Option<Value>> {
