@@ -11,6 +11,7 @@ mod npm;
 mod service;
 pub mod update;
 
+use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use anyhow::{Result, anyhow};
@@ -27,12 +28,20 @@ pub struct Cx<'a> {
     pub runner: &'a dyn Runner,
     /// Unix seconds, the reference point for release-age cutoffs.
     pub now: i64,
+    /// The directory holding `spec.star`, where a package's patch files are read for the lock's
+    /// `patches` hash.
+    pub spec_dir: PathBuf,
     pub(crate) registry: OnceLock<aqua::Registry>,
 }
 
 impl<'a> Cx<'a> {
     pub fn new(fetch: &'a dyn Fetch, runner: &'a dyn Runner) -> Cx<'a> {
-        Cx { fetch, runner, now: age::now(), registry: OnceLock::new() }
+        Cx { fetch, runner, now: age::now(), spec_dir: PathBuf::new(), registry: OnceLock::new() }
+    }
+
+    pub fn with_spec_dir(mut self, dir: impl Into<PathBuf>) -> Cx<'a> {
+        self.spec_dir = dir.into();
+        self
     }
 }
 
@@ -62,5 +71,9 @@ pub fn resolve(pkg: &Pkg, platforms: &[String], min_age: Option<i64>, cx: &Cx) -
         Source::Dnf(_) | Source::Pacman(_) | Source::Apt(_) | Source::Xbps(_) => Ok(()),
     };
     result.map_err(|e| anyhow!("{}: {e:#}", ctx()))?;
+    if !pkg.patches.is_empty() {
+        locked.patches =
+            Some(fspec_core::patches::hash(&cx.spec_dir, &pkg.patches).map_err(|e| anyhow!("{}: {e:#}", ctx()))?);
+    }
     Ok(locked)
 }

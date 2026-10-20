@@ -125,3 +125,37 @@ fn pkg_files_must_be_files() {
     let err = eval_str(r#"pkg("x", files = [pkg("y")])"#, &[]).unwrap_err();
     assert!(format!("{err:#}").contains("takes file(...) values"), "{err:#}");
 }
+
+#[test]
+fn glob_lists_sorted_repo_relative_files() {
+    let spec = r#"
+names = glob("patches/*.patch")
+hosts = [host(name = "m", platform = "aarch64-darwin", modules = [
+    pkg("tool", source = git("https://example/tool", rev = "main"), patches = names),
+])]
+"#;
+    let extra =
+        [("patches/b.patch", "b"), ("patches/a.patch", "a"), ("patches/skip.txt", "x"), ("patches/sub/c.patch", "c")];
+    let parsed = eval_str(spec, &extra).unwrap();
+    let Some(Resource::Pkg(p)) = parsed.host("m").unwrap().resources.first() else { panic!("no pkg") };
+    assert_eq!(p.patches, ["patches/a.patch", "patches/b.patch"]);
+    let deep = eval_str(&spec.replace("patches/*.patch", "patches/**/*.patch"), &extra).unwrap();
+    let Some(Resource::Pkg(p)) = deep.host("m").unwrap().resources.first() else { panic!("no pkg") };
+    assert_eq!(p.patches, ["patches/a.patch", "patches/b.patch", "patches/sub/c.patch"]);
+}
+
+#[test]
+fn glob_stays_inside_the_spec_directory() {
+    for pattern in ["../*.patch", "/etc/*"] {
+        let err = eval_str(&format!("x = glob(\"{pattern}\")\nhosts = []\n"), &[]).unwrap_err();
+        assert!(format!("{err:#}").contains("relative to the spec's directory"), "{err:#}");
+    }
+}
+
+#[test]
+fn glob_works_inside_loaded_modules() {
+    let spec = "load(\"//m.star\", \"found\")\nhosts = [host(name = \"m\", platform = \"aarch64-darwin\", modules = [pkg(\"t\", patches = found)])]\n";
+    let parsed = eval_str(spec, &[("m.star", "found = glob(\"p/*.patch\")\n"), ("p/one.patch", "1")]).unwrap();
+    let Some(Resource::Pkg(p)) = parsed.host("m").unwrap().resources.first() else { panic!("no pkg") };
+    assert_eq!(p.patches, ["p/one.patch"]);
+}

@@ -126,10 +126,79 @@ pkg("librepods",
     build_flags = ["--features", "pipewire"])
 ```
 
-CI builds every patched package once per platform and pushes the result to an
-OCI registry (ghcr) as an artifact. The lock records the digest, and hosts pull
-it, so a weak machine never compiles. Patches on npm or script packages apply
-straight to the unpacked files with no build step.
+`glob(pattern)` returns the sorted, repo-relative paths of the files under the
+spec's directory that match. It is the one place evaluation reads the
+filesystem besides `load`, and it only reads the spec's own tree: patterns
+cannot start with `/` or contain `..`, and links that lead outside the tree are
+dropped.
+
+`fspec update` writes `patches = "sha256-…"` into the lock: a hash over the
+patch file names and contents, in the order the spec lists them. A package
+whose patches no longer hash to the lock's value is refused ("patches changed,
+run fspec update"), at `apply` and as a drift note in `plan`.
+
+Fields on `pkg` for source builds: `patches`, `build_flags` (appended to the
+recipe's configure or build command), `build = ["sh", "-c", "…"]` (replaces
+recipe detection) and `bins = ["name", …]` (the executables to ship, by file
+name; default is every executable the recipe produced).
+
+**Recipes.** `fspec build` checks out the locked commit, applies the patches
+with `git apply`, then picks the first match: `Cargo.toml`, `meson.build`,
+`CMakeLists.txt`, `go.mod`, a `Makefile`. An explicit `build` wins over all of
+them.
+
+| Recipe | Commands |
+| --- | --- |
+| Cargo | `cargo build --release --locked --manifest-path <src>/Cargo.toml --target-dir <build> <build_flags>`; executables come from `<build>/release` |
+| Meson | `meson setup <build> <src> --buildtype release --prefix <out> <flags>`, `meson compile -C <build>`, `meson install -C <build>` |
+| CMake | `cmake -S <src> -B <build> -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=<out> <flags>`, `cmake --build <build> --parallel`, `cmake --install <build>` |
+| Go | `go build -C <src> -o <out>/bin/ <flags> ./...` |
+| Make | `make -C <src> <flags>`, `make -C <src> install PREFIX=<out>` |
+| explicit | the `build` command, with `FSPEC_SRC` (the patched checkout) and `FSPEC_OUT` (put executables in `$FSPEC_OUT/bin`) in its environment; `build_flags` do not apply |
+
+Every command goes through the `Runner`. Non-Cargo recipes install into
+`<out>`, so executables are read from `<out>/bin`.
+
+**Commands.**
+
+- `fspec build --pkg <name> --platform <p> --out <dir>` builds on this
+  machine, which must be platform `<p>`. It writes
+  `<dir>/<name>-<p>.tar.zst` with the executables at the top (sorted names,
+  zeroed owners and times) and `<dir>/tag` holding `<rev>-<p>`.
+- `fspec ci packages` writes `.github/workflows/fspec-packages.yml` next to the
+  spec: a matrix with one job per `git(...)` package and platform that a host
+  declares (`ubuntu-24.04` for x86_64-linux, `ubuntu-24.04-arm` for
+  aarch64-linux, `macos-14` for aarch64-darwin). Each job installs fspec and
+  oras, runs `fspec build` and pushes with `oras push`. Regenerate it when the
+  set of packages or platforms changes; the lock and `patches/` changes trigger
+  it.
+- `fspec update --cache [--registry r]` also resolves
+  `<registry>/<name>:<rev>-<platform>` with
+  `oras manifest fetch --descriptor` and records
+  `<platform> = { oci = "<registry>/<name>@sha256:…" }`. The registry defaults
+  to `ghcr.io/<origin owner>/fspec-cache`. A plain `fspec update` keeps the
+  recorded digests while the commit and the patches are unchanged.
+
+**Registry layout.** One repository per package,
+`ghcr.io/<owner>/fspec-cache/<name>`, one tag per commit and platform
+(`<rev>-<platform>`), each a one-layer artifact whose layer is the `.tar.zst`
+(media type `application/vnd.fspec.package.v1.tar+zstd`, file name as its
+title). The lock pins the manifest digest.
+
+**On the host.** A package whose locked artifact has `oci` is pulled with
+`oras pull <ref> -o <staging>` through the `Runner` (so `oras` must be on
+PATH), the layer file is hashed against the layer digest in
+`oras manifest fetch <ref>`, unpacked, and installed like any other store
+package. A reference without a digest is refused. The host never compiles.
+
+Patches on npm and other packages that ship as an unpacked tree need no build:
+`prepare` applies them in pure Rust (the `diffy` crate: git or unified diffs
+with `a/` and `b/` prefixes, text edits, file creation, deletion and rename)
+to the package directory (`package/` for npm, `node_modules/<name>` after an
+`npm install`, else the archive's single top-level directory) before the tree
+gets its store path. The store directory name hashes the artifact hash together
+with the patches hash, so a patched tree never shares a path with the
+unpatched one.
 
 ## The lock
 
@@ -455,7 +524,9 @@ distro, so the `system` block is where those names live.
 
 | Command | Does |
 | --- | --- |
-| `fspec update [pkg]` | Resolve upstream, rewrite the lock |
+| `fspec update [pkg] [--cache]` | Resolve upstream, rewrite the lock; `--cache` records CI-built OCI digests |
+| `fspec build --pkg p --platform t --out d` | Build a `git(...)` package into a `.tar.zst` |
+| `fspec ci packages` | Write the workflow that builds and pushes patched packages |
 | `fspec plan [--all]` | Diff config against state, per host |
 | `fspec apply [--host h] [--all]` | Converge, over ssh for remote hosts |
 | `fspec rollback [gen]` | Previous generation, data included |
@@ -486,6 +557,7 @@ A cargo workspace under `crates/`:
 | `fspec-core` | Resource types, host facts, `Paths`, the state file, the lock, the plan diff, the apply engine, the journal, the `Runner` and `Fetch` seams |
 | `fspec-eval` | Starlark builtins and evaluation into `Host` values |
 | `fspec-store` | The store backend: hash check, unpack, generations, `current`, npm and nix packages, project pins |
+| `fspec-build` | Source builds: recipe detection, the `.tar.zst` packer, the `ci packages` workflow, `update --cache` |
 | `fspec-sources` | Resolvers (aqua, github, npm, cargo, flatpak, brew, git, nix) and `fspec update` |
 | `fspec` | The CLI |
 
@@ -524,7 +596,7 @@ touch the live system.
 4. Flatpak, brew, dnf backends; systemd and launchd services.
 5. Removal with data trash and `gc`.
 6. Remote apply over ssh.
-7. `image` with bootc, the OCI cache for patched builds.
+7. `image` with bootc, the OCI cache for patched builds (the cache and patched-build half is done: `glob`, the patches hash, `fspec build`, `fspec ci packages`, `fspec update --cache`, oras pulls in the store).
 8. Other distros and inits, `fspec switch`.
 
 Steps 1 to 4 replace a home-manager setup on a single machine and are the

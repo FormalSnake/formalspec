@@ -296,3 +296,51 @@ fn update_collects_platforms_across_hosts_and_survives_a_failure() {
 fn toml_lock(text: &str) -> Lock {
     toml::from_str(text).unwrap()
 }
+
+const FULL_SHA: &str = "4f1c2a9d3e5b7a8c9d0e1f2a3b4c5d6e7f8a9b0c";
+
+fn patched_git(patches: &[&str]) -> Pkg {
+    pkg(json!({
+        "name": "tool",
+        "source": {"kind": "git", "url": "https://example/tool", "rev": FULL_SHA},
+        "patches": patches,
+    }))
+}
+
+#[test]
+fn a_patched_package_locks_the_hash_of_its_patch_files() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("patches")).unwrap();
+    std::fs::write(dir.path().join("patches/a.patch"), "one").unwrap();
+    let (fetch, runner) = (MapFetch::default(), RecordingRunner::default());
+    let cx = Cx::new(&fetch, &runner).with_spec_dir(dir.path());
+    let locked = resolve(&patched_git(&["patches/a.patch"]), &platforms(&["x86_64-linux"]), None, &cx).unwrap();
+    assert_eq!(locked.rev.as_deref(), Some(FULL_SHA));
+    assert_eq!(locked.patches, Some(fspec_core::patches::hash(dir.path(), &["patches/a.patch".to_string()]).unwrap()));
+    assert_eq!(resolve(&patched_git(&[]), &platforms(&["x86_64-linux"]), None, &cx).unwrap().patches, None);
+}
+
+#[test]
+fn update_keeps_recorded_oci_digests_while_commit_and_patches_stand() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("patches")).unwrap();
+    std::fs::write(dir.path().join("patches/a.patch"), "one").unwrap();
+    let hosts =
+        [host("m", "x86_64-linux", None, vec![serde_json::to_value(patched_git(&["patches/a.patch"])).unwrap()])];
+    let (fetch, runner) = (MapFetch::default(), RecordingRunner::default());
+    let cx = Cx::new(&fetch, &runner).with_spec_dir(dir.path());
+
+    let mut old = update(&hosts, &Lock::default(), &[], &cx).unwrap().lock;
+    let mut locked = old.pkg("tool").unwrap().clone();
+    locked.artifacts.entry("x86_64-linux".into()).or_default().oci =
+        Some("ghcr.io/o/fspec-cache/tool@sha256:dd".into());
+    old.upsert(locked);
+
+    let again = update(&hosts, &old, &[], &cx).unwrap();
+    assert_eq!(again.lock, old);
+    assert!(again.changes.is_empty(), "{:?}", again.changes);
+
+    std::fs::write(dir.path().join("patches/a.patch"), "two").unwrap();
+    let changed = update(&hosts, &old, &[], &cx).unwrap();
+    assert!(changed.lock.pkg("tool").unwrap().artifacts.is_empty());
+}

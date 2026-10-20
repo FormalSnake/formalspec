@@ -160,6 +160,8 @@ mod tests {
             channel: Default::default(),
             patches: vec![],
             build_flags: vec![],
+            build: vec![],
+            bins: vec![],
             data: vec![],
             keep_data: false,
             files: vec![],

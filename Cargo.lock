@@ -802,6 +802,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "diffy"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3e3dc2f773b6aaa63b1a7684b8589f670a8a0146a510b74d23a401c882364b49"
+dependencies = [
+ "hashbrown 0.17.1",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1130,6 +1139,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "fspec-build",
  "fspec-core",
  "fspec-eval",
  "fspec-files",
@@ -1142,12 +1152,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "fspec-build"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fspec-core",
+ "ruzstd",
+ "serde_json",
+ "tar",
+ "tempfile",
+]
+
+[[package]]
 name = "fspec-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.23.1",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "tempfile",
  "toml 1.1.8+spec-1.1.0",
  "ureq",
@@ -1160,6 +1184,7 @@ dependencies = [
  "allocative",
  "anyhow",
  "fspec-core",
+ "glob",
  "serde",
  "serde_json",
  "starlark",
@@ -1220,6 +1245,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sha2 0.11.1",
+ "tempfile",
  "toml 1.1.8+spec-1.1.0",
 ]
 
@@ -1229,6 +1255,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
+ "diffy",
  "flate2",
  "fspec-core",
  "lzma-rs",
@@ -1384,6 +1411,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "glob"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
+
+[[package]]
 name = "group"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1425,6 +1458,9 @@ name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
+dependencies = [
+ "foldhash",
+]
 
 [[package]]
 name = "heapless"

@@ -75,7 +75,8 @@ pub fn update(hosts: &[Host], old: &Lock, only: &[String], cx: &Cx) -> Result<Up
         }
         let platforms: Vec<String> = d.platforms.iter().cloned().collect();
         match resolve(&d.pkg, &platforms, d.age, cx) {
-            Ok(new) => {
+            Ok(mut new) => {
+                keep_cache(before, &mut new);
                 if let Some(line) = describe(before, &new) {
                     changes.push(line);
                 }
@@ -90,6 +91,19 @@ pub fn update(hosts: &[Host], old: &Lock, only: &[String], cx: &Cx) -> Result<Up
         }
     }
     Ok(Update { lock, changes, errors })
+}
+
+/// CI-built artifacts stay valid while the commit and the patches are the same, so a plain
+/// `fspec update` does not throw away what `fspec update --cache` recorded.
+fn keep_cache(before: Option<&LockedPkg>, new: &mut LockedPkg) {
+    let Some(old) = before else { return };
+    if old.rev.is_some() && old.rev == new.rev && old.patches == new.patches && old.source == new.source {
+        for (platform, artifact) in &old.artifacts {
+            if artifact.oci.is_some() {
+                new.artifacts.entry(platform.clone()).or_insert_with(|| artifact.clone());
+            }
+        }
+    }
 }
 
 fn label(p: &LockedPkg) -> String {
