@@ -8,7 +8,7 @@ use crate::model::{Account, Delivery, Desktop, DiskChoice, Distro, Locale, Secre
 
 /// Eval errors from builtins that have not landed on this branch yet. A combination that fails
 /// with one of these is skipped; any other error fails the test.
-const PENDING: &[&str] = &["unknown field `locale`", "Variable `cachyos` not found", "unknown field `libc`"];
+const PENDING: &[&str] = &["unknown field `locale`", "Variable `cachyos` not found", "unknown field `libc`", "Variable `aerynos` not found"];
 
 fn locale() -> Locale {
     Locale { locale: "en_US.UTF-8".into(), keymap: "us".into(), timezone: "Europe/Madrid".into() }
@@ -100,7 +100,7 @@ fn every_combination_writes_a_spec_that_evaluates() {
                 assert_eq!(i.distro(), distro.id.split('-').next().unwrap(), "{what}");
                 assert!(svc.is_empty(), "{what}");
             }
-            (Some(System::Distro(d)), Delivery::Classic) => {
+            (Some(System::Distro(d)), Delivery::Classic | Delivery::Atomic) => {
                 assert_eq!(d.distro, distro.id.trim_end_matches("-musl"), "{what}");
                 assert!(!d.packages.is_empty(), "{what}");
                 assert!(svc.contains(&"NetworkManager"), "{what}: {svc:?}");
@@ -108,6 +108,7 @@ fn every_combination_writes_a_spec_that_evaluates() {
                     (Some(Desktop::Gnome), "debian" | "ubuntu") => Some("gdm3"),
                     (Some(Desktop::Gnome), _) => Some("gdm"),
                     (Some(Desktop::Kde), _) => Some("sddm"),
+                    (Some(Desktop::Cosmic), _) => Some("cosmic-greeter"),
                     (None, _) => None,
                 };
                 if let Some(dm) = dm {

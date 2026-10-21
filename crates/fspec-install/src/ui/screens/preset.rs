@@ -13,19 +13,28 @@ use crate::ui::widgets::{Canvas, Hit, rect_in, wrap};
 const W_CARD: u8 = 0;
 const W_DESKTOP: u8 = 1;
 
-pub fn blurb(p: Preset) -> (&'static str, &'static str) {
+pub fn title(p: Preset) -> &'static str {
     match p {
-        Preset::Minimal => ("Minimal", "A console system with networking and sudo. Add the rest in your spec."),
-        Preset::Desktop => ("Desktop", "GNOME or KDE Plasma with a browser, audio, printing and Flatpak."),
-        Preset::Gaming => ("Gaming", "The desktop plus Steam, Proton, GameMode and MangoHud."),
-        Preset::Server => ("Server", "SSH, a firewall and automatic security updates. No desktop."),
+        Preset::Minimal => "Minimal",
+        Preset::Desktop => "Desktop",
+        Preset::Gaming => "Gaming",
+        Preset::Server => "Server",
     }
 }
 
-fn desktop_name(d: Desktop) -> &'static str {
-    match d {
-        Desktop::Gnome => "GNOME",
-        Desktop::Kde => "KDE Plasma",
+/// What the preset installs on `d`, naming the desktops that distro offers.
+pub fn blurb(p: Preset, d: &Distro) -> String {
+    let names: Vec<&str> = d.desktops.iter().map(|x| x.name()).collect();
+    let desktops = match names.as_slice() {
+        [] => String::new(),
+        [one] => one.to_string(),
+        [rest @ .., last] => format!("{} or {last}", rest.join(", ")),
+    };
+    match p {
+        Preset::Minimal => "A console system with networking and sudo. Add the rest in your spec.".into(),
+        Preset::Desktop => format!("{desktops} with a browser, audio, printing and Flatpak."),
+        Preset::Gaming => "The desktop plus Steam, Proton, GameMode and MangoHud.".into(),
+        Preset::Server => "SSH, a firewall and automatic security updates. No desktop.".into(),
     }
 }
 
@@ -121,8 +130,8 @@ impl PresetScreen {
         let w = a.width.min(76);
         let mut y = 2;
         for (i, p) in self.distro.presets.iter().enumerate() {
-            let (name, desc) = blurb(*p);
-            let lines = wrap(desc, w as usize - 4);
+            let (name, desc) = (title(*p), blurb(*p, self.distro));
+            let lines = wrap(&desc, w as usize - 4);
             let h = 1 + lines.len() as u16;
             let card = rect_in(a, 0, y, w, h);
             let on = self.sel == i;
@@ -145,7 +154,7 @@ impl PresetScreen {
         if self.choosable() {
             let row = rect_in(a, 0, y, a.width, 1);
             c.text(row, 2, 0, "Desktop", fg(th.muted));
-            let labels: Vec<&str> = self.distro.desktops.iter().map(|d| desktop_name(*d)).collect();
+            let labels: Vec<&str> = self.distro.desktops.iter().map(|d| d.name()).collect();
             segmented(c, row, 11, &labels, self.desk, true, W_DESKTOP);
         }
     }

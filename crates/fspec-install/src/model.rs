@@ -20,6 +20,8 @@ pub enum Init {
 pub enum Delivery {
     Classic,
     Image,
+    /// The package manager swaps the whole `/usr` in one transaction and keeps earlier states.
+    Atomic,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -46,6 +48,7 @@ impl Preset {
 pub enum Desktop {
     Gnome,
     Kde,
+    Cosmic,
 }
 
 impl Desktop {
@@ -53,6 +56,15 @@ impl Desktop {
         match self {
             Desktop::Gnome => "gnome",
             Desktop::Kde => "kde",
+            Desktop::Cosmic => "cosmic",
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Desktop::Gnome => "GNOME",
+            Desktop::Kde => "KDE Plasma",
+            Desktop::Cosmic => "COSMIC",
         }
     }
 }
@@ -69,6 +81,10 @@ pub struct Distro {
     /// The kernel carries a vendor signature that a stock Secure Boot setup trusts.
     pub signed_kernel: bool,
     pub delivery: Delivery,
+    /// The distro it builds on, or `None` for an independent one.
+    pub based_on: Option<&'static str>,
+    /// Its developers call it alpha: not ready for a machine you depend on.
+    pub alpha: bool,
     pub presets: &'static [Preset],
     /// The desktops its desktop and gaming presets come in. The first is the default.
     pub desktops: &'static [Desktop],

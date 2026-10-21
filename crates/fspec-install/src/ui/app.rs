@@ -217,10 +217,8 @@ impl App {
             format!("{} from {}", sh.host.as_ref().map_or("", |h| h.name.as_str()), sh.url)
         } else {
             let (preset, desktop) = (sh.preset, sh.desktop);
-            let p = super::screens::preset::blurb(preset).0;
-            let desk = desktop
-                .map(|d| format!(" ({})", if d == Desktop::Gnome { "GNOME" } else { "KDE Plasma" }))
-                .unwrap_or_default();
+            let p = super::screens::preset::title(preset);
+            let desk = desktop.map(|d| format!(" ({})", d.name())).unwrap_or_default();
             format!("{} · {p}{desk}", sh.distro.map_or("", |d| d.name))
         };
         let acct = self.account.value(sh);

@@ -13,21 +13,21 @@
     Debian              fixed    systemd  signed kernel    classic    │          platform = "x86_64-linux",          │
     Void Linux          rolling  runit    unsigned kernel  classic    │          locale = "en_US.UTF-8",             │
     Void Linux (musl)   rolling  runit    unsigned kernel  classic    │          keymap = "us",                      │
-                                                                      │          timezone = "UTC",                   │
-  Fedora Atomic                                                       │          system = system("fedora-atomic",    │
-  Fedora as an image: updates land whole and the previous one stays   │              desktop = "gnome"),             │
-  in the boot menu.                                                   │          modules = modules("fedora-atomic",  │
-                                                                      │              desktop = "gnome"),             │
-  fixed            New versions arrive in scheduled releases you      │          protect = ["/home"],                │
-                   upgrade to.                                        │      ),                                      │
-  systemd          Services start with systemd, as on most distros.   │  ]                                           │
+    AerynOS  alpha      rolling  systemd  unsigned kernel  atomic     │          timezone = "UTC",                   │
+                                                                      │          system = system("fedora-atomic",    │
+  Fedora Atomic                                                       │              desktop = "gnome"),             │
+  Fedora as an image: updates land whole and the previous one stays   │          modules = modules("fedora-atomic",  │
+  in the boot menu.                                                   │              desktop = "gnome"),             │
+                                                                      │          protect = ["/home"],                │
+  fixed            New versions arrive in scheduled releases you      │      ),                                      │
+                   upgrade to.                                        │  ]                                           │
+  systemd          Services start with systemd, as on most distros.   │                                              │
   signed kernel    Boots with Secure Boot on, and anti-cheat that     │                                              │
                    checks kernel signatures trusts it.                │                                              │
   image            The system is a bootc image: updates apply         │                                              │
                    whole, and the previous image stays bootable.      │                                              │
-                                                                      │                                              │
-                                                                      │                                              │
-                                                                      │                                              │
+  based on Fedora  Uses Fedora's packages, with its own changes on    │                                              │
+                   top.                                               │                                              │
                                                                       │                                              │
                                                                       │                                              │
                                                                       │                                              │

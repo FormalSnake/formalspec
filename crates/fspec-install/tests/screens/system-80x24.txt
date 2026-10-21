@@ -9,7 +9,6 @@
     Aurora              fixed    systemd  signed kernel    image
     Arch Linux          rolling  systemd  unsigned kernel  classic
     CachyOS             rolling  systemd  unsigned kernel  classic
-    Ubuntu              fixed    systemd  signed kernel    classic
 
   Fedora Atomic
   Fedora as an image: updates land whole and the previous one stays in the
@@ -21,4 +20,5 @@
                    kernel signatures trusts it.
   image            The system is a bootc image: updates apply whole, and the
                    previous image stays bootable.
+  based on Fedora  Uses Fedora's packages, with its own changes on top.
   ↑↓ Move  Enter Continue  Esc Back  ? Keys  s Spec

@@ -15,6 +15,7 @@ GNOME = {
     "debian": ["gdm3", "gnome-shell", "gnome-session", "nautilus", "gnome-control-center", "gnome-console", "gnome-text-editor", "xdg-desktop-portal-gnome", "gnome-keyring"],
     "ubuntu": ["gdm3", "gnome-shell", "gnome-session", "nautilus", "gnome-control-center", "gnome-console", "gnome-text-editor", "xdg-desktop-portal-gnome", "gnome-keyring"],
     "void": ["gnome-core", "gdm"],
+    "aerynos": ["pkgset-aeryn-gnome-recommended", "gdm"],
 }
 
 KDE = {
@@ -23,16 +24,23 @@ KDE = {
     "debian": ["kde-plasma-desktop", "sddm"],
     "ubuntu": ["kde-plasma-desktop", "sddm"],
     "void": ["kde-plasma", "sddm", "konsole", "dolphin"],
+    "aerynos": ["pkgset-aeryn-plasma-recommended", "sddm"],
 }
 
-DESKTOPS = {"gnome": GNOME, "kde": KDE}
+# Only AerynOS offers COSMIC here.
+COSMIC = {
+    "aerynos": ["pkgset-aeryn-cosmic-recommended", "cosmic-greeter"],
+}
+
+DESKTOPS = {"gnome": GNOME, "kde": KDE, "cosmic": COSMIC}
 
 # The unit name differs from the package on Debian and Ubuntu.
 DISPLAY_MANAGER = {
     "gnome": {"debian": "gdm3", "ubuntu": "gdm3"},
     "kde": {},
+    "cosmic": {},
 }
-DEFAULT_MANAGER = {"gnome": "gdm", "kde": "sddm"}
+DEFAULT_MANAGER = {"gnome": "gdm", "kde": "sddm", "cosmic": "cosmic-greeter"}
 
 AUDIO = {
     "fedora": ["pipewire", "pipewire-pulseaudio", "wireplumber"],
@@ -40,6 +48,8 @@ AUDIO = {
     "debian": ["pipewire", "pipewire-pulse", "pipewire-alsa", "wireplumber"],
     "ubuntu": ["pipewire", "pipewire-pulse", "pipewire-alsa", "wireplumber"],
     "void": ["pipewire", "wireplumber"],
+    # pkgset-aeryn-base-desktop, which every desktop pkgset pulls in, carries PipeWire.
+    "aerynos": [],
 }
 
 # Fonts the desktop packages do not pull in, and the session manager Void's GNOME and KDE need.
@@ -70,7 +80,7 @@ VOID_AUDIO = [
 
 def chosen(desktop):
     if desktop not in DESKTOPS:
-        fail("desktop is \"gnome\" or \"kde\"")
+        fail("desktop is \"gnome\", \"kde\" or \"cosmic\"")
     return DESKTOPS[desktop]
 
 def system(distro, desktop = None, extra = []):

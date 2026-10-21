@@ -13,21 +13,21 @@
     Debian              fixed│                                                            │ "x86_64-linux",          │
     Void Linux          rolli│  Keys                                                      │en_US.UTF-8",             │
     Void Linux (musl)   rolli│                                                            │us",                      │
-                             │  ↑↓  j k           Move in a list                          │ "UTC",                   │
-  Fedora                     │  PgUp PgDn         Move by a page                          │ystem("fedora"),          │
-  Current software every six │  Home End          First or last row                       │modules("fedora"),        │
-  Secure Boot and anti-cheat │  Tab  Shift+Tab    Move between fields                     │["/home"],                │
-                             │  Space             Toggle a switch                         │                          │
-  fixed            New versio│  ←→                Change a choice or a number             │                          │
-                   upgrade to│  Enter             Continue                                │                          │
-  systemd          Services s│  Esc               Back                                    │                          │
-  signed kernel    Boots with│  s                 Show or hide the spec                   │                          │
-                   checks ker│  Ctrl+C            Quit                                    │                          │
+    AerynOS  alpha      rolli│  ↑↓  j k           Move in a list                          │ "UTC",                   │
+                             │  PgUp PgDn         Move by a page                          │ystem("fedora"),          │
+  Fedora                     │  Home End          First or last row                       │modules("fedora"),        │
+  Current software every six │  Tab  Shift+Tab    Move between fields                     │["/home"],                │
+  Secure Boot and anti-cheat │  Space             Toggle a switch                         │                          │
+                             │  ←→                Change a choice or a number             │                          │
+  fixed            New versio│  Enter             Continue                                │                          │
+                   upgrade to│  Esc               Back                                    │                          │
+  systemd          Services s│  s                 Show or hide the spec                   │                          │
+  signed kernel    Boots with│  Ctrl+C            Quit                                    │                          │
+                   checks ker│                                                            │                          │
   classic          The packag│                                                            │                          │
-                   btrfs snap│                                                            │                          │
-                             ╰────────────────────────────────────────────────────────────╯                          │
-                                                                      │                                              │
-                                                                      │                                              │
+                   btrfs snap╰────────────────────────────────────────────────────────────╯                          │
+  independent      Built from its own sources and tooling, not on     │                                              │
+                   top of another distro.                             │                                              │
                                                                       │                                              │
                                                                       │                                              │
                                                                       │                                              │

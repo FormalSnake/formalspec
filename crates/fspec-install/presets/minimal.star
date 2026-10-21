@@ -8,13 +8,14 @@ NETWORK = {
     "debian": ["network-manager"],
     "ubuntu": ["network-manager"],
     "void": ["NetworkManager", "dbus"],
+    "aerynos": ["networkmanager"],
 }
 
 NETWORK_SERVICES = {
     "void": ["dbus", "NetworkManager"],
 }
 
-SUDO = ["sudo"]
+SUDO = {"aerynos": ["sudo-rs"]}
 EDITOR = ["nano"]
 
 def family(distro):
@@ -35,10 +36,12 @@ def distro_system(distro, packages):
         return void(packages = packages)
     if distro == "void-musl":
         return void(libc = "musl", packages = packages)
+    if distro == "aerynos":
+        return aerynos(packages = packages)
     fail("minimal has no system for " + distro)
 
 def system(distro, desktop = None, extra = []):
-    return distro_system(distro, NETWORK[family(distro)] + SUDO + EDITOR + extra)
+    return distro_system(distro, NETWORK[family(distro)] + SUDO.get(distro, ["sudo"]) + EDITOR + extra)
 
 def modules(distro, desktop = None):
     f = family(distro)

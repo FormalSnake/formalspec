@@ -13,6 +13,7 @@ use crate::ui::widgets::{Canvas, Hit, rect_in, wrap};
 const W_LIST: u8 = 0;
 const LABEL_W: u16 = 17;
 
+/// The chips every row shows, in column order.
 pub fn tags(d: &Distro) -> [(&'static str, &'static str); 4] {
     [
         match d.release {
@@ -32,11 +33,26 @@ pub fn tags(d: &Distro) -> [(&'static str, &'static str); 4] {
             Delivery::Image => {
                 ("image", "The system is a bootc image: updates apply whole, and the previous image stays bootable.")
             }
+            Delivery::Atomic => {
+                ("atomic", "Each update swaps the system in one transaction; earlier states stay bootable.")
+            }
             Delivery::Classic => {
                 ("classic", "The package manager changes the system in place; btrfs snapshots cover rollback.")
             }
         },
     ]
+}
+
+/// The detail lines below the chips: what it builds on, and whether it is ready for daily use.
+fn origin(d: &Distro) -> Vec<(String, String)> {
+    let mut out = vec![match d.based_on {
+        Some(b) => (format!("based on {b}"), format!("Uses {b}'s packages, with its own changes on top.")),
+        None => ("independent".into(), "Built from its own sources and tooling, not on top of another distro.".into()),
+    }];
+    if d.alpha {
+        out.push(("alpha".into(), "Still in development. Expect breakage; keep it off machines you depend on.".into()));
+    }
+    out
 }
 
 pub struct System {
@@ -106,8 +122,12 @@ impl System {
         };
         let dw = if side { detail.width } else { a.width } as usize;
         let reason = wrap(d.reason, dw);
-        let tag_lines: Vec<(&str, Vec<String>)> =
-            tags(d).iter().map(|(t, e)| (*t, wrap(e, dw.saturating_sub(LABEL_W as usize)))).collect();
+        let explain = |e: &str| wrap(e, dw.saturating_sub(LABEL_W as usize));
+        let tag_lines: Vec<(String, Vec<String>)> = tags(d)
+            .iter()
+            .map(|(t, e)| (t.to_string(), explain(e)))
+            .chain(origin(d).into_iter().map(|(t, e)| (t, explain(&e))))
+            .collect();
         let detail_h = 1 + reason.len() + 1 + tag_lines.iter().map(|(_, l)| l.len()).sum::<usize>();
         let list_h = if side {
             a.height.saturating_sub(2) as usize
@@ -123,7 +143,10 @@ impl System {
             let sel = self.list.selected() == Some(idx);
             row_chrome(c, row, sel, true);
             let st = if sel { Style::new().fg(th.ink).add_modifier(Modifier::BOLD) } else { fg(th.ink) };
-            c.text(row, 2, 0, dd.name, st);
+            let used = c.text(row, 2, 0, dd.name, st);
+            if dd.alpha {
+                c.text(row, 2 + used + 1, 0, " alpha ", fg(th.amber).bg(th.surface));
+            }
             for ((t, _), x) in tags(dd).iter().zip([21, 30, 39, 56]) {
                 chip(c, row, x, t);
             }

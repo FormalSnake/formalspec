@@ -1,7 +1,7 @@
 //! The distros the installer offers, in the order the picker lists them.
 
-use crate::model::Delivery::{Classic, Image};
-use crate::model::Desktop::{Gnome, Kde};
+use crate::model::Delivery::{Atomic, Classic, Image};
+use crate::model::Desktop::{Cosmic, Gnome, Kde};
 use crate::model::Init::{Runit, Systemd};
 use crate::model::Preset::{Desktop, Gaming, Minimal, Server};
 use crate::model::Release::{Fixed, Rolling};
@@ -9,7 +9,7 @@ use crate::model::{Distro, Preset};
 
 const ALL: &[Preset] = &[Minimal, Desktop, Gaming, Server];
 
-pub const DISTROS: [Distro; 10] = [
+pub const DISTROS: [Distro; 11] = [
     Distro {
         id: "fedora",
         name: "Fedora",
@@ -18,6 +18,8 @@ pub const DISTROS: [Distro; 10] = [
         init: Systemd,
         signed_kernel: true,
         delivery: Classic,
+        based_on: None,
+        alpha: false,
         presets: ALL,
         desktops: &[Gnome, Kde],
     },
@@ -29,6 +31,8 @@ pub const DISTROS: [Distro; 10] = [
         init: Systemd,
         signed_kernel: true,
         delivery: Image,
+        based_on: Some("Fedora"),
+        alpha: false,
         presets: &[Desktop, Gaming],
         desktops: &[Kde, Gnome],
     },
@@ -40,6 +44,8 @@ pub const DISTROS: [Distro; 10] = [
         init: Systemd,
         signed_kernel: true,
         delivery: Image,
+        based_on: Some("Fedora"),
+        alpha: false,
         presets: &[Desktop],
         desktops: &[Gnome, Kde],
     },
@@ -51,6 +57,8 @@ pub const DISTROS: [Distro; 10] = [
         init: Systemd,
         signed_kernel: true,
         delivery: Image,
+        based_on: Some("Fedora"),
+        alpha: false,
         presets: &[Desktop],
         desktops: &[Kde],
     },
@@ -62,6 +70,8 @@ pub const DISTROS: [Distro; 10] = [
         init: Systemd,
         signed_kernel: false,
         delivery: Classic,
+        based_on: None,
+        alpha: false,
         presets: ALL,
         desktops: &[Kde, Gnome],
     },
@@ -73,6 +83,8 @@ pub const DISTROS: [Distro; 10] = [
         init: Systemd,
         signed_kernel: false,
         delivery: Classic,
+        based_on: Some("Arch Linux"),
+        alpha: false,
         presets: ALL,
         desktops: &[Kde, Gnome],
     },
@@ -84,6 +96,8 @@ pub const DISTROS: [Distro; 10] = [
         init: Systemd,
         signed_kernel: true,
         delivery: Classic,
+        based_on: Some("Debian"),
+        alpha: false,
         presets: ALL,
         desktops: &[Gnome, Kde],
     },
@@ -95,6 +109,8 @@ pub const DISTROS: [Distro; 10] = [
         init: Systemd,
         signed_kernel: true,
         delivery: Classic,
+        based_on: None,
+        alpha: false,
         presets: ALL,
         desktops: &[Gnome, Kde],
     },
@@ -106,6 +122,8 @@ pub const DISTROS: [Distro; 10] = [
         init: Runit,
         signed_kernel: false,
         delivery: Classic,
+        based_on: None,
+        alpha: false,
         presets: ALL,
         desktops: &[Kde, Gnome],
     },
@@ -117,8 +135,23 @@ pub const DISTROS: [Distro; 10] = [
         init: Runit,
         signed_kernel: false,
         delivery: Classic,
+        based_on: None,
+        alpha: false,
         presets: &[Minimal, Desktop, Server],
         desktops: &[Kde, Gnome],
+    },
+    Distro {
+        id: "aerynos",
+        name: "AerynOS",
+        reason: "Built from scratch by its own tooling. Moss switches each update in atomically, and you can boot back into an earlier state.",
+        release: Rolling,
+        init: Systemd,
+        signed_kernel: false,
+        delivery: Atomic,
+        based_on: None,
+        alpha: true,
+        presets: &[Desktop],
+        desktops: &[Gnome, Kde, Cosmic],
     },
 ];
 
