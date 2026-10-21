@@ -1070,6 +1070,64 @@ Only the `system` block differs per distro. Everything from FormalSpec's own
 sources, Flatpaks and files moves unchanged. Base packages are named per
 distro, so the `system` block is where those names live.
 
+## Installer
+
+The installer puts a FormalSpec-managed system on a blank machine. It is a
+Debian live ISO, built with live-build under `installer/iso/`, so it boots
+with Secure Boot on through Debian's signed shim. The ISO carries a static
+`fspec`, the installer `fspec-install`, and every bootstrapper `disk init`
+calls: debootstrap, dnf, pacman with arch-install-scripts, a static xbps, and
+podman for bootc images.
+
+`fspec-install` is a full-screen terminal program (ratatui). On a machine
+with a GPU it runs inside `foot` under the `cage` kiosk compositor, which
+gives it true colour, a proper font and the mouse for a few megabytes; without
+one, or on a serial console, it runs on the console itself in 16 colours. A
+graphical toolkit would have cost hundreds of megabytes of ISO and lost the
+serial console, which headless servers and VM tests need.
+
+The flow is language and keyboard, disk, distro, preset, account, review,
+install. The right side of the screen shows the `spec.star` being written as
+choices are made. The disk gets the default layout above, with LUKS2 when
+asked. The distros are Fedora, Bazzite, Fedora Atomic, Aurora, Arch, CachyOS,
+Ubuntu, Debian and Void (glibc and musl), each tagged with its release model,
+init system, whether its kernel is vendor-signed, and whether it is an image.
+The presets are minimal, desktop (GNOME or KDE Plasma), gaming and server,
+each a Starlark module in `crates/fspec-install/presets/`. The installer
+writes a spec repo (`spec.star`, `modules/<preset>.star`, the lock) with one
+host named after the machine, commits it, and installs from it; the repo ends
+up in `~/spec` of the new user, so `fspec plan` and `fspec apply` work from
+the first login.
+
+Restore from git clones an existing spec instead (an SSH key file or an HTTPS
+token, which is sent as a header for that one clone and never stored), lists
+its hosts, and installs the one picked exactly as declared.
+
+The install itself is `disk init` with the host's distro as the first root
+(`fspec_switch::init`), so partitioning, the bootstrap and the first apply
+are the same code `fspec disk init --distro` runs. The installer adds only
+steps inside the new root before it is unmounted: the user's password through
+`chpasswd`, read once from the account screen and never written to the spec,
+and the copy of the spec repo into the user's home. Without EFI it picks the
+BIOS layout. Each command's output streams to the install screen and to
+`/var/log/fspec-install.log`.
+
+Secure Boot on the installed system is optional and off by default, since it
+needs the firmware in setup mode. Off, systemd-boot and the unified kernel
+images are unsigned. On, `sbctl` creates keys and enrols them with
+`--microsoft`, keeping the Microsoft UEFI CA: systemd-boot and the kernel
+images of distros without a signed kernel (Arch, CachyOS, Void) are signed
+with the machine's own key, and distros with a signed shim (Fedora, Ubuntu,
+Debian, Universal Blue) keep booting through it, chainloaded from
+systemd-boot, so their vendor chain stays intact. The review screen says which
+roots end up vendor-signed. Measured boot and anti-cheat behind a chainloaded
+shim are unverified.
+
+bootc image hosts install with `bootc install to-filesystem` into
+`@<distro>` with the bootloader skipped, plus a Boot Loader Specification
+entry for the ostree deployment whose kernel systemd-boot can read from the
+ESP.
+
 ## Commands
 
 | Command | Does |
