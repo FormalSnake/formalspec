@@ -263,8 +263,15 @@ impl Backend for Live {
         timezones(&std::fs::read_to_string("/usr/share/zoneinfo/zone1970.tab").unwrap_or_default())
     }
 
+    /// The session runs in sway, which switches its layout at runtime; on a bare console the
+    /// console keymap is what typing goes through.
     fn set_keymap(&self, keymap: &str) -> Result<()> {
-        LiveRunner.check(&Cmd::new("loadkeys").arg(keymap)).map(drop)
+        let cmd = if std::env::var_os("SWAYSOCK").is_some() {
+            Cmd::new("swaymsg").args(["input", "type:keyboard", "xkb_layout", keymap])
+        } else {
+            Cmd::new("loadkeys").arg(keymap)
+        };
+        LiveRunner.check(&cmd).map(drop)
     }
 
     fn clone_spec(&self, url: &str, auth: &GitAuth, into: &Path) -> Result<Vec<HostSummary>> {
