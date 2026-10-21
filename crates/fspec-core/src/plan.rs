@@ -103,7 +103,7 @@ fn detail(r: &Resource) -> String {
     match r {
         Resource::Pkg(p) => p.source.to_string(),
         Resource::File(f) => format!("{:?}", f.mode).to_lowercase(),
-        Resource::Service(s) => s.exec.clone(),
+        Resource::Service(s) => s.exec.clone().unwrap_or_else(|| "enable the distro unit".into()),
         Resource::Timer(t) => format!("{} {}", t.schedule, t.exec),
         Resource::User(u) => u.uid.map(|uid| format!("uid {uid}")).unwrap_or_default(),
         Resource::Secret(s) => s.src.clone(),

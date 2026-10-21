@@ -40,10 +40,16 @@ impl Backend for SystemdBackend {
     }
 
     fn check(&self, _cx: &Cx, r: &Resource) -> Result<()> {
+        if let Some(s) = distro(r) {
+            return crate::distro_unit::check(Init::Systemd, s);
+        }
         units(r).map(drop)
     }
 
     fn drift(&self, cx: &Cx, entry: &Entry) -> Result<Vec<String>> {
+        if let Some(s) = distro(&entry.resource) {
+            return crate::distro_unit::drift(cx, Init::Systemd, s);
+        }
         let mut notes = Vec::new();
         for u in units(&entry.resource)? {
             match read_or_empty(&cx.resolve(&u.path)?) {
@@ -56,7 +62,7 @@ impl Backend for SystemdBackend {
     }
 
     fn prepare(&self, _cx: &Cx, ops: &[Op], staging: &Path) -> Result<()> {
-        for op in ops.iter().filter(|o| !o.is_removal()) {
+        for op in ops.iter().filter(|o| !o.is_removal() && distro(o.resource()).is_none()) {
             for u in units(op.resource())? {
                 write_file(&staged(staging, op, &u), &u.content)?;
             }
@@ -67,6 +73,13 @@ impl Backend for SystemdBackend {
     fn commit(&self, cx: &Cx, ops: &[Op], staging: &Path, journal: &mut Journal) -> Result<Records> {
         let mut records = Records::new();
         for op in ops {
+            if let Some(s) = distro(op.resource()) {
+                crate::distro_unit::commit(cx, Init::Systemd, journal, op, s)?;
+                if !op.is_removal() {
+                    records.insert(op.key.clone(), Map::new());
+                }
+                continue;
+            }
             let user = is_user(op.resource());
             let main = main_unit(op.resource());
             let ctl = |args: &[&str]| ctl(user, args);
@@ -120,6 +133,13 @@ impl Backend for SystemdBackend {
 
 fn staged(staging: &Path, op: &Op, u: &Unit) -> std::path::PathBuf {
     staging.join("systemd").join(op.key.to_string().replace(':', "-")).join(&u.file)
+}
+
+fn distro(r: &Resource) -> Option<&fspec_core::resource::Service> {
+    match r {
+        Resource::Service(s) => crate::distro_unit::of(s),
+        _ => None,
+    }
 }
 
 fn ctl(user: bool, args: &[&str]) -> Cmd {
@@ -243,7 +263,7 @@ fn render_service(s: &Service) -> Result<String> {
         }
     }
 
-    service.push("ExecStart", exec_start(&s.exec)?);
+    service.push("ExecStart", exec_start(s.exec())?);
     match s.restart {
         Restart::No => {}
         Restart::OnFailure => service.push("Restart", "on-failure"),

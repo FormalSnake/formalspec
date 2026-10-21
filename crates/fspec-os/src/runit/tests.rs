@@ -163,3 +163,22 @@ fn drift_reports_edited_and_missing_files() {
     let p = plan(w.cx(Scope::System));
     assert!(matches!(&p.changes[0].action, Action::Drift { notes } if notes[0].ends_with("is missing")));
 }
+
+#[test]
+fn a_service_without_exec_links_the_distro_service() {
+    let w = World::linux(Init::Runit);
+    let backends: &[&dyn Backend] = &[&RunitBackend];
+    let sshd = resource(json!({"kind": "service", "name": "sshd"}));
+    let err = apply_scope(&w.cx(Scope::System), backends, &[desired(sshd.clone())]).unwrap_err();
+    assert!(format!("{err:#}").contains("/etc/sv/sshd does not exist"), "{err:#}");
+
+    fs::create_dir_all(w.paths.root.join("etc/sv/sshd")).unwrap();
+    apply_scope(&w.cx(Scope::System), backends, &[desired(sshd)]).unwrap();
+    let link = w.paths.root.join("etc/runit/runsvdir/default/sshd");
+    assert_eq!(fs::read_link(&link).unwrap().to_str(), Some("/etc/sv/sshd"));
+    assert!(w.runner.lines().is_empty());
+
+    apply_scope(&w.cx(Scope::System), backends, &[]).unwrap();
+    assert!(link.symlink_metadata().is_err());
+    assert!(w.paths.root.join("etc/sv/sshd").is_dir());
+}

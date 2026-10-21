@@ -223,3 +223,21 @@ fn drift_reports_edited_and_missing_units() {
     assert!(unit.exists());
     assert_eq!(w.runner.lines(), ["systemctl daemon-reload", "systemctl restart fspec-web.service"]);
 }
+
+#[test]
+fn a_service_without_exec_enables_the_distro_unit() {
+    let w = World::linux(Init::Systemd);
+    let backends: &[&dyn Backend] = &[&SystemdBackend];
+    let gdm = resource(json!({"kind": "service", "name": "gdm"}));
+    apply_scope(&w.cx(Scope::System), backends, &[desired(gdm.clone())]).unwrap();
+    assert_eq!(w.runner.lines(), ["systemctl enable gdm"]);
+    assert!(!w.paths.root.join("etc/systemd/system/fspec-gdm.service").exists());
+
+    w.runner.calls.lock().unwrap().clear();
+    apply_scope(&w.cx(Scope::System), backends, &[]).unwrap();
+    assert_eq!(w.runner.lines(), ["systemctl disable gdm"]);
+
+    let bad = resource(json!({"kind": "service", "name": "gdm", "restart": "always"}));
+    let err = SystemdBackend.check(&w.cx(Scope::System), &bad).unwrap_err().to_string();
+    assert!(err.contains("takes no restart"), "{err}");
+}

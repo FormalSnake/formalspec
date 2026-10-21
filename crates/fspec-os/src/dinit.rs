@@ -73,7 +73,7 @@ impl Flavor for Dinit {
     }
 
     fn parts(&self, _cx: &Cx, s: &Service) -> Result<Vec<Part>> {
-        let argv = crate::argv(&s.exec, &s.env)?;
+        let argv = crate::argv(s.exec(), &s.env)?;
         let mut out = initsvc::HEADER.to_string();
         if let Some(d) = initsvc::describe(s)? {
             out.push_str(&format!("# {d}\n"));

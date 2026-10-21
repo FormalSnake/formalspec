@@ -38,6 +38,11 @@ impl Backend for LaunchdBackend {
     }
 
     fn check(&self, cx: &Cx, r: &Resource) -> Result<()> {
+        if let Resource::Service(s) = r
+            && let Some(s) = crate::distro_unit::of(s)
+        {
+            return crate::distro_unit::check(Init::Launchd, s);
+        }
         reject_systemd_extras(cx.facts.init, r)?;
         render(r).map(drop)
     }
@@ -154,7 +159,7 @@ fn render(r: &Resource) -> Result<String> {
 }
 
 fn service(s: &Service, d: &mut Dictionary) -> Result<()> {
-    d.insert("ProgramArguments".into(), program_arguments(&s.exec)?);
+    d.insert("ProgramArguments".into(), program_arguments(s.exec())?);
     d.insert("RunAtLoad".into(), true.into());
     match s.restart {
         Restart::No => {}

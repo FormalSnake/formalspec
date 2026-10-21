@@ -82,7 +82,7 @@ impl Flavor for Openrc {
     }
 
     fn parts(&self, _cx: &Cx, s: &Service) -> Result<Vec<Part>> {
-        let argv = crate::argv(&s.exec, &Default::default())?;
+        let argv = crate::argv(s.exec(), &Default::default())?;
         let mut out = format!("#!/sbin/openrc-run\n{}\n", initsvc::HEADER);
         if let Some(d) = initsvc::describe(s)? {
             out.push_str(&format!("description={}\n", shell_words::quote(d)));

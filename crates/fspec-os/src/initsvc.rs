@@ -15,7 +15,7 @@ use fspec_core::resource::Service;
 use fspec_core::state::Entry;
 use serde_json::{Map, Value, json};
 
-use crate::{check_line, check_name};
+use crate::{check_line, check_name, distro_unit};
 use crate::{crond, read_or_empty, reject_systemd_extras, write_file};
 
 /// One file a service is rendered to. `path` is a spec path, resolved against the rooted paths.
@@ -76,6 +76,7 @@ pub(crate) fn handles(f: &dyn Flavor, cx: &Cx, r: &Resource) -> bool {
 pub(crate) fn check(f: &dyn Flavor, cx: &Cx, r: &Resource) -> Result<()> {
     reject_systemd_extras(cx.facts.init, r)?;
     match r {
+        Resource::Service(s) if distro_unit::of(s).is_some() => distro_unit::check(f.init(), s),
         Resource::Service(s) => {
             check_name("service", &s.name)?;
             f.check_service(s)?;
@@ -88,6 +89,7 @@ pub(crate) fn check(f: &dyn Flavor, cx: &Cx, r: &Resource) -> Result<()> {
 
 pub(crate) fn drift(f: &dyn Flavor, cx: &Cx, entry: &Entry) -> Result<Vec<String>> {
     match &entry.resource {
+        Resource::Service(s) if distro_unit::of(s).is_some() => distro_unit::drift(cx, f.init(), s),
         Resource::Service(s) => {
             let mut notes = Vec::new();
             for p in f.parts(cx, s)? {
@@ -106,7 +108,9 @@ pub(crate) fn drift(f: &dyn Flavor, cx: &Cx, entry: &Entry) -> Result<Vec<String
 
 pub(crate) fn prepare(f: &dyn Flavor, cx: &Cx, ops: &[Op], staging: &Path) -> Result<()> {
     for op in ops.iter().filter(|o| !o.is_removal()) {
-        if let Resource::Service(s) = op.resource() {
+        if let Resource::Service(s) = op.resource()
+            && distro_unit::of(s).is_none()
+        {
             let dir = staged_dir(f, staging, op);
             for (i, p) in f.parts(cx, s)?.iter().enumerate() {
                 write_file(&dir.join(i.to_string()), &p.content)?;
@@ -121,6 +125,7 @@ pub(crate) fn commit(f: &dyn Flavor, cx: &Cx, ops: &[Op], staging: &Path, journa
     f.begin(cx, journal, ops)?;
     for op in ops {
         let record = match op.resource() {
+            Resource::Service(s) if distro_unit::of(s).is_some() => distro_unit::commit(cx, f.init(), journal, op, s)?,
             Resource::Service(s) => {
                 let parts = f.parts(cx, s)?;
                 f.commit_service(cx, journal, op, &parts, &staged_dir(f, staging, op))?
@@ -254,8 +259,8 @@ pub(crate) fn exports(s: &Service) -> Result<String> {
 /// The `run` script runit and s6 share: stderr to stdout, environment, then `exec`.
 /// `pre` lines go before the command.
 pub(crate) fn run_script(s: &Service, pre: &str) -> Result<String> {
-    check_line("exec", &s.exec)?;
-    let exec = s.exec.trim();
+    check_line("exec", s.exec())?;
+    let exec = s.exec().trim();
     if exec.is_empty() {
         bail!("exec is empty");
     }

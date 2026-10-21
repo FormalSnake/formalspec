@@ -422,7 +422,10 @@ pub enum OnDrift {
 #[serde(deny_unknown_fields)]
 pub struct Service {
     pub name: String,
-    pub exec: String,
+    /// The command to run. Without one the service is a unit the distro ships, which fspec only
+    /// enables.
+    #[serde(default)]
+    pub exec: Option<String>,
     #[serde(default)]
     pub user: bool,
     #[serde(default)]
@@ -437,6 +440,13 @@ pub struct Service {
     /// systemd-only directives. `plan` fails on any other init when this is set.
     #[serde(default)]
     pub systemd: BTreeMap<String, Value>,
+}
+
+impl Service {
+    /// The declared command; empty for a distro unit, which never gets rendered.
+    pub fn exec(&self) -> &str {
+        self.exec.as_deref().unwrap_or_default()
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]

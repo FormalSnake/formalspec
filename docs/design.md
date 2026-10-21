@@ -470,6 +470,15 @@ service("syncthing", exec = "syncthing serve --no-browser",
 | s6 | an s6-rc longrun source directory under `/etc/s6/sv`, recompiled on every change; no user services |
 | launchd | plists in `/Library/LaunchDaemons` or `~/Library/LaunchAgents` |
 
+Without `exec`, `service("gdm")` names a unit the distro ships and fspec only
+enables it at boot, without starting it, so the same apply works inside the chroot
+`switch --distro` builds. systemd runs `systemctl enable gdm`, runit links
+`/etc/sv/gdm` into `/etc/runit/runsvdir/default` (and fails `apply` when the
+package that ships it is missing), OpenRC runs `rc-update add gdm default` and dinit
+`dinitctl enable gdm`. Such a service takes no other field, s6 and launchd refuse
+it, and drift is the unit no longer being enabled. Removing it disables the unit
+and leaves the distro's files alone.
+
 A timer's `schedule` is a five-field cron expression or one of `@hourly`,
 `@daily`, `@weekly` and `@monthly`. Timers become systemd timers, cron entries or launchd
 calendar intervals. Features only systemd has (socket activation, cgroup

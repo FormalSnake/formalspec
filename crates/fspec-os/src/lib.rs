@@ -6,6 +6,7 @@ mod cron;
 mod crond;
 mod defaults;
 mod dinit;
+mod distro_unit;
 mod initsvc;
 mod launchd;
 mod openrc;
