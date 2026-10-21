@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Builds out/formalspec-installer-<date>-amd64.iso. Needs docker and network; run from anywhere.
-# Debian packages come from the snapshot.debian.org timestamp in ./snapshot, and the date in the
-# file name and the ISO timestamps come from SOURCE_DATE_EPOCH (default: the HEAD commit time).
+# Builds out/formalspec-installer-amd64.iso. Needs docker and network; run from anywhere.
+# Debian packages come from the snapshot.debian.org timestamp in ./snapshot, and the ISO timestamps
+# come from SOURCE_DATE_EPOCH (default: the HEAD commit time). The file name has no version or date,
+# so releases/latest/download/formalspec-installer-amd64.iso always names the newest release.
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -48,7 +49,6 @@ docker run --rm --privileged -v "$work:/work" -v "$here:/iso:ro" \
 	-e OUT_UID="$(id -u)" -e OUT_GID="$(id -g)" -e SOURCE_DATE_EPOCH \
 	"$DEBIAN_IMAGE" bash /iso/lb-build.sh
 
-stamp=$(date -u -d "@$SOURCE_DATE_EPOCH" +%Y%m%d 2>/dev/null || date -u -r "$SOURCE_DATE_EPOCH" +%Y%m%d)
-iso=formalspec-installer-$stamp-amd64.iso
+iso=formalspec-installer-amd64.iso
 mv "$work/formalspec-installer.iso" "$out/$iso"
 ls -l "$out/$iso"
