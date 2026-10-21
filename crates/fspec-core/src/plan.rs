@@ -159,6 +159,7 @@ mod tests {
             source,
             version: None,
             links: Default::default(),
+            share: Default::default(),
             mode: Default::default(),
             channel: Default::default(),
             patches: vec![],

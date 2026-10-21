@@ -347,6 +347,48 @@ fn a_url_elf_is_the_command_and_any_other_file_is_data() {
 }
 
 #[test]
+fn a_data_only_pkg_links_its_share_trees() {
+    let mut w = World::new();
+    let fedora = serde_json::from_value(json!({"kind": "distro", "distro": "fedora", "init": "systemd"})).unwrap();
+    w.facts = Facts::declared("m", "x86_64-linux", Some(&fedora)).unwrap();
+    let body = tgz(&[
+        ("Bibata-Modern-Classic/index.theme", "[Icon Theme]", 0o644),
+        ("Bibata-Modern-Classic/cursors/left_ptr", "cursor", 0o644),
+    ]);
+    let mut l = locked("bibata", "url:https://example/Bibata.tar.gz", "2.0.7", "https://example/Bibata.tar.gz", &body);
+    l.artifacts = BTreeMap::from([("x86_64-linux".to_string(), l.artifacts.remove(PLATFORM).unwrap())]);
+    w.lock.upsert(l);
+    w.fetch = MapFetch::default().with("https://example/Bibata.tar.gz", body);
+    let bibata = |share: serde_json::Value| {
+        with_fields(
+            pkg("bibata", json!({"kind": "url", "url": "https://example/Bibata.tar.gz"}), "pinned"),
+            json!({"share": share}),
+        )
+    };
+
+    let refused = w.plan(&[bibata(json!({"icons": "Bibata-Modern-Classic"}))]);
+    assert!(refused.unsupported[0].contains("must name an entry inside a directory"), "{:?}", refused.unsupported);
+
+    w.apply(&[bibata(json!({"icons/Bibata-Modern-Classic": "Bibata-Modern-Classic"}))]).unwrap();
+    let link = w.paths.system("/usr/local/share/icons/Bibata-Modern-Classic");
+    let target = fs::read_link(&link).unwrap();
+    assert!(target.starts_with("/opt/fspec/store/"), "{}", target.display());
+    assert!(target.to_string_lossy().ends_with("-bibata-2.0.7/Bibata-Modern-Classic"), "{}", target.display());
+    assert!(w.plan(&[bibata(json!({"icons/Bibata-Modern-Classic": "Bibata-Modern-Classic"}))]).changes.is_empty());
+
+    fs::remove_file(&link).unwrap();
+    let drift = w.plan(&[bibata(json!({"icons/Bibata-Modern-Classic": "Bibata-Modern-Classic"}))]);
+    assert_eq!(drift.changes.len(), 1, "{drift:?}");
+
+    w.apply(&[]).unwrap();
+    assert!(fs::symlink_metadata(&link).is_err());
+
+    fs::create_dir_all(&link).unwrap();
+    let err = w.apply(&[bibata(json!({"icons/Bibata-Modern-Classic": "Bibata-Modern-Classic"}))]).unwrap_err();
+    assert!(format!("{err:#}").contains("is not a link fspec made"), "{err:#}");
+}
+
+#[test]
 fn npm_without_dependencies_links_its_bin() {
     let mut w = World::new();
     let body = tgz(&[

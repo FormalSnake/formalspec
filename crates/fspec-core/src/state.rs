@@ -91,6 +91,7 @@ mod tests {
             source: Source::Aqua { name: "ripgrep".into() },
             version: None,
             links: Default::default(),
+            share: Default::default(),
             mode: Default::default(),
             channel: Default::default(),
             patches: vec![],

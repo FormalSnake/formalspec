@@ -232,6 +232,11 @@ pub struct Pkg {
     /// they run as: `{"cargo": "rustup"}` links `cargo` to rustup's proxy.
     #[serde(default)]
     pub links: BTreeMap<String, String>,
+    /// Data trees linked where the system looks for them: a path under `/usr/local/share`
+    /// (`icons/Bibata-Modern-Classic`) to a path inside the package (`.` for its root). A package
+    /// with `share` may have no executables: fonts, icon, cursor and GTK themes.
+    #[serde(default)]
+    pub share: BTreeMap<String, String>,
     /// App data paths removed with the package.
     #[serde(default)]
     pub data: Vec<String>,

@@ -306,6 +306,28 @@ artifact is verified against its `sha256-` or `sha512-` SRI hash before
 anything is unpacked (`.tar.gz`, `.tar.xz`, `.tar.zst`, `.zip`, or a bare
 binary named after the package).
 
+Data-only packages (fonts, icon and cursor themes, GTK themes) have no
+executables; they declare where their trees go with `share`, a map from a path
+under `/usr/local/share` to a path inside the package (`.` for its root):
+
+```python
+pkg("bibata", source = url(".../Bibata-Modern-Classic.tar.xz"),
+    share = {"icons/Bibata-Modern-Classic": "Bibata-Modern-Classic"})
+pkg("geist-mono-nerd-font", source = url(".../GeistMono.tar.xz"),
+    share = {"fonts/GeistMonoNerdFont": "."})
+```
+
+Store packages belong to the system scope, so the links go where every user's
+lookup reaches: fontconfig reads `/usr/local/share/fonts`, and icon, cursor and
+GTK theme lookups walk `XDG_DATA_DIRS`, which defaults to
+`/usr/local/share:/usr/share` (libXcursor's own default path skips
+`/usr/local/share/icons`, so an X11 cursor theme also needs it in
+`XCURSOR_PATH`). Each link points straight at the store path and is replaced
+when the package changes, removed with it, and reported as drift when missing.
+A destination must sit inside a directory (`icons/<theme>`, never `icons`), and
+apply refuses to replace anything there that is not a link. A package with
+neither executables nor `share` is refused. `share` is Linux only.
+
 Each pkg's record keeps the store path, version, linked bins and the lock entry
 it was installed from. `fspec rollback [gen]` re-applies that generation's
 resources with a lock rebuilt from those records, as a new generation, so the

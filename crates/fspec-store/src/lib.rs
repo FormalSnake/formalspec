@@ -12,10 +12,11 @@ mod patch;
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use fspec_core::apply::Records;
+use fspec_core::facts::Os;
 use fspec_core::journal::{Journal, copy_any, remove_any};
 use fspec_core::lock::{Artifact, LockedPkg};
 use fspec_core::resource::{Pkg, PkgMode, Source};
@@ -43,6 +44,9 @@ struct Installed {
     id: String,
     /// Executable name to path inside `store`.
     bins: BTreeMap<String, String>,
+    /// Path under `/usr/local/share` to the path inside `store` it links to.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    share: BTreeMap<String, String>,
     locked: LockedPkg,
 }
 
@@ -178,6 +182,23 @@ impl Backend for StoreBackend {
         Phase::Store
     }
 
+    fn check(&self, cx: &Cx, r: &Resource) -> Result<()> {
+        let Resource::Pkg(p) = r else { return Ok(()) };
+        if !p.share.is_empty() && cx.facts.os != Os::Linux {
+            bail!("share links into /usr/local/share, which only Linux searches");
+        }
+        for (dest, rel) in &p.share {
+            let normal = |s: &str| Path::new(s).components().all(|c| matches!(c, Component::Normal(_)));
+            if !normal(dest) || Path::new(dest).components().count() < 2 {
+                bail!("share: `{dest}` must name an entry inside a directory of /usr/local/share, like icons/<theme>");
+            }
+            if rel != "." && !normal(rel) {
+                bail!("share: `{rel}` must be a path inside the package, or `.`");
+            }
+        }
+        Ok(())
+    }
+
     /// The lock moved past the installed version (pinned only), or a link went missing.
     fn drift(&self, cx: &Cx, entry: &Entry) -> Result<Vec<String>> {
         let Resource::Pkg(p) = &entry.resource else { return Ok(vec![]) };
@@ -201,6 +222,10 @@ impl Backend for StoreBackend {
             inst.bins.keys().filter(|b| fs::metadata(root.join("current/bin").join(b)).is_err()).cloned().collect();
         if !broken.is_empty() {
             notes.push(format!("not linked in current: {}", broken.join(", ")));
+        }
+        let unshared: Vec<_> = inst.share.keys().filter(|d| !is_link(&share_path(cx, d))).cloned().collect();
+        if !unshared.is_empty() {
+            notes.push(format!("not linked in /usr/local/share: {}", unshared.join(", ")));
         }
         Ok(notes)
     }
@@ -243,6 +268,9 @@ impl Backend for StoreBackend {
                 for name in before.bins.keys() {
                     generation.unlink(name)?;
                 }
+                for dest in before.share.keys() {
+                    unshare(cx, dest, journal)?;
+                }
             }
             if op.is_removal() {
                 continue;
@@ -253,6 +281,9 @@ impl Backend for StoreBackend {
             };
             for (name, rel) in &inst.bins {
                 generation.link(name, &link_target(&inst.store, rel))?;
+            }
+            for (dest, rel) in &inst.share {
+                share(cx, dest, &live_path(&inst.store, rel), journal)?;
             }
             records.insert(op.key.clone(), inst.to_record());
         }
@@ -345,10 +376,52 @@ fn install(cx: &Cx, p: &Pkg, staging: &Path, journal: &mut Journal) -> Result<In
             (format!("store/{dirname}"), bins)
         }
     };
-    if bins.is_empty() {
-        bail!("it has no executables to link");
+    if bins.is_empty() && p.share.is_empty() {
+        bail!("it has no executables to link and no share");
     }
-    Ok(Installed { store, version: t.version, id: t.id, bins, locked: t.locked.clone() })
+    let tree = if Path::new(&store).is_absolute() { PathBuf::from(&store) } else { root.join(&store) };
+    for (dest, rel) in &p.share {
+        if fs::symlink_metadata(tree.join(rel)).is_err() {
+            bail!("share: `{rel}` (for {dest}) is not in the package");
+        }
+    }
+    Ok(Installed { store, version: t.version, id: t.id, bins, share: p.share.clone(), locked: t.locked.clone() })
+}
+
+fn is_link(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
+}
+
+fn share_path(cx: &Cx, dest: &str) -> PathBuf {
+    cx.paths.system("/usr/local/share").join(dest)
+}
+
+/// What a share link points at on the live system: our store is always `/opt/fspec/store`,
+/// whatever root this apply writes under.
+fn live_path(store: &str, rel: &str) -> PathBuf {
+    let base = if Path::new(store).is_absolute() { PathBuf::from(store) } else { Path::new("/opt/fspec").join(store) };
+    if rel == "." { base } else { base.join(rel) }
+}
+
+/// Link `/usr/local/share/<dest>` to `target`, refusing to replace anything but a link.
+fn share(cx: &Cx, dest: &str, target: &Path, journal: &mut Journal) -> Result<()> {
+    let at = share_path(cx, dest);
+    if fs::symlink_metadata(&at).is_ok_and(|m| !m.file_type().is_symlink()) {
+        bail!("{} exists and is not a link fspec made", at.display());
+    }
+    journal.backup(&at)?;
+    remove_any(&at)?;
+    fs::create_dir_all(at.parent().context("a share path has a parent")?)?;
+    std::os::unix::fs::symlink(target, &at).with_context(|| format!("linking {}", at.display()))
+}
+
+fn unshare(cx: &Cx, dest: &str, journal: &mut Journal) -> Result<()> {
+    let at = share_path(cx, dest);
+    if is_link(&at) {
+        journal.backup(&at)?;
+        remove_any(&at)?;
+    }
+    Ok(())
 }
 
 fn bins_of(p: &Pkg, artifact: &Artifact, dir: &Path) -> Result<BTreeMap<String, String>> {
