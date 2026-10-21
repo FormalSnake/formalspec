@@ -5,3 +5,4 @@
 pub mod backend;
 pub mod catalog;
 pub mod model;
+pub mod spec;
