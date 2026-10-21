@@ -90,6 +90,22 @@ fn to_image_needs_a_locked_image_and_then_runs_bootc() {
 }
 
 #[test]
+fn to_image_beside_installs_into_a_new_subvolume() {
+    let dir = setup();
+    assert!(!fspec(dir.path(), &["switch", "--beside", "fedora", "--host", "box"]).status.success());
+    let mut lock = Lock::default();
+    lock.system.insert("box".into(), LockedSystem { image: "ghcr.io/o/fspec-box@sha256:ab".into() });
+    lock.save(&dir.path().join("fspec.lock")).unwrap();
+    let out = fspec(dir.path(), &["switch", "--to-image", "--beside", "fedora", "--host", "box"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let lines = log(dir.path());
+    assert!(lines.iter().any(|l| l.contains("bootc install to-filesystem --bootloader=none")), "{lines:?}");
+    assert!(lines.iter().any(|l| l.ends_with("/run/fspec/switch/top/@fedora")));
+    assert!(!lines.iter().any(|l| l.contains("to-existing-root") || l.contains("loader.conf")));
+    assert!(!fspec(dir.path(), &["switch", "--to-image", "--inherit", "@nixos", "--host", "box"]).status.success());
+}
+
+#[test]
 fn adopt_boot_logs_the_new_default_entry() {
     let dir = setup();
     let out = fspec(dir.path(), &["switch", "--adopt-boot", "--host", "void"]);

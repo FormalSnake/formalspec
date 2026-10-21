@@ -1106,6 +1106,72 @@ with `podman run ... <locked image> bootc install to-existing-root
 bootc cannot install to, and needs `--yes` because the install reinitialises
 `/boot`.
 
+`fspec switch --to-image --beside <name>` installs the image into a new
+subvolume `@<name>` on the running root's btrfs filesystem instead, and
+leaves the running root, `loader.conf`, the other roots' entries and the EFI
+variables alone. It needs EFI, a btrfs root and systemd-boot on an ESP
+mounted at `/efi`, `/boot/efi` or `/boot`, so it also works from a root that
+is not on the default layout yet. It refuses an existing `@<name>`. It runs
+`podman run ... -v <new root>:/target:rbind <locked image> bootc install
+to-filesystem --bootloader=none --skip-finalize --root-mount-spec=UUID=<fs>
+--karg=rootflags=subvol=@<name>,noatime,compress=zstd:1 --karg=panic=10
+--karg=rd.shell=0 --karg=rd.emergency=reboot /target`, plus the running
+`console=` options. `--skip-finalize` matters: finalizing remounts the
+target read-only and freezes it, which on a shared filesystem reaches the
+running root. The kernel options make a boot that fails in the initramfs
+reboot instead of waiting at a shell.
+
+ostree keeps its kernels in the subvolume, where systemd-boot cannot read
+them. `/etc/fspec/esp-sync.sh` copies each deployment's kernel and initramfs
+to `<esp>/<name>/<ostree boot checksum>/` and writes
+`<esp>/loader/entries/<name>-ostree-<n>+3.conf` with ostree's title and
+options and three boot tries. `<n>` is given once per deployment and recorded
+in `<esp>/<name>/ids`, so the newest deployment sorts first and an entry keeps
+its counter when it is rewritten. The entries have no `sort-key`, so the
+other roots' entries that have one (NixOS writes `sort-key nixos`) sort before
+them, and systemd-boot sorts an entry with no tries left after every other
+entry. The script only touches `<esp>/<name>/` and
+`<name>-ostree-*.conf`, and deletes the entries and kernels of deployments
+ostree dropped. The install runs it once, and in the new root
+`fspec-esp-sync.service` runs it at boot and again when it stops at
+shutdown, ordered after `ostree-finalize-staged.service`, so a staged update
+reaches the ESP. The ESP is mounted at `/boot/efi` (`boot-efi.mount`, by
+PARTUUID), where `systemd-bless-boot` finds it. Fedora's SELinux policy does
+not let `init_t` rename files on the ESP, so the sync and
+`systemd-bless-boot.service` run as `unconfined_service_t`.
+
+The new root keeps the machine's identity from the root `--inherit
+@<subvolume>` names, by default the running one: its ssh host keys,
+NetworkManager connections (mode 0600) and `/var/lib/tailscale` (0700), and
+the host's declared users with the source's uid, gid, gecos, home and
+password hash. A user's shell is looked up by name in the new root
+(`/run/current-system/sw/bin/fish` becomes `/usr/bin/fish`), and the user
+joins the source's supplementary groups that the new root has, copying a
+group such as `wheel` from `/usr/lib/group` to `/etc/group` first. The
+running root's `/home` subvolume goes into the new root's `fstab` as
+`/var/home` with the same mount options. The script prints none of what it
+copies. A root without SELinux writes no labels, so `setfiles` from the image
+labels the deployment's `/etc`, the stateroot's `/var` and the shared home
+afterwards; sshd refuses an unlabelled `authorized_keys`.
+
+`--pull-from <repository>` pulls the locked digest from a plain-HTTP registry
+(`podman pull --tls-verify=false`, for that pull only) and installs with
+`--target-imgref=<locked repository>:latest --skip-fetch-check`, so later
+`bootc upgrade` runs go to the locked repository.
+
+A boot is blessed only once the machine can be reached:
+`fspec-boot-guard.service` is required by `boot-complete.target` and waits up
+to five minutes for an active `sshd.service` with a listening socket and for
+`tailscale status` to report this node online, and fails otherwise. With
+boot counting active, `fspec-boot-deadline.timer` reboots a boot that is not
+blessed ten minutes in, and `RuntimeWatchdogSec=60s` reboots a hung one.
+Both units only run while systemd-boot counts tries, so a blessed root that
+is offline keeps running. The install enables `sshd` and `tailscaled`.
+Making the new root the default is a separate step. Use `preferred
+<name>-ostree-*` in `loader.conf` or the `LoaderEntryPreferred` EFI variable,
+which skip an entry with no tries left. `default` does not skip it, so a bad
+entry there boots again and again.
+
 The old root stays bootable until `fspec forget <distro>` deletes it. It
 refuses the running distro and the root it booted from, and stops when that
 root does not exist. It is a hard refusal, not a warning, whenever the running
@@ -1176,10 +1242,6 @@ systemd-boot, so their vendor chain stays intact. The review screen says which
 roots end up vendor-signed. Measured boot and anti-cheat behind a chainloaded
 shim are unverified.
 
-bootc image hosts install with `bootc install to-filesystem` into
-`@<distro>` with the bootloader skipped, plus a Boot Loader Specification
-entry for the ostree deployment whose kernel systemd-boot can read from the
-ESP.
 
 ## Commands
 
@@ -1206,6 +1268,7 @@ ESP.
 | `fspec switch --adopt-boot` | Make the running root own boot, so the old one can be forgotten |
 | `fspec switch --reset-var` | Stage a reset of `/etc` and `/var` for the next boot of a bootc host |
 | `fspec switch --to-image --yes` | Convert a classic machine to the host's bootc image |
+| `fspec switch --to-image --beside <name> [--inherit @<root>]` | Install the host's bootc image into `@<name>` beside this root |
 | `fspec forget <distro>` | Delete an old distro root, from the root that owns boot |
 | `fspec disk plan [device]` | Steps that bring a disk onto a supported layout |
 | `fspec disk migrate [device]` | Run the in-place steps of `disk plan` |

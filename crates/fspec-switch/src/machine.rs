@@ -394,17 +394,18 @@ pub fn assumed(running: &str) -> Machine {
         parttype: ESP_TYPE.into(),
         fstype: "vfat".into(),
         size: 2 * GIB,
+        mounts: vec!["/efi".into()],
         ..Part::default()
     };
     let btrfs = Btrfs { uuid: "00000000-0000-0000-0000-000000000000".into(), luks: None, home: "/@home".into() };
     Machine {
+        parts: vec![esp.clone()],
         layout: Layout::Default { esp, btrfs },
         root: format!("/@{running}"),
         running: running.into(),
         firmware: Firmware::Efi,
         disk: "/dev/sda".into(),
         cmdline: String::new(),
-        parts: Vec::new(),
         root_part: Part::default(),
         fstype: "btrfs".into(),
         fs_uuid: "00000000-0000-0000-0000-000000000000".into(),

@@ -138,6 +138,18 @@ enum Command {
         /// Convert this classic system to the bootc image the host declares (destructive).
         #[arg(long)]
         to_image: bool,
+        /// With --to-image, install the image into a new subvolume @<NAME> beside this root
+        /// instead, booted by the systemd-boot already on the ESP. Nothing else on the disk changes.
+        #[arg(long, value_name = "NAME", requires = "to_image")]
+        beside: Option<String>,
+        /// With --beside, the subvolume whose ssh host keys, network connections, tailscale state
+        /// and users the new root keeps, default the running root.
+        #[arg(long, value_name = "SUBVOLUME", requires = "beside")]
+        inherit: Option<String>,
+        /// With --beside, pull the locked digest from this plain-HTTP registry repository instead.
+        /// The new root still updates from the locked repository's `:latest`.
+        #[arg(long, value_name = "REPOSITORY", requires = "beside")]
+        pull_from: Option<String>,
         #[arg(long)]
         host: Option<String>,
         /// Fedora release number or Debian suite to bootstrap.
@@ -511,12 +523,15 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
-        Command::Switch { distro, adopt_boot, reset_var, to_image, host, release, yes } => {
+        Command::Switch { distro, adopt_boot, reset_var, to_image, beside, inherit, pull_from, host, release, yes } => {
             let opts = Switch {
                 distro: distro.as_deref(),
                 adopt_boot: *adopt_boot,
                 reset_var: *reset_var,
                 to_image: *to_image,
+                beside: beside.as_deref(),
+                inherit: inherit.as_deref(),
+                pull_from: pull_from.as_deref(),
             };
             let spec = fspec_eval::evaluate(&spec_path)?;
             let name = host.clone().unwrap_or_else(local_hostname);
@@ -572,6 +587,9 @@ struct Switch<'a> {
     adopt_boot: bool,
     reset_var: bool,
     to_image: bool,
+    beside: Option<&'a str>,
+    inherit: Option<&'a str>,
+    pull_from: Option<&'a str>,
 }
 
 /// Commands run for real only on a live root; under `--root` they are logged.
@@ -664,6 +682,27 @@ fn switch(paths: &Paths, spec_path: &Path, host: &Host, opts: &Switch, release: 
         let Some(locked) = lock.system.get(&host.name) else {
             bail!("fspec.lock has no image for host {}; run `fspec update --images` first", host.name)
         };
+        if let Some(name) = opts.beside {
+            let m =
+                if live { fspec_switch::detect(runner.as_ref(), paths)? } else { fspec_switch::assumed(&host.name) };
+            let b = fspec_switch::Beside {
+                image: &locked.image,
+                distro: name,
+                inherit: opts.inherit,
+                users: host.users.iter().map(|u| u.name.clone()).collect(),
+                pull_from: opts.pull_from,
+            };
+            run_plan(paths, runner.as_ref(), &fspec_switch::beside(paths, &m, &b)?)?;
+            if live {
+                println!(
+                    "{} is installed in @{name} beside {}. Boot it once with `bootctl set-oneshot {name}-ostree-1.conf` \
+                     (`bootctl list` shows the entry); it is blessed only once sshd and tailscale are up, and \
+                     otherwise the next boot is the default again",
+                    locked.image, m.running
+                );
+            }
+            return Ok(());
+        }
         if live {
             if fspec_switch::is_bootc(runner.as_ref())? {
                 bail!("this machine already runs bootc; change image(base = ...) and apply instead");

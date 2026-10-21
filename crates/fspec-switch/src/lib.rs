@@ -2,6 +2,7 @@
 //! of commands; the CLI hands the plan to a [`Runner`], which under `--root` only logs it.
 
 mod adopt;
+mod beside;
 mod bootc;
 mod classic;
 mod disk;
@@ -15,6 +16,7 @@ use anyhow::{Result, bail};
 use fspec_core::runner::{Cmd, Runner};
 
 pub use adopt::adopt_boot;
+pub use beside::{Beside, beside};
 pub use bootc::{ResetVar, has_staged, is_bootc, reset_var, to_image};
 pub use classic::{Target, switch_distro, title};
 pub use disk::*;

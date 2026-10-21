@@ -5,8 +5,8 @@ use fspec_core::runner::{Output, RecordingRunner};
 use serde_json::json;
 
 use crate::{
-    Btrfs, Facts, Firmware, Ids, Init, Kind, Layout, Leftovers, Machine, Part, Target, adopt_boot, assumed, classify,
-    forget, init, migrate, reset_var, switch_distro, to_image,
+    Beside, Btrfs, Facts, Firmware, Ids, Init, Kind, Layout, Leftovers, Machine, Part, Target, adopt_boot, assumed,
+    beside, classify, forget, init, migrate, reset_var, switch_distro, to_image,
 };
 
 const UUID: &str = "1111-aaaa";
@@ -769,6 +769,239 @@ fn to_image_runs_bootc_from_the_image_itself() {
              /r:/target --security-opt label=type:unconfined_t ghcr.io/me/box@sha256:abc bootc install \
              to-existing-root --acknowledge-destructive"]
     );
+}
+
+/// NixOS as e1504g runs it: systemd-boot on an ESP at /boot, the root in @nixos, no shared
+/// subvolumes yet.
+fn nixos() -> Machine {
+    let l = lsblk("gpt", vec![esp("/dev/vda1", 1, 1024, &["/boot"]), btrfs_part("/dev/vda2", 2, &["/", "/home"])]);
+    let mut f = facts("/@nixos", l, true);
+    f.volumes = vec!["@nixos".into(), "@home".into()];
+    classify(&f, "nixos".into(), "init=/nix/store/x/init root=fstab console=ttyS0,115200 quiet".into()).unwrap()
+}
+
+fn fedora(image: &str) -> Beside<'_> {
+    Beside { image, distro: "fedora", inherit: None, users: vec!["kyan".into()], pull_from: None }
+}
+
+#[test]
+fn beside_installs_the_image_into_its_own_subvolume_without_a_bootloader() {
+    let plan = beside(&paths(), &nixos(), &fedora("ghcr.io/me/box@sha256:abc")).unwrap();
+    let lines = plan.lines();
+    let w = "/r/run/fspec/switch";
+    assert_eq!(lines[3], "test -e /r/boot/EFI/systemd/systemd-bootx64.efi");
+    let podman = position(&lines, "podman run");
+    assert_eq!(
+        lines[podman],
+        format!(
+            "podman run --rm --privileged --pid=host -v /dev:/dev -v /var/lib/containers:/var/lib/containers -v \
+             {w}/fedora:/target:rbind --security-opt label=type:unconfined_t ghcr.io/me/box@sha256:abc bootc install \
+             to-filesystem --bootloader=none --skip-finalize --root-mount-spec=UUID={UUID} \
+             --karg=rootflags=subvol=@fedora,noatime,compress=zstd:1 --karg=panic=10 --karg=rd.shell=0 \
+             --karg=rd.emergency=reboot --karg=console=ttyS0,115200 /target"
+        )
+    );
+    assert!(position(&lines, &format!("btrfs subvolume create {w}/top/@fedora")) < podman);
+    assert!(lines.contains(&format!("sh {w}/fedora-etc/fspec/esp-sync.sh {w}/fedora /r/boot fedora")));
+    assert!(lines.contains(&format!(
+        "ln -sf /etc/systemd/system/fspec-boot-guard.service \
+         {w}/fedora-etc/systemd/system/boot-complete.target.requires/fspec-boot-guard.service"
+    )));
+    // The other roots' boot setup is never touched.
+    assert!(!lines.iter().any(|l| l.contains("loader.conf") || l.contains("bootctl") || l.contains("efibootmgr")));
+    assert!(
+        stdin_of(&plan, &format!("tee {w}/fedora-etc/systemd/system/boot-efi.mount")).contains("PARTUUID=esp-guid")
+    );
+    let inherit = plan
+        .steps
+        .iter()
+        .find_map(|s| match s {
+            crate::Step::Run(c) if c.args.get(1).map(String::as_str) == Some(crate::beside::INHERIT) => Some(c),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        inherit.args[3..],
+        [
+            format!("{w}/top/@nixos"),
+            format!("{w}/fedora"),
+            "default".into(),
+            format!("UUID={UUID} /var/home btrfs subvol=@home,noatime,compress=zstd:1 0 0"),
+            "kyan".into()
+        ]
+    );
+    assert!(lines.iter().any(|l| l.contains("ghcr.io/me/box@sha256:abc sh -c") && l.contains("setfiles")));
+    let sync = stdin_of(&plan, &format!("tee {w}/fedora-etc/systemd/system/fspec-esp-sync.service"));
+    assert!(sync.contains("Before=basic.target final.target ostree-finalize-staged.service"));
+    assert!(sync.contains("ExecStop=/bin/sh /etc/fspec/esp-sync.sh /sysroot /boot/efi fedora"));
+    assert_eq!(plan.cleanup.last().unwrap().to_string(), format!("umount {w}"));
+}
+
+#[test]
+fn beside_pulls_from_a_plain_http_mirror_and_keeps_the_locked_origin() {
+    let b = Beside { pull_from: Some("100.64.0.1:5050/fspec-box"), ..fedora("ghcr.io/me/fspec-box@sha256:abc") };
+    let lines = beside(&paths(), &nixos(), &b).unwrap().lines();
+    let pull = position(&lines, "podman pull");
+    assert_eq!(lines[pull], "podman pull --tls-verify=false 100.64.0.1:5050/fspec-box@sha256:abc");
+    let install = position(&lines, "podman run");
+    assert!(pull < install);
+    assert!(lines[install].contains(
+        "100.64.0.1:5050/fspec-box@sha256:abc bootc install to-filesystem --bootloader=none \
+         --target-imgref=ghcr.io/me/fspec-box:latest --skip-fetch-check --skip-finalize"
+    ));
+    let tagged = Beside { pull_from: Some("m/x"), ..fedora("ghcr.io/me/box:latest") };
+    assert!(beside(&paths(), &nixos(), &tagged).unwrap_err().to_string().contains("digest"));
+}
+
+#[test]
+fn beside_needs_efi_btrfs_and_a_mounted_esp() {
+    let mut m = nixos();
+    m.firmware = Firmware::Bios;
+    assert!(beside(&paths(), &m, &fedora("img")).unwrap_err().to_string().contains("BIOS"));
+    let mut m = nixos();
+    m.parts.retain(|p| p.fstype != "vfat");
+    assert!(beside(&paths(), &m, &fedora("img")).unwrap_err().to_string().contains("no ESP"));
+    let mut m = nixos();
+    m.fstype = "ext4".into();
+    assert!(beside(&paths(), &m, &fedora("img")).is_err());
+    assert!(beside(&paths(), &nixos(), &Beside { distro: "../x", ..fedora("img") }).is_err());
+    assert!(beside(&paths(), &nixos(), &Beside { inherit: Some("@a/../b"), ..fedora("img") }).is_err());
+}
+
+fn ostree_entry(sysroot: &Path, n: u32, boot: &str, checksum: &str, kernel: &str) {
+    let link = sysroot.join(format!("ostree/boot.1/default/{boot}/0"));
+    std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+    let deploy = sysroot.join(format!("ostree/deploy/default/deploy/{checksum}.0"));
+    std::fs::create_dir_all(&deploy).unwrap();
+    std::os::unix::fs::symlink(format!("../../../deploy/default/deploy/{checksum}.0"), &link).unwrap();
+    let dir = sysroot.join(format!("boot/ostree/default-{boot}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(format!("vmlinuz-{kernel}")), kernel).unwrap();
+    std::fs::write(dir.join(format!("initramfs-{kernel}.img")), format!("initrd {kernel}")).unwrap();
+    let entries = sysroot.join("boot/loader/entries");
+    std::fs::create_dir_all(&entries).unwrap();
+    std::fs::write(
+        entries.join(format!("ostree-{n}.conf")),
+        format!(
+            "title Fedora Linux 44 (ostree:{n})\nversion {n}\noptions root=UUID=u rootflags=subvol=@fedora rw \
+             ostree=/ostree/boot.1/default/{boot}/0\nlinux /boot/ostree/default-{boot}/vmlinuz-{kernel}\n\
+             initrd /boot/ostree/default-{boot}/initramfs-{kernel}.img\n"
+        ),
+    )
+    .unwrap();
+}
+
+fn sync(sysroot: &Path, esp: &Path) -> Vec<String> {
+    let out = std::process::Command::new("sh")
+        .args(["-c", crate::beside::ESP_SYNC, "sh"])
+        .arg(sysroot)
+        .arg(esp)
+        .arg("fedora")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let mut names: Vec<String> = std::fs::read_dir(esp.join("loader/entries"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn esp_sync_copies_the_deployments_and_keeps_their_boot_counters() {
+    let dir = tempfile::tempdir().unwrap();
+    let (sysroot, esp) = (dir.path().join("sysroot"), dir.path().join("esp"));
+    std::fs::create_dir_all(esp.join("loader/entries")).unwrap();
+    let nixos = esp.join("loader/entries/nixos-abc.conf");
+    std::fs::write(&nixos, "title NixOS\nsort-key nixos\n").unwrap();
+    std::fs::write(esp.join("loader/loader.conf"), "default nixos-abc.conf\n").unwrap();
+    ostree_entry(&sysroot, 1, "b1", "c1", "7.1");
+
+    assert_eq!(sync(&sysroot, &esp), ["fedora-ostree-1+3.conf", "nixos-abc.conf"]);
+    let entry = std::fs::read_to_string(esp.join("loader/entries/fedora-ostree-1+3.conf")).unwrap();
+    assert_eq!(
+        entry,
+        "title Fedora Linux 44 (ostree:1)\nlinux /fedora/default-b1/vmlinuz\ninitrd /fedora/default-b1/initramfs.img\n\
+         options root=UUID=u rootflags=subvol=@fedora rw ostree=/ostree/boot.1/default/b1/0\n"
+    );
+    assert_eq!(std::fs::read_to_string(esp.join("fedora/default-b1/vmlinuz")).unwrap(), "7.1");
+
+    // systemd-boot counted one try; an update adds a deployment with a new kernel.
+    std::fs::rename(
+        esp.join("loader/entries/fedora-ostree-1+3.conf"),
+        esp.join("loader/entries/fedora-ostree-1+2-1.conf"),
+    )
+    .unwrap();
+    ostree_entry(&sysroot, 2, "b2", "c2", "7.2");
+    assert_eq!(sync(&sysroot, &esp), ["fedora-ostree-1+2-1.conf", "fedora-ostree-2+3.conf", "nixos-abc.conf"]);
+
+    // ostree drops the first deployment; its entry and kernel go, nothing else does.
+    std::fs::remove_file(sysroot.join("boot/loader/entries/ostree-1.conf")).unwrap();
+    assert_eq!(sync(&sysroot, &esp), ["fedora-ostree-2+3.conf", "nixos-abc.conf"]);
+    assert!(!esp.join("fedora/default-b1").exists() && esp.join("fedora/default-b2/initramfs.img").exists());
+    assert_eq!(std::fs::read_to_string(&nixos).unwrap(), "title NixOS\nsort-key nixos\n");
+    assert_eq!(std::fs::read_to_string(esp.join("loader/loader.conf")).unwrap(), "default nixos-abc.conf\n");
+}
+
+#[test]
+fn inherit_copies_the_identity_without_printing_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let w = |rel: &str, text: &str| {
+        let p = dir.path().join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, text).unwrap();
+    };
+    w("src/etc/ssh/ssh_host_ed25519_key", "PRIVATE");
+    w("src/etc/ssh/ssh_host_ed25519_key.pub", "PUBLIC");
+    w("src/etc/NetworkManager/system-connections/home.nmconnection", "[wifi]");
+    w("src/var/lib/tailscale/tailscaled.state", "node");
+    w(
+        "src/etc/passwd",
+        "root:x:0:0::/root:/run/current-system/sw/bin/bash\nkyan:x:1000:100:Kyan:/home/kyan:/run/current-system/sw/bin/fish\n",
+    );
+    w("src/etc/shadow", "root:!:1::::::\nkyan:$y$hash:20000::::::\n");
+    w("src/etc/group", "users:x:100:\nwheel:x:1:kyan\nvideo:x:26:kyan\ndocker:x:131:kyan\nkvm:x:302:\n");
+    let deploy = "sys/ostree/deploy/default/deploy/abc.0";
+    w(&format!("{deploy}/etc/passwd"), "root:x:0:0:root:/root:/bin/bash\n");
+    w(&format!("{deploy}/etc/shadow"), "root:!locked::0:99999:7:::\n");
+    w(&format!("{deploy}/etc/group"), "video:x:39:\n");
+    w(&format!("{deploy}/etc/gshadow"), "video:!::\n");
+    w(&format!("{deploy}/etc/fstab"), "UUID=x / btrfs ro 0 0\n");
+    w(&format!("{deploy}/usr/lib/group"), "root:x:0:\nwheel:x:10:\nusers:x:100:\n");
+    w(&format!("{deploy}/usr/bin/fish"), "");
+    std::fs::create_dir_all(dir.path().join(format!("{deploy}/etc/ssh"))).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(dir.path().join(format!("{deploy}/usr/bin/fish")), std::fs::Permissions::from_mode(0o755))
+        .unwrap();
+
+    // install -o root needs root, which a test does not have.
+    let script = crate::beside::INHERIT.replace(" -o root -g root", "");
+    let home = "UUID=u /var/home btrfs subvol=@home,noatime,compress=zstd:1 0 0";
+    let out = std::process::Command::new("sh")
+        .args(["-c", &script, "sh"])
+        .arg(dir.path().join("src"))
+        .arg(dir.path().join("sys"))
+        .args(["default", home, "kyan"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let printed = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(!printed.contains("hash") && !printed.contains("PRIVATE"), "{printed}");
+
+    let read = |rel: &str| std::fs::read_to_string(dir.path().join(format!("{deploy}/{rel}"))).unwrap();
+    let mode = |rel: &str| std::fs::metadata(dir.path().join(rel)).unwrap().permissions().mode() & 0o777;
+    assert_eq!(read("etc/ssh/ssh_host_ed25519_key"), "PRIVATE");
+    assert_eq!(mode(&format!("{deploy}/etc/ssh/ssh_host_ed25519_key")), 0o600);
+    assert_eq!(mode(&format!("{deploy}/etc/ssh/ssh_host_ed25519_key.pub")), 0o644);
+    assert_eq!(mode(&format!("{deploy}/etc/NetworkManager/system-connections/home.nmconnection")), 0o600);
+    assert_eq!(mode("sys/ostree/deploy/default/var/lib/tailscale"), 0o700);
+    assert_eq!(read("etc/passwd"), "root:x:0:0:root:/root:/bin/bash\nkyan:x:1000:100:Kyan:/home/kyan:/usr/bin/fish\n");
+    assert_eq!(read("etc/shadow"), "root:!locked::0:99999:7:::\nkyan:$y$hash:20000::::::\n");
+    // users exists in /usr/lib/group; wheel is copied over from there; docker and kvm are left out.
+    assert_eq!(read("etc/group"), "wheel:x:10:kyan\nvideo:x:39:kyan\n");
+    assert_eq!(read("etc/gshadow"), "wheel:!::kyan\nvideo:!::kyan\n");
+    assert_eq!(read("etc/fstab"), format!("UUID=x / btrfs ro 0 0\n{home}\n"));
 }
 
 #[test]
