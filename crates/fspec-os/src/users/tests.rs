@@ -27,8 +27,43 @@ fn creates_a_linux_account_with_a_shell_from_etc_shells() {
     apply_scope(&w.cx(Scope::System), &[&UsersBackend], &[desired(kyan("fish"))]).unwrap();
     assert_eq!(
         w.runner.lines(),
-        ["getent passwd kyan", "useradd -m -u 1000 -s /usr/local/bin/fish -G wheel,docker kyan",]
+        [
+            "getent passwd kyan",
+            "useradd -m -u 1000 -s /usr/local/bin/fish kyan",
+            "id -nG kyan",
+            "usermod -aG wheel,docker kyan",
+        ]
     );
+}
+
+/// Installs every package with one zypper call, the way a distro backend would.
+struct Zypper;
+
+impl Backend for Zypper {
+    fn name(&self) -> &'static str {
+        "zypper"
+    }
+    fn handles(&self, _cx: &Cx, r: &Resource) -> bool {
+        matches!(r, Resource::Pkg(_))
+    }
+    fn phase(&self) -> Phase {
+        Phase::Packages
+    }
+    fn commit(&self, cx: &Cx, ops: &[Op], _staging: &Path, _journal: &mut Journal) -> Result<Records> {
+        cx.runner.check(&Cmd::new("zypper").args(["install", "docker"]))?;
+        Ok(ops.iter().map(|o| (o.key.clone(), Map::new())).collect())
+    }
+}
+
+#[test]
+fn groups_are_joined_after_the_packages_that_create_them() {
+    let w = World::linux(Init::Systemd);
+    let docker = resource(json!({"kind": "pkg", "name": "docker", "source": {"kind": "dnf"}}));
+    apply_scope(&w.cx(Scope::System), &[&UsersBackend, &Zypper], &[desired(kyan("bash")), desired(docker)]).unwrap();
+    let lines = w.runner.lines();
+    let at = |l: &str| lines.iter().position(|x| x.starts_with(l)).unwrap_or_else(|| panic!("{l}: {lines:?}"));
+    assert!(at("useradd") < at("zypper install docker"), "{lines:?}");
+    assert!(at("zypper install docker") < at("usermod -aG wheel,docker kyan"), "{lines:?}");
 }
 
 #[test]

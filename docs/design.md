@@ -722,7 +722,11 @@ escaped. fspec assumes a cron that reads `/etc/cron.d` (cronie, vixie-cron) and
 does not detect the flavour; dcron, busybox crond and snooze are out of scope.
 
 `user` creates Linux accounts with `useradd` and adds missing groups with
-`usermod -aG` (it never removes a group). On macOS it only sets the login shell
+`usermod -aG` (it never removes a group). The account exists from the users
+phase, so files and secrets can be owned by it, but it joins its groups only
+after every phase has committed: packages create groups such as `docker` (a
+sysusers.d file) and `nordvpn` (a postinstall that also empties the group), so
+one apply converges. On macOS it only sets the login shell
 and checks the account and uid; it never creates accounts. Removing a `user`
 stops managing it and leaves the account. `defaults` journals the previous value
 of each key so a failed apply restores it, and removal deletes a key only while
@@ -1286,7 +1290,9 @@ refuses), `drift` reports live divergence for unchanged resources, `prepare`
 fetches and renders into a staging directory, and `commit` makes changes live,
 journaling an undo step before each mutation. The engine commits removals in
 reverse phase order, then adds and updates in phase order (users, files, store,
-packages, services, defaults, system), and writes the new state and
+packages, services, defaults, system). A backend can then `settle` its adds
+and updates, in the same phase order, for work that needs what later phases
+installed (group membership). The engine writes the new state and
 `generations/<n>.json` only after every commit succeeded. Each scope (system,
 user) is its own transaction with its own journal. A non-root `fspec apply`
 runs the system scope through `sudo fspec apply --scope system`, then the user
