@@ -49,10 +49,27 @@ fn origin(d: &Distro) -> Vec<(String, String)> {
         Some(b) => (format!("based on {b}"), format!("Uses {b}'s packages, with its own changes on top.")),
         None => ("independent".into(), "Built from its own sources and tooling, not on top of another distro.".into()),
     }];
-    if d.alpha {
-        out.push(("alpha".into(), "Still in development. Expect breakage; keep it off machines you depend on.".into()));
+    if d.snapper {
+        out.push((
+            "snapper".into(),
+            "Takes btrfs snapshots around every change, and the boot menu can start one.".into(),
+        ));
+    }
+    match d.prerelease {
+        Some("alpha") => out.push((
+            "alpha".into(),
+            "Still in development. Expect breakage; keep it off machines you depend on.".into(),
+        )),
+        Some(stage) => out.push((stage.into(), "Not released as stable yet. Expect rough edges.".into())),
+        None => {}
     }
     out
+}
+
+/// Room for the longest name and its prerelease chip, so the tag chips line up in columns.
+fn name_col() -> u16 {
+    let chip = |d: &Distro| d.prerelease.map_or(0, |p| if p == "release candidate" { 5 } else { p.len() + 3 });
+    DISTROS.iter().map(|d| d.name.len() + chip(d)).max().unwrap_or(0) as u16 + 2
 }
 
 pub struct System {
@@ -124,7 +141,7 @@ impl System {
         let side = a.width >= 100;
         let Some(d) = self.current() else { return };
         c.text(a, 0, 0, "Choose a system", Style::new().fg(th.ink).add_modifier(Modifier::BOLD));
-        let list_w = if side { 66 } else { a.width };
+        let list_w = if side { 2 + name_col() + 37 } else { a.width };
         let detail = if side {
             rect_in(a, list_w + 3, 2, a.width.saturating_sub(list_w + 3), a.height.saturating_sub(2))
         } else {
@@ -137,10 +154,14 @@ impl System {
             .iter()
             .map(|(t, e)| (t.to_string(), explain(e)))
             .chain(origin(d).into_iter().map(|(t, e)| (t, explain(&e))))
-            .chain(d.needs_efi.then(|| {
-                let e = "Installs only on machines that boot with UEFI; this one booted with BIOS.";
-                ("needs UEFI".to_string(), explain(e))
-            }).filter(|_| !self.efi))
+            .chain(
+                d.needs_efi
+                    .then(|| {
+                        let e = "Installs only on machines that boot with UEFI; this one booted with BIOS.";
+                        ("needs UEFI".to_string(), explain(e))
+                    })
+                    .filter(|_| !self.efi),
+            )
             .collect();
         let detail_h = 1 + reason.len() + 1 + tag_lines.iter().map(|(_, l)| l.len()).sum::<usize>();
         let list_h = if side {
@@ -162,11 +183,14 @@ impl System {
                 (false, true) => fg(th.ink),
             };
             let used = c.text(row, 2, 0, dd.name, st);
-            if dd.alpha {
-                c.text(row, 2 + used + 1, 0, " alpha ", fg(th.amber).bg(th.surface));
+            if let Some(stage) = dd.prerelease {
+                let short = if stage == "release candidate" { "RC" } else { stage };
+                c.text(row, 2 + used + 1, 0, &format!(" {short} "), fg(th.amber).bg(th.surface));
             }
-            for ((t, _), x) in tags(dd).iter().zip([21, 30, 39, 56]) {
-                chip(c, row, x, t);
+            let mut x = 2 + name_col();
+            for ((t, _), w) in tags(dd).iter().zip([9, 9, 10, 9]) {
+                chip(c, row, x, t.trim_end_matches(" kernel"));
+                x += w;
             }
             c.hit(row, W_LIST, idx);
         }

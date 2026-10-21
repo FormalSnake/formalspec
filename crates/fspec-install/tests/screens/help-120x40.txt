@@ -3,35 +3,35 @@
 
   Choose a system                                                     ╭─ spec.star ──────────────────────────────────╮
                                                                       │  # This machine's spec. `fspec plan` shows   │
-  ▌ Fedora              fixed    systemd  signed kernel    classic    │      what a change would do, `fspec apply`   │
-    Bazzite             fixed    systemd  signed kernel    image      │      makes it so.                            │
-    Fedora Atomic       fixed    systemd  signed kernel    image      │  load("//modules/minimal.star", "modules",   │
-    Aurora              fixed    systemd  signed kernel    image      │      "system")                               │
-    Arch Linux          rolling  systemd  unsigned kernel  classic    │                                              │
-    CachyOS             rolling  systemd  unsigned kernel  classic    │  hosts = [                                   │
-    Ubuntu              fixed╭────────────────────────────────────────────────────────────╮                          │
-    Debian              fixed│                                                            │ "x86_64-linux",          │
-    Void Linux          rolli│  Keys                                                      │en_US.UTF-8",             │
-    Void Linux (musl)   rolli│                                                            │us",                      │
-    AerynOS  alpha      rolli│  ↑↓  j k           Move in a list                          │ "UTC",                   │
-                             │  PgUp PgDn         Move by a page                          │ystem("fedora"),          │
-  Fedora                     │  Home End          First or last row                       │modules("fedora"),        │
-  Current software every six │  Tab  Shift+Tab    Move between fields                     │["/home"],                │
-  Secure Boot and anti-cheat │  Space             Toggle a switch                         │                          │
+  ▌ Fedora                   fixed    systemd  signed    classic      │      what a change would do, `fspec apply`   │
+    Bazzite                  fixed    systemd  signed    image        │      makes it so.                            │
+    Fedora Atomic            fixed    systemd  signed    image        │  load("//modules/minimal.star", "modules",   │
+    Aurora                   fixed    systemd  signed    image        │      "system")                               │
+    Arch Linux               rolling  systemd  unsigned  classic      │                                              │
+    CachyOS                  rolling  systemd  unsigned  classic      │  hosts = [                                   │
+    Ubuntu                   ╭────────────────────────────────────────────────────────────╮                          │
+    Debian                   │                                                            │ "x86_64-linux",          │
+    Void Linux               │  Keys                                                      │en_US.UTF-8",             │
+    Void Linux (musl)        │                                                            │us",                      │
+    openSUSE Tumbleweed      │  ↑↓  j k           Move in a list                          │ "UTC",                   │
+    openSUSE Leap            │  PgUp PgDn         Move by a page                          │ystem("fedora"),          │
+    openSUSE Aeon  RC        │  Home End          First or last row                       │modules("fedora"),        │
+    openSUSE Kalpa  alpha    │  Tab  Shift+Tab    Move between fields                     │["/home"],                │
+    AerynOS  alpha           │  Space             Toggle a switch                         │                          │
                              │  ←→                Change a choice or a number             │                          │
-  fixed            New versio│  Enter             Continue                                │                          │
-                   upgrade to│  Esc               Back                                    │                          │
-  systemd          Services s│  s                 Show or hide the spec                   │                          │
-  signed kernel    Boots with│  Ctrl+C            Quit                                    │                          │
-                   checks ker│                                                            │                          │
-  classic          The packag│                                                            │                          │
-                   btrfs snap╰────────────────────────────────────────────────────────────╯                          │
+  Fedora                     │  Enter             Continue                                │                          │
+  Current software every six │  Esc               Back                                    │                          │
+  Secure Boot and anti-cheat │  s                 Show or hide the spec                   │                          │
+                             │  Ctrl+C            Quit                                    │                          │
+  fixed            New versio│                                                            │                          │
+                   upgrade to│                                                            │                          │
+  systemd          Services s╰────────────────────────────────────────────────────────────╯                          │
+  signed kernel    Boots with Secure Boot on, and anti-cheat that     │                                              │
+                   checks kernel signatures trusts it.                │                                              │
+  classic          The package manager changes the system in place;   │                                              │
+                   btrfs snapshots cover rollback.                    │                                              │
   independent      Built from its own sources and tooling, not on     │                                              │
                    top of another distro.                             │                                              │
-                                                                      │                                              │
-                                                                      │                                              │
-                                                                      │                                              │
-                                                                      │                                              │
                                                                       │                                              │
                                                                       │                                              │
                                                                       │                                              │

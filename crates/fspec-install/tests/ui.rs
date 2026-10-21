@@ -263,6 +263,10 @@ fn new_system_flow_reaches_install_done() {
     assert_eq!(r.press(KeyCode::Enter), Some(Exit::Restart));
 }
 
+fn last_without_uefi() -> &'static str {
+    fspec_install::catalog::DISTROS.iter().rev().find(|d| !d.needs_efi).unwrap().id
+}
+
 #[test]
 fn a_bios_machine_cannot_pick_the_distros_that_need_uefi() {
     let mut r = Rig::new(Arc::new(DemoBackend::instant().bios()), (120, 40), false);
@@ -273,7 +277,7 @@ fn a_bios_machine_cannot_pick_the_distros_that_need_uefi() {
     r.press(KeyCode::End);
     r.press(KeyCode::Enter);
     let Some(SystemChoice::Fresh { distro, .. }) = r.app.draft().system else { panic!("no system chosen") };
-    assert_eq!(distro, "void-musl");
+    assert_eq!(distro, last_without_uefi());
     r.press(KeyCode::Esc);
     let screen = r.text((120, 40));
     let y = screen.lines().position(|l| l.contains("AerynOS")).unwrap() as u16;
@@ -281,7 +285,7 @@ fn a_bios_machine_cannot_pick_the_distros_that_need_uefi() {
     r.click(4, y);
     assert_eq!(r.app.step(), Step::System);
     let Some(SystemChoice::Fresh { distro, .. }) = r.app.draft().system else { panic!("no system chosen") };
-    assert_eq!(distro, "void-musl");
+    assert_eq!(distro, last_without_uefi());
 }
 
 #[test]

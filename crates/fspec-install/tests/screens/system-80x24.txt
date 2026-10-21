@@ -3,12 +3,12 @@
 
   Choose a system
 
-    Fedora              fixed    systemd  signed kernel    classic
-    Bazzite             fixed    systemd  signed kernel    image
-  ▌ Fedora Atomic       fixed    systemd  signed kernel    image
-    Aurora              fixed    systemd  signed kernel    image
-    Arch Linux          rolling  systemd  unsigned kernel  classic
-    CachyOS             rolling  systemd  unsigned kernel  classic
+    Fedora                   fixed    systemd  signed    classic
+    Bazzite                  fixed    systemd  signed    image
+  ▌ Fedora Atomic            fixed    systemd  signed    image
+    Aurora                   fixed    systemd  signed    image
+    Arch Linux               rolling  systemd  unsigned  classic
+    CachyOS                  rolling  systemd  unsigned  classic
 
   Fedora Atomic
   Fedora as an image: updates land whole and the previous one stays in the

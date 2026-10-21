@@ -83,8 +83,10 @@ pub struct Distro {
     pub delivery: Delivery,
     /// The distro it builds on, or `None` for an independent one.
     pub based_on: Option<&'static str>,
-    /// Its developers call it alpha: not ready for a machine you depend on.
-    pub alpha: bool,
+    /// Not released as stable yet, in its developers' own word: `alpha`, `release candidate`.
+    pub prerelease: Option<&'static str>,
+    /// Ships snapper, taking btrfs snapshots around every change that the boot menu offers.
+    pub snapper: bool,
     /// Installs only on the UEFI layouts, never the BIOS one.
     pub needs_efi: bool,
     pub presets: &'static [Preset],
