@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+VERSION=v0.26.1
+SHA256=a60b6bf0d1552ff2a58edee6bf53fe05e338fdf0bc00e421e20a338f1585ee0d
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+curl -fsSL -o "$work/moss.tar.gz" "https://github.com/AerynOS/os-tools/releases/download/$VERSION/moss.tar.gz"
+echo "$SHA256  $work/moss.tar.gz" | sha256sum -c -
+tar -xzf "$work/moss.tar.gz" -C "$work"
+install -m 0755 "$work/moss" /usr/local/bin/moss
+/usr/local/bin/moss --version

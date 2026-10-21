@@ -1,0 +1,17 @@
+#!/bin/sh
+set -eu
+
+VERSION=0.60.4_1
+FILE=xbps-static-static-$VERSION.x86_64-musl.tar.xz
+SHA256=603b3c55e9cabd5af79b461b929b14e1556a443c97b5714d188681c2172d9e28
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+curl -fsSL -o "$work/$FILE" "https://repo-default.voidlinux.org/static/$FILE"
+echo "$SHA256  $work/$FILE" | sha256sum -c -
+tar -xJf "$work/$FILE" -C "$work"
+for f in "$work"/usr/bin/xbps-*; do
+	case $f in *.static) continue ;; esac
+	install -m 0755 "$f" /usr/local/bin/
+done
+/usr/local/bin/xbps-install --version

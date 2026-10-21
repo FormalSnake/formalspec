@@ -1,0 +1,24 @@
+label live-@FLAVOUR@
+	menu label ^FormalSpec installer
+	menu default
+	linux @LINUX@
+	initrd @INITRD@
+	append @APPEND_LIVE@ quiet
+
+label live-@FLAVOUR@-serial
+	menu label FormalSpec installer (^serial console, ttyS0 115200)
+	linux @LINUX@
+	initrd @INITRD@
+	append @APPEND_LIVE@ console=ttyS0,115200 loglevel=7
+
+label live-@FLAVOUR@-shell
+	menu label FormalSpec installer (^shell only)
+	linux @LINUX@
+	initrd @INITRD@
+	append @APPEND_LIVE@ console=tty0 console=ttyS0,115200 fspec.session=shell
+
+label live-@FLAVOUR@-failsafe
+	menu label FormalSpec installer (^fail-safe)
+	linux @LINUX@
+	initrd @INITRD@
+	append @APPEND_LIVE_FAILSAFE@
