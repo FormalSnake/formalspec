@@ -460,8 +460,13 @@ fn dnf_failure_rolls_back_the_earlier_install() {
 
 #[test]
 fn dnf_is_left_to_the_image_on_image_hosts() {
-    let image =
-        Image { base: "quay.io/fedora/fedora-silverblue:42".into(), packages: None, kernel_args: vec![], distro: None };
+    let image = Image {
+        base: "quay.io/fedora/fedora-silverblue:42".into(),
+        packages: None,
+        kernel_args: vec![],
+        distro: None,
+        ..Default::default()
+    };
     let w = World::new("x86_64-linux", Some(System::Image(image)));
     assert_eq!(w.facts.distro, "fedora");
     let d = dnf("htop", &[], "pinned");
@@ -714,8 +719,13 @@ fn distro_managers_claim_only_their_own_distro_and_never_image_hosts() {
             assert_eq!(claimed, usize::from(i == j), "{} source on {}", f.kind, other.distro);
         }
     }
-    let image =
-        Image { base: "quay.io/fedora/fedora-silverblue:42".into(), packages: None, kernel_args: vec![], distro: None };
+    let image = Image {
+        base: "quay.io/fedora/fedora-silverblue:42".into(),
+        packages: None,
+        kernel_args: vec![],
+        distro: None,
+        ..Default::default()
+    };
     let w = World::new("x86_64-linux", Some(System::Image(image)));
     let want = FAMS[0].pkg("htop", &[]);
     assert!(!ALL.iter().any(|b| b.handles(&w.cx(Scope::System), &want.resource)));

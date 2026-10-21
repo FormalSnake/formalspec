@@ -167,8 +167,13 @@ mod tests {
     }
 
     fn image_host(name: &str) -> Host {
-        let image =
-            Image { base: "ghcr.io/ublue-os/bazzite:stable".into(), packages: None, kernel_args: vec![], distro: None };
+        let image = Image {
+            base: "ghcr.io/ublue-os/bazzite:stable".into(),
+            packages: None,
+            kernel_args: vec![],
+            distro: None,
+            ..Default::default()
+        };
         Host {
             name: name.into(),
             platform: "x86_64-linux".into(),

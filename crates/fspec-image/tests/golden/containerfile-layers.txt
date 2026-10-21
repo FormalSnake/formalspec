@@ -1,0 +1,9 @@
+FROM fedora:44 AS tool
+RUN echo built > /tool
+
+FROM ghcr.io/ublue-os/base-main:44
+RUN dnf -y copr enable solopasha/hyprland
+RUN dnf config-manager addrepo --from-repofile='https://pkgs.tailscale.com/stable/fedora/tailscale.repo'
+RUN dnf install -y hyprland tailscale && dnf clean all
+COPY --from=tool /tool /usr/share/tool
+RUN bootc container lint

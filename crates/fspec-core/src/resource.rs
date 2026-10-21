@@ -532,13 +532,26 @@ pub struct Defaults {
     pub value: Value,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct Image {
     pub base: String,
+    /// COPR projects (`owner/project`) enabled before the packages install.
+    #[serde(default)]
+    pub copr: Vec<String>,
+    /// URLs of `.repo` files added before the packages install.
+    #[serde(default)]
+    pub repos: Vec<String>,
     /// Distro packages layered into the image.
     #[serde(default)]
     pub packages: Option<Source>,
+    /// Containerfile build stages placed before the image's own `FROM`, for what is built from
+    /// source and copied in by `steps`.
+    #[serde(default)]
+    pub stages: Vec<String>,
+    /// Containerfile instructions run after the packages install.
+    #[serde(default)]
+    pub steps: Vec<String>,
     #[serde(default)]
     pub kernel_args: Vec<String>,
     /// Derived from the base image's name when unset (`bazzite-nvidia` is `bazzite`).

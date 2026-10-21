@@ -128,7 +128,13 @@ mod tests {
     }
 
     fn image() -> Image {
-        Image { base: "ghcr.io/ublue-os/bazzite:stable".into(), packages: None, kernel_args: vec![], distro: None }
+        Image {
+            base: "ghcr.io/ublue-os/bazzite:stable".into(),
+            packages: None,
+            kernel_args: vec![],
+            distro: None,
+            ..Default::default()
+        }
     }
 
     impl World {

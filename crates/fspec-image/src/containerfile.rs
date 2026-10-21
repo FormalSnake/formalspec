@@ -15,7 +15,32 @@ struct Kargs<'a> {
 /// The Containerfile CI builds for an `image(...)`: the base, the layered packages, the kernel
 /// arguments as a `kargs.d` drop-in, and the bootc lint bootc recommends as the last step.
 pub fn containerfile(image: &Image) -> Result<String> {
-    let mut out = format!("FROM {}\n", line(&image.base, "base")?);
+    let mut out = String::new();
+    for stage in &image.stages {
+        if !stage.trim_start().to_ascii_uppercase().starts_with("FROM ") {
+            bail!("image stages must each start with FROM, got `{}`", stage.lines().next().unwrap_or(""));
+        }
+        out.push_str(stage.trim_end());
+        out.push_str("\n\n");
+    }
+    out.push_str(&format!("FROM {}\n", line(&image.base, "base")?));
+    for c in &image.copr {
+        let ok = c.split_once('/').is_some_and(|(o, p)| {
+            [o.trim_start_matches('@'), p]
+                .iter()
+                .all(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')))
+        });
+        if !ok {
+            bail!("image copr `{c}` is not an owner/project name");
+        }
+        out.push_str(&format!("RUN dnf -y copr enable {c}\n"));
+    }
+    for r in &image.repos {
+        if !r.starts_with("https://") || !r.ends_with(".repo") || r.contains(|c: char| c.is_whitespace() || c == '\'') {
+            bail!("image repo `{r}` must be an https URL of a .repo file");
+        }
+        out.push_str(&format!("RUN dnf config-manager addrepo --from-repofile='{r}'\n"));
+    }
     if let Some(source) = &image.packages {
         let Source::Dnf(d) = source else {
             bail!("image packages must be dnf(...), got `{source}`: bootc images layer packages with dnf")
@@ -33,6 +58,10 @@ pub fn containerfile(image: &Image) -> Result<String> {
             }
         }
         out.push_str(&format!("RUN dnf install -y {} && dnf clean all\n", d.names.join(" ")));
+    }
+    for step in &image.steps {
+        out.push_str(step.trim_end());
+        out.push('\n');
     }
     if !image.kernel_args.is_empty() {
         for a in &image.kernel_args {
@@ -64,7 +93,13 @@ mod tests {
     use crate::testutil::golden;
 
     fn image(base: &str, packages: Option<Source>, kargs: &[&str]) -> Image {
-        Image { base: base.into(), packages, kernel_args: kargs.iter().map(|s| s.to_string()).collect(), distro: None }
+        Image {
+            base: base.into(),
+            packages,
+            kernel_args: kargs.iter().map(|s| s.to_string()).collect(),
+            distro: None,
+            ..Default::default()
+        }
     }
 
     fn dnf(names: &[&str]) -> Option<Source> {
@@ -79,6 +114,22 @@ mod tests {
             &["lockdown=integrity", "iommu=force"],
         );
         golden("containerfile-full.txt", &containerfile(&i).unwrap());
+    }
+
+    #[test]
+    fn repos_stages_and_steps_wrap_the_packages() {
+        let i = Image {
+            copr: vec!["solopasha/hyprland".into()],
+            repos: vec!["https://pkgs.tailscale.com/stable/fedora/tailscale.repo".into()],
+            stages: vec!["FROM fedora:44 AS tool\nRUN echo built > /tool".into()],
+            steps: vec!["COPY --from=tool /tool /usr/share/tool".into()],
+            ..image("ghcr.io/ublue-os/base-main:44", dnf(&["hyprland", "tailscale"]), &[])
+        };
+        golden("containerfile-layers.txt", &containerfile(&i).unwrap());
+        let bad = Image { stages: vec!["RUN true".into()], ..i.clone() };
+        assert!(containerfile(&bad).is_err());
+        let bad = Image { copr: vec!["no-slash".into()], ..i };
+        assert!(containerfile(&bad).is_err());
     }
 
     #[test]
