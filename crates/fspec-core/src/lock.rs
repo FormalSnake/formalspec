@@ -14,6 +14,9 @@ pub struct Lock {
     /// Per host: the system layer's pinned digest.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub system: BTreeMap<String, LockedSystem>,
+    /// Per Tumbleweed host: the snapshot its distro repos point at.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub zypper: BTreeMap<String, LockedZypper>,
     /// For a project's `dev.star`: its `lib(...)` and `bin(...)` dependencies, per package manager.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub native: Vec<LockedNative>,
@@ -83,6 +86,13 @@ pub struct LockedSystem {
     pub image: String,
 }
 
+/// A dated openSUSE Tumbleweed snapshot (`20261020`), served under
+/// `https://download.opensuse.org/history/<snapshot>/tumbleweed/`.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct LockedZypper {
+    pub snapshot: String,
+}
+
 impl Lock {
     /// A missing lock is empty; `plan` then reports packages that need `fspec update`.
     pub fn load(path: &Path) -> Result<Lock> {
@@ -138,11 +148,15 @@ x86_64-linux = { oci = "ghcr.io/formalstudio/fspec-cache/librepods@sha256:dd" }
 
 [system.g815]
 image = "ghcr.io/ublue-os/bazzite-nvidia@sha256:ee"
+
+[zypper.e1504g]
+snapshot = "20261020"
 "#;
         let lock: Lock = toml::from_str(text).unwrap();
         assert_eq!(lock.pkg("ripgrep").unwrap().artifacts["aarch64-darwin"].hash.as_deref(), Some("sha256-BBBB"));
         assert!(lock.pkg("librepods").unwrap().artifacts["x86_64-linux"].oci.is_some());
         assert_eq!(lock.system["g815"].image, "ghcr.io/ublue-os/bazzite-nvidia@sha256:ee");
+        assert_eq!(lock.zypper["e1504g"].snapshot, "20261020");
         let again: Lock = toml::from_str(&toml::to_string(&lock).unwrap()).unwrap();
         assert_eq!(again, lock);
     }

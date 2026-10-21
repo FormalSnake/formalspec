@@ -1,5 +1,5 @@
-//! Package manager backends: Flatpak and Homebrew everywhere they exist, dnf, pacman, apt and xbps on their classic distros,
-//! and the base packages of those distros.
+//! Package manager backends: Flatpak and Homebrew everywhere they exist, dnf, pacman, apt, xbps,
+//! moss and zypper on their classic distros, and the base packages and repos of those distros.
 //! Each one journals the inverse command before it changes anything.
 
 mod brew;
@@ -10,6 +10,7 @@ mod managers;
 mod pkgs;
 #[cfg(test)]
 mod tests;
+mod zypper;
 
 use anyhow::{Result, bail};
 use fspec_core::Cx;
@@ -21,7 +22,7 @@ use serde_json::{Map, Value};
 pub use brew::BrewBackend;
 pub use distro::DistroBackend;
 pub use flatpak::FlatpakBackend;
-pub use managers::{AptBackend, DnfBackend, MossBackend, PacmanBackend, XbpsBackend};
+pub use managers::{AptBackend, DnfBackend, MossBackend, PacmanBackend, XbpsBackend, ZypperBackend};
 
 fn pkg(r: &Resource) -> Result<&Pkg> {
     match r {

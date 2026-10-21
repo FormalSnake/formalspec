@@ -6,6 +6,7 @@ use fspec_os::{
 };
 use fspec_pkgmgr::{
     AptBackend, BrewBackend, DistroBackend, DnfBackend, FlatpakBackend, MossBackend, PacmanBackend, XbpsBackend,
+    ZypperBackend,
 };
 use fspec_store::StoreBackend;
 
@@ -22,6 +23,7 @@ pub fn all() -> Vec<&'static dyn Backend> {
         &AptBackend,
         &XbpsBackend,
         &MossBackend,
+        &ZypperBackend,
         &DistroBackend,
         &SystemdBackend,
         &RunitBackend,

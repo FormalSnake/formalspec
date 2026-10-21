@@ -12,6 +12,7 @@ pub(crate) enum Family {
     Apt,
     Xbps,
     Moss,
+    Zypper,
 }
 
 impl Family {
@@ -22,6 +23,7 @@ impl Family {
             "debian" | "ubuntu" => Some(Family::Apt),
             "void" => Some(Family::Xbps),
             "aerynos" => Some(Family::Moss),
+            "opensuse-tumbleweed" => Some(Family::Zypper),
             _ => None,
         }
     }
@@ -33,6 +35,7 @@ impl Family {
             Source::Apt(_) => Some(Family::Apt),
             Source::Xbps(_) => Some(Family::Xbps),
             Source::Moss(_) => Some(Family::Moss),
+            Source::Zypper(_) => Some(Family::Zypper),
             _ => None,
         }
     }
@@ -44,6 +47,7 @@ impl Family {
             Family::Apt => "apt",
             Family::Xbps => "xbps",
             Family::Moss => "moss",
+            Family::Zypper => "zypper",
         }
     }
 
@@ -54,6 +58,7 @@ impl Family {
             Family::Apt => apt("install").args(names),
             Family::Xbps => Cmd::new("xbps-install").arg("-y").args(names),
             Family::Moss => moss(["-y", "install"].into_iter().map(String::from).chain(names.iter().cloned())),
+            Family::Zypper => zypper_install().args(names),
         }]
     }
 
@@ -73,6 +78,7 @@ impl Family {
                 ]
             }
             Family::Moss => self.install_names(names),
+            Family::Zypper => vec![zypper_install().arg(file)],
         }
     }
 
@@ -83,12 +89,13 @@ impl Family {
             Family::Apt => apt("remove").args(names),
             Family::Xbps => Cmd::new("xbps-remove").arg("-y").args(names),
             Family::Moss => moss(["-y", "remove"].into_iter().map(String::from).chain(names.iter().cloned())),
+            Family::Zypper => zypper(["remove"]).args(names),
         }
     }
 
     pub fn version(self, name: &str) -> Cmd {
         match self {
-            Family::Dnf => Cmd::new("rpm").args(["-q", "--qf", "%{VERSION}-%{RELEASE}"]).arg(name),
+            Family::Dnf | Family::Zypper => Cmd::new("rpm").args(["-q", "--qf", "%{VERSION}-%{RELEASE}"]).arg(name),
             Family::Pacman => Cmd::new("pacman").arg("-Q").arg(name),
             Family::Apt => Cmd::new("dpkg-query").args(["-W", "-f=${Version}"]).arg(name),
             Family::Xbps => Cmd::new("xbps-query").args(["-p", "pkgver"]).arg(name),
@@ -109,7 +116,7 @@ impl Family {
         match self {
             Family::Pacman => out.split_whitespace().nth(1).unwrap_or_default().to_string(),
             Family::Xbps => out.strip_prefix(&format!("{name}-")).unwrap_or(out).to_string(),
-            Family::Dnf | Family::Apt | Family::Moss => out.to_string(),
+            Family::Dnf | Family::Apt | Family::Moss | Family::Zypper => out.to_string(),
         }
     }
 }
@@ -132,6 +139,15 @@ impl Family {
         let id: u64 = id.trim().parse().ok()?;
         Some(moss(["-y".into(), "state".into(), "activate".into(), id.to_string()]))
     }
+}
+
+/// zypper with `--non-interactive`, a global option that has to come before the command.
+pub(crate) fn zypper<'a>(args: impl IntoIterator<Item = &'a str>) -> Cmd {
+    Cmd::new("zypper").arg("--non-interactive").args(args)
+}
+
+fn zypper_install() -> Cmd {
+    zypper(["install", "--auto-agree-with-licenses"])
 }
 
 fn apt(verb: &str) -> Cmd {

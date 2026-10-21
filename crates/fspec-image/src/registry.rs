@@ -90,8 +90,7 @@ pub struct ImageUpdate {
 /// Pin every image host's pushed tag in `[system.<host>]`, and drop entries for hosts that no
 /// longer declare an image. Package entries pass through untouched.
 pub fn update_images(hosts: &[Host], old: &Lock, registry: &str, fetch: &dyn Fetch) -> Result<ImageUpdate> {
-    let mut lock =
-        Lock { pkg: old.pkg.clone(), system: Default::default(), native: old.native.clone(), image: old.image.clone() };
+    let mut lock = Lock { system: Default::default(), ..old.clone() };
     let (mut changes, mut errors) = (Vec::new(), Vec::new());
     for host in hosts {
         let before = old.system.get(&host.name);

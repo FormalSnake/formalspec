@@ -344,3 +344,31 @@ fn update_keeps_recorded_oci_digests_while_commit_and_patches_stand() {
     let changed = update(&hosts, &old, &[], &cx).unwrap();
     assert!(changed.lock.pkg("tool").unwrap().artifacts.is_empty());
 }
+
+#[test]
+fn update_pins_tumbleweed_hosts_to_the_newest_snapshot_old_enough() {
+    let fetch =
+        MapFetch::default().with("https://download.opensuse.org/history/list", "20251008\n20251005\n20251001\n");
+    let runner = RecordingRunner::default();
+    let tw = |name: &str, age: Option<&str>| {
+        let mut h = host(name, "x86_64-linux", age, vec![]);
+        h.system = Some(
+            serde_json::from_value(json!({"kind": "distro", "distro": "opensuse-tumbleweed", "init": "systemd"}))
+                .unwrap(),
+        );
+        h
+    };
+    let hosts = vec![tw("laptop", None), tw("server", Some("7d")), host("mac", "aarch64-darwin", None, vec![])];
+    let old = toml_lock("[zypper.laptop]\nsnapshot = \"20251001\"\n\n[zypper.gone]\nsnapshot = \"20251001\"\n");
+    let got = update(&hosts, &old, &[], &cx(&fetch, &runner)).unwrap();
+    assert!(got.errors.is_empty(), "{:?}", got.errors);
+    assert_eq!(got.lock.zypper["laptop"].snapshot, "20251008");
+    assert_eq!(got.lock.zypper["server"].snapshot, "20251001");
+    assert!(!got.lock.zypper.contains_key("gone"));
+    assert_eq!(
+        got.changes,
+        ["snapshot laptop 20251001 -> 20251008", "+ snapshot server 20251001", "- snapshot gone 20251001"]
+    );
+    let text = toml::to_string(&got.lock).unwrap();
+    assert!(text.contains("[zypper.laptop]\nsnapshot = \"20251008\""), "{text}");
+}

@@ -106,6 +106,8 @@ pub enum Phase {
     Users,
     Files,
     Store,
+    /// The distro's repos and base packages, before any `pkg` installs from them.
+    Distro,
     Packages,
     Services,
     Defaults,

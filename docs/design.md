@@ -36,7 +36,7 @@ Host facts come from the `host()` declaration itself, never from the network,
 so evaluation stays pure. `platform` is a
 required argument (`"x86_64-linux"`, `"aarch64-darwin"`); `distro` and `init`
 follow from `system` (`image(...)` gives the image's distro and systemd,
-`fedora(...)`, `arch(...)`, `debian(...)`, `void(...)` and `aerynos(...)` give their own, and an
+`fedora(...)`, `arch(...)`, `debian(...)`, `void(...)`, `aerynos(...)` and `tumbleweed(...)` give their own, and an
 `aarch64-darwin` platform implies macOS and launchd). An entry in `modules` can
 be a resource, a list of them, or a function, which FormalSpec calls with the
 host's facts:
@@ -98,7 +98,7 @@ package name or service name fail the plan.
 | `cargo(name)` | crates.io, prebuilt via cargo-binstall where available |
 | `flatpak(id)` | Flathub |
 | `brew(name)` | Homebrew bottles and casks on macOS |
-| `dnf`, `pacman`, `apt`, `xbps` | the distro's own repos |
+| `dnf`, `pacman`, `apt`, `xbps`, `moss`, `zypper` | the distro's own repos, plus `repo(...)` ones on zypper |
 | `git(url, rev)` | build from source with a recipe |
 | `nix(attr)` | borrow a nixpkgs build on hosts that have Nix |
 
@@ -221,6 +221,9 @@ x86_64-linux = { oci = "ghcr.io/formalstudio/fspec-cache/librepods@sha256:…" }
 
 [system.g815]
 image = "ghcr.io/ublue-os/bazzite-nvidia@sha256:…"
+
+[zypper.e1504g]
+snapshot = "20261020"
 ```
 
 Distro repos usually keep only the newest version of a package, so FormalSpec
@@ -247,6 +250,15 @@ repository stream rather than from package files, so there is no file to
 cache, and AerynOS's own reproducibility unit is the whole-system state moss
 records on every transaction; a rollback goes back to that state (see the
 system layer).
+`zypper` packages (openSUSE Tumbleweed) lock by name too. What pins their
+versions is the snapshot in `[zypper.<host>]`: openSUSE publishes every
+Tumbleweed snapshot under `https://download.opensuse.org/history/<YYYYMMDD>/tumbleweed/`
+and lists them newest first in `https://download.opensuse.org/history/list`.
+`fspec update` (without package names) pins each Tumbleweed host to the newest
+listed snapshot, or with `release_age` the newest whose day ended at least that
+long ago, and prints `snapshot <host> <old> -> <new>`. openSUSE keeps about a
+month of snapshots, so a pin older than that stops resolving and needs an
+update.
 The lock entry for a distro package holds one artifact per platform, so the
 cached file is used for single-name packages; a multi-name `dnf([...])` package
 installs by name. Flatpak pins live in `any = { commit = … }`, brew records
@@ -775,9 +787,9 @@ Xbps has no exact-version flag here, so the local repository pins by being the
 only place that file lives; if the Void repos hold a newer version, xbps may
 prefer it.
 
-These packages, both the `packages` list and `pkg` sources, commit in the
-package phase, before services, so a `service("sshd")` can enable a unit the
-same apply installed.
+These packages commit before services, so a `service("sshd")` can enable a unit
+the same apply installed: the `packages` list in the distro phase, `pkg`
+sources in the package phase after it.
 
 AerynOS's `aerynos(packages = [...])` and `pkg(..., source = moss())` run
 `moss install` and `moss remove`. moss builds every transaction as a new
@@ -788,6 +800,46 @@ so a failed apply returns the system to the exact state it started from,
 upgrades included, rather than reversing package by package. The installed
 version comes from `moss list installed`. Every fspec command run on AerynOS
 sticks to plain sh, since its base system has no grep, sed or awk.
+
+openSUSE Tumbleweed's `tumbleweed(packages = [...])` and `pkg(..., source =
+zypper())` run `zypper --non-interactive install --auto-agree-with-licenses`
+and `zypper --non-interactive remove`; versions come from `rpm -q`. A
+Tumbleweed host needs a `[zypper.<host>]` pin in the lock, and `plan` asks for
+`fspec update` without one. Apply points the distro repos at that snapshot:
+it writes the snapshot date to the zypp repo variable
+`/etc/zypp/vars.d/fspec_snapshot`, writes `/etc/zypp/repos.d/fspec-oss.repo`
+and `fspec-non-oss.repo` with
+`baseurl=https://download.opensuse.org/history/${fspec_snapshot}/tumbleweed/repo/oss/`
+(and `non-oss`), disables the rolling repos on download.opensuse.org and
+cdn.opensuse.org (`repo-oss`, `repo-non-oss`, `repo-update`, and the debug and
+source ones when enabled) with `zypper modifyrepo --disable`, force-refreshes
+the snapshot repos and runs `zypper --non-interactive dist-upgrade
+--auto-agree-with-licenses`. Moving the pin rewrites only the variable and runs
+the upgrade again, which also downgrades when the pin moved back. Other repos
+such as openh264 are left alone. The undo puts the old variable and repo files
+back, re-enables the rolling repos and runs the same upgrade against them, so
+a failed apply returns to the snapshot it started from. `plan` reports drift
+when the variable, the snapshot repos or an enabled rolling repo disagree with
+the lock.
+
+Third-party repos are `repo(...)` resources, for zypper distros only:
+
+```python
+repo("1password", url = "https://downloads.1password.com/linux/rpm/stable/x86_64",
+     key = "https://downloads.1password.com/linux/keys/1password.asc",
+     fingerprint = "3FEF9748469ADBE15DA7CA80AC2D62742012EA22")
+```
+
+`key` and `fingerprint` go together. Prepare downloads the key to
+`/var/cache/fspec/keys/<name>.asc` and checks it with `gpg --show-keys`; a
+different fingerprint stops the apply before anything changes. Commit imports
+it with `rpm --import` unless `gpg-pubkey-<last 8 hex digits>` is already
+installed (libzypp trusts keys in the rpm database), then runs `zypper addrepo
+--refresh <url> <name>`, replacing a repo of the same alias at another URL.
+Removing the resource runs `zypper removerepo` and keeps the key. Repos and the
+snapshot commit in the distro phase, before `pkg` packages, so a package from
+the repo installs in the same apply. The base packages commit in that phase
+too, after the repos.
 
 macOS has no equivalent of either; the system layer there is `defaults`,
 launchd and Homebrew.

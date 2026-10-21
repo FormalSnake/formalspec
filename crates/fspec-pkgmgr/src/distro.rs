@@ -5,16 +5,19 @@ use anyhow::{Context, Result, bail};
 use fspec_core::apply::{Backend, Cx, Op, Phase, Records};
 use fspec_core::facts::Os;
 use fspec_core::journal::Journal;
-use fspec_core::resource::{Distro, Resource};
+use fspec_core::resource::{Distro, Repo, Resource};
 use fspec_core::runner::Cmd;
 use fspec_core::state::Entry;
 use serde_json::Value;
 
 use crate::family::Family;
 use crate::pkgs::{drift_names, install, record_names, recorded_names, remove};
+use crate::{text, zypper};
 
-/// The `packages` list of `fedora(...)`, `arch(...)`, `debian(...)` and `void(...)` on a classic
-/// distro, installed with that distro's package manager. A name dropped from the list is removed.
+/// The `packages` list of `fedora(...)`, `arch(...)`, `tumbleweed(...)` and the other classic
+/// distros, installed with that distro's package manager, and the `repo(...)` resources it
+/// installs from. A name dropped from the list is removed. On Tumbleweed the distro repos
+/// point at the snapshot `fspec.lock` pins.
 pub struct DistroBackend;
 
 fn distro(r: &Resource) -> Result<&Distro> {
@@ -37,32 +40,87 @@ fn snapshot_path(cx: &Cx) -> String {
     cx.paths.system(format!("/.snapshots/fspec-{}", cx.generation)).display().to_string()
 }
 
+/// The record key for the Tumbleweed snapshot the last apply moved the repos to. `snapshot`
+/// already names the btrfs one.
+const REPO_SNAPSHOT: &str = "repo_snapshot";
+
+fn repo(op: &Op) -> Option<&Repo> {
+    match op.resource() {
+        Resource::Repo(r) => Some(r),
+        _ => None,
+    }
+}
+
+impl DistroBackend {
+    fn commit_repo(&self, cx: &Cx, op: &Op, journal: &mut Journal) -> Result<()> {
+        match (&op.desired, &op.current) {
+            (None, Some(e)) => {
+                let Resource::Repo(r) = &e.resource else { return Ok(()) };
+                zypper::remove_repo(cx, journal, r)
+            }
+            (Some(d), current) => {
+                let Resource::Repo(r) = &d.resource else { return Ok(()) };
+                if let Some(Entry { resource: Resource::Repo(old), .. }) = current
+                    && old.name != r.name
+                {
+                    zypper::remove_repo(cx, journal, old)?;
+                }
+                zypper::add_repo(cx, journal, r)
+            }
+            (None, None) => Ok(()),
+        }
+    }
+}
+
 impl Backend for DistroBackend {
     fn name(&self) -> &'static str {
         "distro"
     }
 
-    /// Image hosts take their base packages through `image(...)`.
+    /// Image hosts take their base packages and repos through `image(...)`.
     fn handles(&self, cx: &Cx, r: &Resource) -> bool {
-        cx.facts.os == Os::Linux && !cx.facts.image && matches!(r, Resource::Distro(_))
+        cx.facts.os == Os::Linux && !cx.facts.image && matches!(r, Resource::Distro(_) | Resource::Repo(_))
     }
 
-    /// The packages are live once installed, so services and files can use what they ship.
+    /// Before `pkg` packages, which may come from the repos and need the snapshot in place.
     fn phase(&self) -> Phase {
-        Phase::Packages
+        Phase::Distro
     }
 
-    fn check(&self, cx: &Cx, _r: &Resource) -> Result<()> {
-        family(cx).map(drop)
+    fn check(&self, cx: &Cx, r: &Resource) -> Result<()> {
+        let fam = family(cx)?;
+        match r {
+            Resource::Repo(repo) if fam != Family::Zypper => {
+                bail!("repo:{}: repo(...) is for zypper distros, {} is not one", repo.name, cx.facts.distro)
+            }
+            Resource::Repo(repo) => zypper::check_repo(repo),
+            _ if fam == Family::Zypper => zypper::pin(cx).map(drop),
+            _ => Ok(()),
+        }
     }
 
     fn drift(&self, cx: &Cx, entry: &Entry) -> Result<Vec<String>> {
-        drift_names(cx, family(cx)?, &recorded(entry), &entry.record)
+        if let Resource::Repo(r) = &entry.resource {
+            return Ok(zypper::repo_drift(cx, r));
+        }
+        let fam = family(cx)?;
+        let mut notes = Vec::new();
+        if fam == Family::Zypper {
+            notes.extend(zypper::snapshot_drift(cx, zypper::pin(cx)?));
+        }
+        notes.extend(drift_names(cx, fam, &recorded(entry), &entry.record)?);
+        Ok(notes)
     }
 
     /// Takes the btrfs snapshot here because every backend prepares before any commits, so the
-    /// snapshot holds the system from before the `pkg` packages and the new kernel.
+    /// snapshot holds the system from before the `pkg` packages and the new kernel. Repo keys
+    /// are fetched and checked here too, before anything changes.
     fn prepare(&self, cx: &Cx, ops: &[Op], _staging: &Path) -> Result<()> {
+        for op in ops.iter().filter(|o| o.desired.is_some()) {
+            if let Some(r) = repo(op) {
+                zypper::fetch_key(cx, r)?;
+            }
+        }
         if ops.iter().all(Op::is_removal) {
             return Ok(());
         }
@@ -84,14 +142,27 @@ impl Backend for DistroBackend {
         Ok(())
     }
 
+    /// Repos first, then the snapshot, then the base packages, which may come from either.
     fn commit(&self, cx: &Cx, ops: &[Op], _staging: &Path, journal: &mut Journal) -> Result<Records> {
         let fam = family(cx)?;
+        for op in ops.iter().filter(|o| repo(o).is_some()) {
+            self.commit_repo(cx, op, journal)?;
+        }
         let mut records = Records::new();
-        for op in ops {
+        for op in ops.iter().filter(|o| repo(o).is_none()) {
             let Some(d) = &op.desired else { continue };
             let want = &distro(&d.resource)?.packages;
             let had = op.current.as_ref().map(recorded).unwrap_or_default();
             let rec = op.record();
+            let pinned = match fam {
+                Family::Zypper => Some(zypper::pin(cx)?),
+                _ => None,
+            };
+            if let Some(s) = pinned
+                && (text(&rec, REPO_SNAPSHOT).as_deref() != Some(s) || !zypper::snapshot_drift(cx, s).is_empty())
+            {
+                zypper::move_to(cx, journal, s)?;
+            }
             let dropped: Vec<String> = had.iter().filter(|n| !want.contains(n)).cloned().collect();
             let added: Vec<String> = want.iter().filter(|n| !had.contains(n)).cloned().collect();
             if !dropped.is_empty() {
@@ -105,7 +176,13 @@ impl Backend for DistroBackend {
             if Path::new(&snap).exists() {
                 next.insert("snapshot".into(), Value::from(snap));
             }
+            if let Some(s) = pinned {
+                next.insert(REPO_SNAPSHOT.into(), Value::from(s));
+            }
             records.insert(op.key.clone(), next);
+        }
+        for op in ops.iter().filter(|o| o.desired.is_some() && repo(o).is_some()) {
+            records.insert(op.key.clone(), Default::default());
         }
         Ok(records)
     }
