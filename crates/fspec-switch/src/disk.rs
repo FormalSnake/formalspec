@@ -847,6 +847,21 @@ pub(crate) const FSTAB_SED: [&str; 3] = [
     r"s#^\([^[:space:]]\{1,\}[[:space:]]\{1,\}/[[:space:]]\{1,\}btrfs[[:space:]]\{1,\}\),#\1#",
 ];
 
+/// Shrinks the ext4 filesystem on `device` to a whole MiB. btrfs-convert (6.14) rounds the last
+/// chunk up to the node size, so on a filesystem that ends off a 16 KiB boundary it writes a dev
+/// extent past the end of the device and the kernel refuses to mount the result ("dev extent ...
+/// is beyond device boundary"). At most 1 MiB comes off the end, which resize2fs moves data out of.
+fn align_ext4(device: &str) -> Cmd {
+    Cmd::new("sh").args([
+        "-c",
+        r#"set -e; h=$(dumpe2fs -h "$1" 2>/dev/null)
+bs=$(printf '%s\n' "$h" | sed -n 's/^Block size: *//p'); n=$(printf '%s\n' "$h" | sed -n 's/^Block count: *//p')
+a=$((n / (1048576 / bs) * (1048576 / bs))); [ "$a" -eq "$n" ] || resize2fs "$1" "$a""#,
+        "sh",
+        device,
+    ])
+}
+
 /// The ext4 root partition `device` (unmounted) converted to btrfs in place, keeping its UUID, with
 /// its `fstab` and initramfs updated and GRUB's config rewritten so it boots as before. `disk
 /// migrate` then runs on the converted system for the rest.
@@ -854,6 +869,7 @@ pub fn convert(paths: &Paths, device: &str, disk: &str, firmware: &Firmware) -> 
     let mnt = s(&paths.system(format!("{DISK}/convert")));
     let mut plan = Plan::default();
     plan.run(Cmd::new("e2fsck").args(["-fy", device]));
+    plan.run(align_ext4(device));
     plan.run(Cmd::new("btrfs-convert").args(["--uuid", "copy", device]));
     plan.run(Cmd::new("mkdir").arg("-p").arg(&mnt));
     plan.run(Cmd::new("mount").arg(device).arg(&mnt));
@@ -1132,6 +1148,7 @@ sync "$1.fspec-tmp"; mv "$1.fspec-tmp" "$1"; sync -f "$1""#,
         dev,
     ]));
     plan.run(Cmd::new("e2fsck").args(["-fy", dev]));
+    plan.run(align_ext4(dev));
     plan.run(Cmd::new("btrfs-convert").args(["--uuid", "copy", dev]));
     let what = format!(
         "convert the ext4 root {dev} to btrfs in place, keeping its UUID and the ext4 image as ext2_saved for \

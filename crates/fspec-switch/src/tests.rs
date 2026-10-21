@@ -613,7 +613,9 @@ fn migrate_sends_ext4_to_a_live_system_and_refuses_luks_shrinks() {
 fn convert_keeps_the_uuid_and_fixes_the_fstab_type() {
     let plan = crate::convert(&paths(), "/dev/vdb1", "/dev/vdb", &Firmware::Efi);
     let lines = plan.lines();
-    assert_eq!(lines[3..5], ["e2fsck -fy /dev/vdb1", "btrfs-convert --uuid copy /dev/vdb1"]);
+    assert_eq!(lines[3], "e2fsck -fy /dev/vdb1");
+    assert!(lines[4].starts_with("sh -c") && lines[4].contains("resize2fs"), "{}", lines[4]);
+    assert_eq!(lines[5], "btrfs-convert --uuid copy /dev/vdb1");
     assert!(lines.iter().any(|l| l.starts_with("sed -i -e")));
     for (from, to) in [
         ("UUID=abc / ext4 rw,discard,errors=remount-ro 0 1\n", "UUID=abc / btrfs rw,discard 0 0\n"),
