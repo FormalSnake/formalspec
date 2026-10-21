@@ -387,6 +387,8 @@ fn init_formats_the_default_layout_with_luks() {
         efi_vars: false,
         target: None,
         cmdline: "",
+        in_root: &[],
+        passphrase: None,
     };
     let plan = init(&paths(), &i).unwrap();
     assert_eq!(
@@ -421,6 +423,17 @@ fn init_formats_the_default_layout_with_luks() {
         ]
     );
     assert_eq!(crate::partition("/dev/nvme0n1", 2), "/dev/nvme0n1p2");
+    let i = Init { passphrase: Some("hunter2"), ..i };
+    let plan = init(&paths(), &i).unwrap();
+    let lines = plan.lines();
+    assert!(
+        lines.contains(
+            &"cryptsetup luksFormat --type luks2 --uuid cccc --batch-mode --key-file=- /dev/vdb2".to_string()
+        )
+    );
+    assert!(lines.contains(&"cryptsetup open --key-file=- /dev/vdb2 luks-cccc".to_string()));
+    assert_eq!(stdin_of(&plan, "cryptsetup open"), "hunter2");
+    assert!(!lines.iter().any(|l| l.contains("hunter2")));
 }
 
 #[test]
@@ -436,6 +449,8 @@ fn init_with_a_distro_installs_the_first_root_onto_the_new_disk() {
         efi_vars: false,
         target: Some(&t),
         cmdline: "console=ttyS0",
+        in_root: &[fspec_core::runner::Cmd::new("chroot").args(["/r/run/fspec/disk/arch", "chpasswd"])],
+        passphrase: None,
     };
     let plan = init(&paths(), &i).unwrap();
     let lines = plan.lines();
@@ -454,6 +469,9 @@ fn init_with_a_distro_installs_the_first_root_onto_the_new_disk() {
         stdin_of(&plan, "tee /r/run/fspec/disk/boot/arch/fspec-cmdline"),
         "root=UUID=ffff rootflags=subvol=@arch rw console=ttyS0\n"
     );
+    assert_eq!(crate::root_dir(&paths(), "arch"), "/r/run/fspec/disk/arch");
+    assert!(at("chroot /r/run/fspec/disk/arch sh -c") < at("chroot /r/run/fspec/disk/arch chpasswd"));
+    assert!(at("chroot /r/run/fspec/disk/arch chpasswd") < at("umount -R /r/run/fspec/disk/arch"));
     assert!(lines[lines.len() - 5].ends_with("sh /r/run/fspec/disk/boot bbbb arch"), "{lines:#?}");
     assert_eq!(
         lines[lines.len() - 4..],

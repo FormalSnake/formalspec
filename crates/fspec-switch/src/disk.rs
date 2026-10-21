@@ -1,9 +1,12 @@
 //! `fspec disk`: put a disk onto one of the layouts `switch --distro` installs roots on, from
 //! scratch (`init`) or in place (`migrate`).
 
-use anyhow::{Result, bail};
-use fspec_core::Paths;
+use std::path::Path;
+
+use anyhow::{Context, Result, bail};
+use fspec_core::resource::System;
 use fspec_core::runner::{Cmd, Runner};
+use fspec_core::{Host, Paths};
 
 use crate::classic::{Sources, Target, create_root, fstab, grub_menu, install_root, kernel_options, s, sd_default};
 use crate::machine::{Btrfs, ESP_TYPE, Firmware, GIB, Layout, MIB, Machine, Part, SHARED_BOOT, SHARED_SUBVOLS, probe};
@@ -58,6 +61,71 @@ pub struct Init<'a> {
     pub target: Option<&'a Target<'a>>,
     /// Kernel options to carry over, like `console=`.
     pub cmdline: &'a str,
+    /// Run after the target's root is installed and before anything is unmounted, with the root
+    /// mounted at [`root_dir`]. Ignored without a target.
+    pub in_root: &'a [Cmd],
+    /// The LUKS passphrase, passed on stdin. Without one, cryptsetup asks on the terminal.
+    pub passphrase: Option<&'a str>,
+}
+
+/// Where `init` mounts the root of `distro` while it installs it.
+pub fn root_dir(paths: &Paths, distro: &str) -> String {
+    s(&paths.system(format!("{DISK}/{distro}")))
+}
+
+/// The new root `switch --distro` or `disk init --distro` builds from the host's declaration.
+pub fn target<'a>(
+    host: &'a Host,
+    distro: &'a str,
+    release: Option<&'a str>,
+    spec_dir: &'a Path,
+    spec_file: &'a str,
+    exe: &'a Path,
+) -> Result<Target<'a>> {
+    match &host.system {
+        Some(System::Distro(d)) if d.distro == distro => {}
+        _ => bail!(
+            "host {} does not declare {distro} as its system. Edit `system =` to {distro}(...) first: the new root \
+             is built from that block",
+            host.name
+        ),
+    }
+    let arch = host.platform.split('-').next().unwrap_or_default();
+    Ok(Target { distro, host: &host.name, arch, release, spec_dir, spec_file, exe })
+}
+
+/// A random UUID from the kernel.
+fn new_uuid() -> Result<String> {
+    Ok(std::fs::read_to_string("/proc/sys/kernel/random/uuid").context("reading a random UUID")?.trim().to_string())
+}
+
+/// Fresh identifiers for the filesystems `init` creates.
+pub fn new_ids() -> Result<Ids> {
+    let serial = new_uuid()?.replace('-', "")[..8].to_uppercase();
+    Ok(Ids { fs: new_uuid()?, luks: new_uuid()?, serial, boot: new_uuid()? })
+}
+
+/// Check that `device` is a whole disk with nothing mounted and room for a layout, and answer
+/// whether it holds anything at all.
+pub fn blank_disk(runner: &dyn Runner, device: &str) -> Result<bool> {
+    let out =
+        runner.check(&Cmd::new("lsblk").args(["-J", "-b", "-p", "-o", "NAME,TYPE,FSTYPE,SIZE,MOUNTPOINTS", device]))?;
+    let json: serde_json::Value = serde_json::from_str(&out.stdout)?;
+    let disk = &json["blockdevices"][0];
+    if disk["type"].as_str() != Some("disk") {
+        bail!("{device} is not a whole disk");
+    }
+    fn mounted(v: &serde_json::Value) -> bool {
+        v["mountpoints"].as_array().is_some_and(|m| m.iter().any(|x| x.is_string()))
+            || v["children"].as_array().is_some_and(|c| c.iter().any(mounted))
+    }
+    if mounted(disk) {
+        bail!("{device} has mounted filesystems; unmount them first");
+    }
+    if disk["size"].as_u64().unwrap_or_default() < 16 << 30 {
+        bail!("{device} is smaller than 16 GiB, too small for a 2 GiB ESP and a root");
+    }
+    Ok(disk["children"].as_array().is_none_or(|c| c.is_empty()) && disk["fstype"].is_null())
 }
 
 const DISK: &str = "/run/fspec/disk";
@@ -160,11 +228,19 @@ pub fn init(paths: &Paths, i: &Init) -> Result<Plan> {
             let mut fsdev = data.clone();
             let luks = i.luks.then(|| ids.luks.clone());
             if let Some(luks) = &luks {
-                plan.run(
-                    Cmd::new("cryptsetup").args(["luksFormat", "--type", "luks2", "--uuid", luks, &data]).interactive(),
-                );
                 let name = format!("luks-{luks}");
-                plan.run(Cmd::new("cryptsetup").args(["open", &data, &name]).interactive());
+                let format = Cmd::new("cryptsetup").args(["luksFormat", "--type", "luks2", "--uuid", luks]);
+                let open = Cmd::new("cryptsetup").arg("open");
+                // With --key-file=- cryptsetup takes all of stdin as the key, so both commands
+                // get exactly the same bytes.
+                let (format, open) = match i.passphrase {
+                    Some(p) => {
+                        (format.args(["--batch-mode", "--key-file=-"]).stdin(p), open.arg("--key-file=-").stdin(p))
+                    }
+                    None => (format.interactive(), open.interactive()),
+                };
+                plan.run(format.arg(&data));
+                plan.run(open.args([&data, &name]));
                 fsdev = format!("/dev/mapper/{name}");
             }
             if kind == Kind::Bios {
@@ -214,7 +290,7 @@ pub fn init(paths: &Paths, i: &Init) -> Result<Plan> {
         if let Some(why) = crate::recipe::misfit(recipe(t.distro)?, &layout, &firmware) {
             bail!("cannot install {} on this layout: {why}", t.distro);
         }
-        let root = dir(t.distro);
+        let root = root_dir(paths, t.distro);
         let mut roots = Plan::default();
         create_root(&mut roots, &layout, t.distro, &top, &root);
         let src = Sources {
@@ -226,6 +302,7 @@ pub fn init(paths: &Paths, i: &Init) -> Result<Plan> {
         };
         install_root(&mut roots, &layout, t, &root, &src, i.cmdline)?;
         plan.steps.extend(roots.steps);
+        i.in_root.iter().for_each(|c| plan.run(c.clone()));
         cleanup.splice(0..0, roots.cleanup);
         match &layout {
             Layout::Default { .. } => sd_default(&efi, t.distro).into_iter().for_each(|c| plan.run(c)),

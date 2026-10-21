@@ -628,7 +628,7 @@ fn switch(paths: &Paths, spec_path: &Path, host: &Host, opts: &Switch, release: 
     if let Some(distro) = opts.distro {
         let spec_file = file_name(spec_path)?;
         let exe = std::env::current_exe()?;
-        let target = target(host, distro, release, spec_dir, &spec_file, &exe)?;
+        let target = fspec_switch::target(host, distro, release, spec_dir, &spec_file, &exe)?;
         let m = machine(paths, runner.as_ref(), host)?;
         let plan = fspec_switch::switch_distro(paths, &m, owner(paths, runner.as_ref(), &m)?.as_deref(), &target)?;
         run_plan(paths, runner.as_ref(), &plan)?;
@@ -701,27 +701,6 @@ fn switch(paths: &Paths, spec_path: &Path, host: &Host, opts: &Switch, release: 
     Ok(())
 }
 
-/// The new root `switch --distro` or `disk init --distro` builds from the host's declaration.
-fn target<'a>(
-    host: &'a Host,
-    distro: &'a str,
-    release: Option<&'a str>,
-    spec_dir: &'a Path,
-    spec_file: &'a str,
-    exe: &'a Path,
-) -> Result<fspec_switch::Target<'a>> {
-    match &host.system {
-        Some(System::Distro(d)) if d.distro == distro => {}
-        _ => bail!(
-            "host {} does not declare {distro} as its system. Edit `system =` to {distro}(...) first: the new root \
-             is built from that block",
-            host.name
-        ),
-    }
-    let arch = host.platform.split('-').next().unwrap_or_default();
-    Ok(fspec_switch::Target { distro, host: &host.name, arch, release, spec_dir, spec_file, exe })
-}
-
 /// The disk layout, which root owns boot, and whether the declared distro fits, for `plan` on a
 /// classic distro. Reading them mounts filesystems, so only root sees them.
 fn boot_line(paths: &Paths, host: &Host) -> Option<String> {
@@ -764,16 +743,6 @@ fn forget(paths: &Paths, distro: &str) -> Result<()> {
     Ok(())
 }
 
-/// A random UUID from the kernel.
-fn new_uuid() -> Result<String> {
-    Ok(std::fs::read_to_string("/proc/sys/kernel/random/uuid").context("reading a random UUID")?.trim().to_string())
-}
-
-fn new_ids() -> Result<fspec_switch::Ids> {
-    let serial = new_uuid()?.replace('-', "")[..8].to_uppercase();
-    Ok(fspec_switch::Ids { fs: new_uuid()?, luks: new_uuid()?, serial, boot: new_uuid()? })
-}
-
 /// Ask for `device` to be typed back before a step that destroys data on it.
 fn confirm(device: &str, what: &str) -> Result<()> {
     use std::io::Write;
@@ -813,29 +782,6 @@ fn recent_snapshot(runner: &dyn Runner, paths: &Paths, m: &fspec_switch::Machine
     let found = runner.run(&Cmd::new("sh").args(["-c", check, "sh", &top]));
     runner.run(&Cmd::new("umount").arg(&top))?;
     Ok(found?.status == 0)
-}
-
-/// The whole disk `device`, refusing a partition, a mounted disk, and a disk too small for the
-/// layout. Answers whether it holds anything at all.
-fn blank_disk(runner: &dyn Runner, device: &str) -> Result<bool> {
-    let out =
-        runner.check(&Cmd::new("lsblk").args(["-J", "-b", "-p", "-o", "NAME,TYPE,FSTYPE,SIZE,MOUNTPOINTS", device]))?;
-    let json: serde_json::Value = serde_json::from_str(&out.stdout)?;
-    let disk = &json["blockdevices"][0];
-    if disk["type"].as_str() != Some("disk") {
-        bail!("{device} is not a whole disk");
-    }
-    fn mounted(v: &serde_json::Value) -> bool {
-        v["mountpoints"].as_array().is_some_and(|m| m.iter().any(|x| x.is_string()))
-            || v["children"].as_array().is_some_and(|c| c.iter().any(mounted))
-    }
-    if mounted(disk) {
-        bail!("{device} has mounted filesystems; unmount them first");
-    }
-    if disk["size"].as_u64().unwrap_or_default() < 16 << 30 {
-        bail!("{device} is smaller than 16 GiB, too small for a 2 GiB ESP and a root");
-    }
-    Ok(disk["children"].as_array().is_none_or(|c| c.is_empty()) && disk["fstype"].is_null())
 }
 
 fn disk(paths: &Paths, spec_path: &Path, cmd: &DiskCommand) -> Result<()> {
@@ -881,7 +827,7 @@ fn disk(paths: &Paths, spec_path: &Path, cmd: &DiskCommand) -> Result<()> {
                 DiskCommand::Migrate { swap, .. } => *swap,
                 _ => 4,
             };
-            let steps = fspec_switch::migrate(paths, &m, &left, &new_ids()?, swap)?;
+            let steps = fspec_switch::migrate(paths, &m, &left, &fspec_switch::new_ids()?, swap)?;
             if steps.is_empty() {
                 println!("this disk is on the {} layout; nothing to migrate", m.layout.name());
                 return Ok(());
@@ -913,7 +859,7 @@ fn disk(paths: &Paths, spec_path: &Path, cmd: &DiskCommand) -> Result<()> {
             Ok(())
         }
         DiskCommand::Init { device, layout, luks, distro, host, release, backup, swap } => {
-            if !blank_disk(runner, device)? {
+            if !fspec_switch::blank_disk(runner, device)? {
                 let Some(backup) = backup else {
                     bail!("{device} holds data; name a backup taken in the last 24 hours with --backup")
                 };
@@ -931,11 +877,11 @@ fn disk(paths: &Paths, spec_path: &Path, cmd: &DiskCommand) -> Result<()> {
             let target = match (distro, host) {
                 (Some(d), Some(h)) => {
                     spec = fspec_eval::evaluate(spec_path)?;
-                    Some(target(spec.host(h)?, d, release.as_deref(), spec_dir, &spec_file, &exe)?)
+                    Some(fspec_switch::target(spec.host(h)?, d, release.as_deref(), spec_dir, &spec_file, &exe)?)
                 }
                 _ => None,
             };
-            let ids = new_ids()?;
+            let ids = fspec_switch::new_ids()?;
             let efi_vars = std::path::Path::new("/sys/firmware/efi").is_dir();
             let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
             let init = fspec_switch::Init {
@@ -947,6 +893,8 @@ fn disk(paths: &Paths, spec_path: &Path, cmd: &DiskCommand) -> Result<()> {
                 efi_vars,
                 target: target.as_ref(),
                 cmdline: &cmdline,
+                in_root: &[],
+                passphrase: None,
             };
             let plan = fspec_switch::init(paths, &init)?;
             confirm(device, &format!("This erases everything on {device}."))?;
