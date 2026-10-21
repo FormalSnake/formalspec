@@ -3,7 +3,7 @@ use std::fs;
 use fspec_core::apply::{Backend, Cx, apply_scope, plan_scope, state_dir};
 use fspec_core::facts::Facts;
 use fspec_core::fetch::MapFetch;
-use fspec_core::lock::{Artifact, Lock, LockedPkg};
+use fspec_core::lock::{Artifact, Lock, LockedPkg, LockedZypper};
 use fspec_core::plan::{Action, Plan};
 use fspec_core::resource::{Desired, Distro, Image, Resource, Scope, System};
 use fspec_core::runner::{Output, RecordingRunner};
@@ -13,9 +13,10 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     AptBackend, BrewBackend, DistroBackend, DnfBackend, FlatpakBackend, MossBackend, PacmanBackend, XbpsBackend,
+    ZypperBackend,
 };
 
-const ALL: [&dyn Backend; 8] = [
+const ALL: [&dyn Backend; 9] = [
     &FlatpakBackend,
     &BrewBackend,
     &DnfBackend,
@@ -23,6 +24,7 @@ const ALL: [&dyn Backend; 8] = [
     &AptBackend,
     &XbpsBackend,
     &MossBackend,
+    &ZypperBackend,
     &DistroBackend,
 ];
 
@@ -56,8 +58,13 @@ impl World {
 
     fn on(distro: &str, packages: &[&str]) -> World {
         let packages = packages.iter().map(ToString::to_string).collect();
+        let tumbleweed = distro == TW;
         let distro = Distro { distro: distro.into(), init: fspec_core::facts::Init::Systemd, packages };
-        World::new("x86_64-linux", Some(System::Distro(distro)))
+        let mut w = World::new("x86_64-linux", Some(System::Distro(distro)));
+        if tumbleweed {
+            w.lock.zypper.insert("h".into(), LockedZypper { snapshot: "20261018".into() });
+        }
+        w
     }
 
     fn darwin() -> World {
@@ -505,6 +512,12 @@ fn flatpak_removal_trashes_the_app_data_under_var_app() {
     assert!(data.join("config/prefs").exists());
 }
 
+const TW: &str = "opensuse-tumbleweed";
+
+fn is_snapshot_move(line: &str) -> bool {
+    ["refresh", "dist-upgrade", "modifyrepo"].iter().any(|c| line.starts_with(&format!("zypper --non-interactive {c}")))
+}
+
 /// How each distro family spells its commands.
 struct Fam {
     distro: &'static str,
@@ -517,7 +530,7 @@ struct Fam {
     ext: &'static str,
 }
 
-const FAMS: [Fam; 4] = [
+const FAMS: [Fam; 5] = [
     Fam {
         distro: "fedora",
         kind: "dnf",
@@ -554,6 +567,15 @@ const FAMS: [Fam; 4] = [
         printed: "htop-3.3_1",
         ext: "xbps",
     },
+    Fam {
+        distro: TW,
+        kind: "zypper",
+        install: "zypper --non-interactive install --auto-agree-with-licenses",
+        remove: "zypper --non-interactive remove",
+        version: "rpm -q --qf %{VERSION}-%{RELEASE}",
+        printed: "3.3-1",
+        ext: "rpm",
+    },
 ];
 
 impl Fam {
@@ -573,6 +595,7 @@ impl Fam {
             "dnf" => vec![format!("dnf install -y {}", path.display())],
             "pacman" => vec![format!("pacman -U --noconfirm --needed {}", path.display())],
             "apt" => vec![format!("apt-get install -y {}", path.display())],
+            "zypper" => vec![format!("{} {}", self.install, path.display())],
             _ => vec![
                 format!("xbps-rindex -a {}", path.display()),
                 format!("xbps-install -y -R {} {names}", dir.display()),
@@ -584,8 +607,9 @@ impl Fam {
         line.starts_with(self.version)
     }
 
+    /// Leaves out version queries and the snapshot move a first Tumbleweed apply makes.
     fn without_queries(&self, lines: Vec<String>) -> Vec<String> {
-        lines.into_iter().filter(|l| !self.is_query(l)).collect()
+        lines.into_iter().filter(|l| !self.is_query(l) && !is_snapshot_move(l)).collect()
     }
 }
 
@@ -825,4 +849,204 @@ fn moss_versions_come_from_the_installed_list() {
     let state = w.state(Scope::System);
     let rec = &state.entries.values().next().unwrap().record;
     assert_eq!(rec["versions"]["htop"], "3.4.1-12");
+}
+
+const ROLLING_OSS: &str = "[repo-oss]\nname=openSUSE-Tumbleweed-Oss\nenabled=1\nautorefresh=1\nbaseurl=http://download.opensuse.org/tumbleweed/repo/oss/\n";
+const OPENH264: &str =
+    "[repo-openh264]\nenabled=1\nautorefresh=1\nbaseurl=http://codecs.opensuse.org/openh264/openSUSE_Tumbleweed\n";
+
+fn tumbleweed() -> World {
+    let w = World::on(TW, &["htop"]);
+    let dir = w.paths.root.join("etc/zypp/repos.d");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("repo-oss.repo"), ROLLING_OSS).unwrap();
+    fs::write(dir.join("repo-openh264.repo"), OPENH264).unwrap();
+    w
+}
+
+fn snapshot_var(w: &World) -> String {
+    fs::read_to_string(w.paths.root.join("etc/zypp/vars.d/fspec_snapshot")).unwrap()
+}
+
+/// Stands in for zypper's own write of `modifyrepo --disable repo-oss`.
+fn disable_rolling(w: &World) {
+    fs::write(w.paths.root.join("etc/zypp/repos.d/repo-oss.repo"), ROLLING_OSS.replace("enabled=1", "enabled=0"))
+        .unwrap();
+}
+
+#[test]
+fn tumbleweed_points_the_repos_at_the_locked_snapshot_then_upgrades() {
+    let w = tumbleweed();
+    let want = [distro_res(TW, &["htop"])];
+    w.apply(Scope::System, &want).unwrap();
+    let lines: Vec<String> =
+        w.take().into_iter().filter(|l| !l.starts_with("rpm -q") && !l.starts_with("findmnt")).collect();
+    assert_eq!(
+        lines,
+        [
+            "zypper --non-interactive modifyrepo --disable repo-oss",
+            "zypper --non-interactive refresh --force fspec-oss fspec-non-oss",
+            "zypper --non-interactive dist-upgrade --auto-agree-with-licenses",
+            "zypper --non-interactive install --auto-agree-with-licenses htop",
+        ]
+    );
+    assert_eq!(snapshot_var(&w), "20261018\n");
+    let oss = fs::read_to_string(w.paths.root.join("etc/zypp/repos.d/fspec-oss.repo")).unwrap();
+    assert!(
+        oss.contains("baseurl=https://download.opensuse.org/history/${fspec_snapshot}/tumbleweed/repo/oss/"),
+        "{oss}"
+    );
+    let rec = &w.state(Scope::System).entries[&want[0].resource.key()].record;
+    assert_eq!(rec["repo_snapshot"], "20261018");
+
+    disable_rolling(&w);
+    assert!(w.plan(Scope::System, &want).unwrap().changes.is_empty());
+
+    let mut w = w;
+    w.lock.zypper.insert("h".into(), LockedZypper { snapshot: "20261020".into() });
+    let plan = w.plan(Scope::System, &want).unwrap();
+    assert!(is_drift(&plan), "{plan}");
+    assert!(plan.to_string().contains("repos are at snapshot 20261018, the lock says 20261020"), "{plan}");
+    w.apply(Scope::System, &want).unwrap();
+    let lines: Vec<String> = w.take().into_iter().filter(|l| l.starts_with("zypper")).collect();
+    assert_eq!(
+        lines,
+        [
+            "zypper --non-interactive refresh --force fspec-oss fspec-non-oss",
+            "zypper --non-interactive dist-upgrade --auto-agree-with-licenses",
+        ]
+    );
+    assert_eq!(snapshot_var(&w), "20261020\n");
+}
+
+#[test]
+fn a_failed_upgrade_puts_the_old_snapshot_back_and_upgrades_against_it() {
+    let mut w = tumbleweed();
+    let want = [distro_res(TW, &[])];
+    w.apply(Scope::System, &want).unwrap();
+    disable_rolling(&w);
+    w.take();
+
+    w.lock.zypper.insert("h".into(), LockedZypper { snapshot: "20261020".into() });
+    w.answer("zypper --non-interactive dist-upgrade", 1, "");
+    assert!(w.apply(Scope::System, &want).is_err());
+    assert_eq!(snapshot_var(&w), "20261018\n");
+    let lines = w.take();
+    assert_eq!(lines.last().unwrap(), "zypper --non-interactive dist-upgrade --auto-agree-with-licenses");
+}
+
+#[test]
+fn a_first_pin_that_fails_reenables_the_rolling_repos() {
+    let w = tumbleweed();
+    w.answer("zypper --non-interactive dist-upgrade", 1, "");
+    assert!(w.apply(Scope::System, &[distro_res(TW, &[])]).is_err());
+    let lines = w.take();
+    let n = lines.len();
+    assert_eq!(
+        lines[n - 2..],
+        [
+            "zypper --non-interactive modifyrepo --enable repo-oss".to_string(),
+            "zypper --non-interactive dist-upgrade --auto-agree-with-licenses".to_string(),
+        ]
+    );
+    assert!(!w.paths.root.join("etc/zypp/vars.d/fspec_snapshot").exists());
+    assert!(!w.paths.root.join("etc/zypp/repos.d/fspec-oss.repo").exists());
+}
+
+#[test]
+fn tumbleweed_without_a_pin_asks_for_fspec_update() {
+    let mut w = tumbleweed();
+    w.lock.zypper.clear();
+    let err = w.apply(Scope::System, &[distro_res(TW, &[])]).unwrap_err();
+    assert!(format!("{err:#}").contains("pins no Tumbleweed snapshot for host h"), "{err:#}");
+}
+
+const ONEPASSWORD_FPR: &str = "3FEF9748469ADBE15DA7CA80AC2D62742012EA22";
+const KEY_URL: &str = "https://downloads.1password.com/linux/keys/1password.asc";
+const REPO_URL: &str = "https://downloads.1password.com/linux/rpm/stable/x86_64";
+
+fn repo_res(fingerprint: &str) -> Desired {
+    let r = json!({"kind": "repo", "name": "1password", "url": REPO_URL, "key": KEY_URL, "fingerprint": fingerprint});
+    Desired { resource: serde_json::from_value(r).unwrap(), owner: None }
+}
+
+fn gpg_says(w: &World, fingerprint: &str) {
+    w.answer(
+        "gpg --batch --with-colons --show-keys",
+        0,
+        &format!("pub:-:4096:1:AC2D62742012EA22:::\nfpr:::::::::{fingerprint}:\n"),
+    );
+}
+
+#[test]
+fn a_repo_imports_its_pinned_key_before_zypper_adds_it_and_its_packages_install_after() {
+    let mut w = tumbleweed();
+    disable_rolling(&w);
+    w.fetch.bodies.insert(KEY_URL.into(), b"armored key".to_vec());
+    gpg_says(&w, ONEPASSWORD_FPR);
+    w.answer("rpm -q gpg-pubkey-2012ea22", 1, "");
+    let cli = pkg("1password-cli", json!({"kind": "zypper", "names": []}), "pinned");
+    let want = [cli, repo_res(ONEPASSWORD_FPR), distro_res(TW, &[])];
+    w.apply(Scope::System, &want).unwrap();
+    let lines = w.take();
+    let at = |prefix: &str| {
+        lines.iter().position(|l| l.starts_with(prefix)).unwrap_or_else(|| panic!("{prefix}: {lines:#?}"))
+    };
+    let key = w.paths.root.join("var/cache/fspec/keys/1password.asc");
+    assert_eq!(fs::read(&key).unwrap(), b"armored key");
+    assert!(at("gpg") < at("rpm --import"));
+    assert!(at("rpm --import") < at(&format!("zypper --non-interactive addrepo --refresh {REPO_URL} 1password")));
+    assert!(at("zypper --non-interactive addrepo") < at("zypper --non-interactive dist-upgrade"));
+    assert!(
+        at("zypper --non-interactive dist-upgrade")
+            < at("zypper --non-interactive install --auto-agree-with-licenses 1password-cli")
+    );
+
+    w.take();
+    w.apply(Scope::System, &[want[0].clone(), want[2].clone()]).unwrap();
+    assert!(!w.take().iter().any(|l| l.contains("removerepo")), "removerepo only runs for a repo zypper knows");
+}
+
+#[test]
+fn a_repo_key_with_another_fingerprint_stops_the_apply_before_anything_changes() {
+    let mut w = tumbleweed();
+    w.fetch.bodies.insert(KEY_URL.into(), b"armored key".to_vec());
+    gpg_says(&w, "0000000000000000000000000000000000000000");
+    let err = w.apply(Scope::System, &[repo_res(ONEPASSWORD_FPR)]).unwrap_err();
+    assert!(format!("{err:#}").contains("the spec pins 3FEF9748"), "{err:#}");
+    assert!(w.take().iter().all(|l| l.starts_with("gpg")));
+}
+
+#[test]
+fn a_known_repo_at_another_url_is_replaced_and_a_dropped_one_removed() {
+    let mut w = tumbleweed();
+    disable_rolling(&w);
+    let file = w.paths.root.join("etc/zypp/repos.d/1password.repo");
+    fs::write(&file, "[1password]\nenabled=1\nbaseurl=https://old.example/rpm\n").unwrap();
+    w.fetch.bodies.insert(KEY_URL.into(), b"armored key".to_vec());
+    gpg_says(&w, ONEPASSWORD_FPR);
+    let want = [repo_res(ONEPASSWORD_FPR)];
+    w.apply(Scope::System, &want).unwrap();
+    let lines: Vec<String> = w.take().into_iter().filter(|l| l.contains("repo ")).collect();
+    assert_eq!(
+        lines,
+        [
+            "zypper --non-interactive removerepo 1password".to_string(),
+            format!("zypper --non-interactive addrepo --refresh {REPO_URL} 1password"),
+        ]
+    );
+
+    fs::write(&file, format!("[1password]\nenabled=1\nbaseurl={REPO_URL}\n")).unwrap();
+    assert!(w.plan(Scope::System, &want).unwrap().changes.is_empty());
+    w.apply(Scope::System, &[]).unwrap();
+    assert_eq!(w.take(), ["zypper --non-interactive removerepo 1password"]);
+}
+
+#[test]
+fn repo_is_for_zypper_distros_only() {
+    let w = World::linux();
+    let r = json!({"kind": "repo", "name": "x", "url": "https://example/x"});
+    let want = [Desired { resource: serde_json::from_value(r).unwrap(), owner: None }];
+    let err = w.apply(Scope::System, &want).unwrap_err();
+    assert!(format!("{err:#}").contains("repo(...) is for zypper distros"), "{err:#}");
 }

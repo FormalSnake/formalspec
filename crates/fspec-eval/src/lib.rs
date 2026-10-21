@@ -422,7 +422,7 @@ fn expand<'v>(
     }
     if let Some(r) = Resource_::from_value(v) {
         match r.kind.as_str() {
-            "pkg" | "file" | "service" | "timer" | "user" | "secret" | "defaults" => {}
+            "pkg" | "file" | "service" | "timer" | "user" | "secret" | "defaults" | "repo" => {}
             "image" | "distro" => bail!("{what}: {}(...) goes in host(system = ...), not in modules", r.kind),
             kind => bail!("{what}: modules hold resources, got {kind}(...)"),
         }
@@ -602,6 +602,17 @@ fn builtins(builder: &mut GlobalsBuilder) {
         distro_("aerynos", "systemd", kwargs)
     }
 
+    fn tumbleweed<'v>(#[starlark(kwargs)] kwargs: Value<'v>) -> anyhow::Result<Resource_> {
+        distro_("opensuse-tumbleweed", "systemd", kwargs)
+    }
+
+    fn repo<'v>(
+        #[starlark(args)] args: UnpackTuple<Value<'v>>,
+        #[starlark(kwargs)] kwargs: Value<'v>,
+    ) -> anyhow::Result<Resource_> {
+        make::<Resource>("repo", &["name"], args, kwargs)
+    }
+
     fn aqua<'v>(
         #[starlark(args)] args: UnpackTuple<Value<'v>>,
         #[starlark(kwargs)] kwargs: Value<'v>,
@@ -677,6 +688,13 @@ fn builtins(builder: &mut GlobalsBuilder) {
         #[starlark(kwargs)] kwargs: Value<'v>,
     ) -> anyhow::Result<Resource_> {
         make::<Source>("moss", &["names"], args, kwargs)
+    }
+
+    fn zypper<'v>(
+        #[starlark(args)] args: UnpackTuple<Value<'v>>,
+        #[starlark(kwargs)] kwargs: Value<'v>,
+    ) -> anyhow::Result<Resource_> {
+        make::<Source>("zypper", &["names"], args, kwargs)
     }
 
     fn git<'v>(

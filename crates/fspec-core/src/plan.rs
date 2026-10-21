@@ -110,6 +110,7 @@ fn detail(r: &Resource) -> String {
         Resource::Defaults(d) => d.value.to_string(),
         Resource::Image(i) => i.base.clone(),
         Resource::Distro(d) => d.distro.clone(),
+        Resource::Repo(r) => r.url.clone(),
     }
 }
 

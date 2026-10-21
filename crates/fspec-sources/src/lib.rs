@@ -11,6 +11,7 @@ mod hash;
 mod npm;
 mod python;
 mod service;
+mod snapshot;
 pub mod update;
 
 use std::path::PathBuf;
@@ -102,8 +103,9 @@ pub fn resolve(pkg: &Pkg, platforms: &[String], min_age: Option<i64>, cx: &Cx) -
             distro::resolve(&pkg.source, &pkg.name, platforms, cx, &mut locked)
         }
         // moss installs from a repository stream, not from package files, and rolls back through
-        // its own states, so its packages lock by name only.
-        Source::Moss(_) => Ok(()),
+        // its own states, so its packages lock by name only. zypper packages do too: the
+        // host's pinned Tumbleweed snapshot fixes their versions.
+        Source::Moss(_) | Source::Zypper(_) => Ok(()),
         Source::Python => python::resolve(version, platforms, cx, &mut locked),
         Source::Url { url } => python::url(url, cx, &mut locked),
         Source::Pypi { .. } => Err(anyhow!("pypi(...) packages belong in a dev.star, which fspec dev locks")),

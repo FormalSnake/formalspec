@@ -1,4 +1,4 @@
-//! `fspec update`: resolve every declared package and rewrite the lock.
+//! `fspec update`: resolve every declared package and Tumbleweed snapshot, and rewrite the lock.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -22,8 +22,8 @@ struct Decl {
     age: Option<i64>,
 }
 
-/// Re-resolve `only` (every package when empty), keep the other entries, and drop entries no
-/// host declares any more.
+/// Re-resolve `only` (every package and snapshot pin when empty), keep the other entries, and
+/// drop entries no host declares any more.
 pub fn update(hosts: &[Host], old: &Lock, only: &[String], cx: &Cx) -> Result<Update> {
     let mut decls: BTreeMap<String, Decl> = BTreeMap::new();
     let mut errors = Vec::new();
@@ -60,9 +60,11 @@ pub fn update(hosts: &[Host], old: &Lock, only: &[String], cx: &Cx) -> Result<Up
         }
     }
 
-    let mut lock =
-        Lock { pkg: vec![], system: old.system.clone(), native: old.native.clone(), image: old.image.clone() };
+    let mut lock = Lock { pkg: vec![], ..old.clone() };
     let mut changes = Vec::new();
+    if only.is_empty() {
+        lock.zypper = crate::snapshot::update(hosts, &old.zypper, cx, &mut changes, &mut errors);
+    }
     for gone in old.pkg.iter().filter(|p| !decls.contains_key(&p.name)) {
         changes.push(format!("- {} {}", gone.name, label(gone)));
     }

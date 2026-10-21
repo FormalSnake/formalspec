@@ -12,7 +12,6 @@ const PENDING: &[&str] = &[
     "unknown field `locale`",
     "unknown field `libc`",
     "Variable `cachyos` not found",
-    "Variable `tumbleweed` not found",
     "Variable `leap` not found",
     "Variable `aeon` not found",
     "Variable `kalpa` not found",

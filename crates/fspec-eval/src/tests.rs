@@ -201,3 +201,32 @@ fn dev_star_must_call_dev_once_and_dev_stays_out_of_specs() {
     let err = dev_str("dev(services = [service(\"pg\", restart = \"always\")])", "x86_64-linux").unwrap_err();
     assert!(format!("{err:#}").contains("restart"), "{err:#}");
 }
+
+#[test]
+fn tumbleweed_declares_zypper_packages_and_repos() {
+    let spec = eval_str(
+        r#"
+hosts = [host(
+    name = "e1504g",
+    platform = "x86_64-linux",
+    system = tumbleweed(packages = ["NetworkManager"]),
+    modules = [
+        repo("1password", url = "https://downloads.1password.com/linux/rpm/stable/x86_64",
+             key = "https://downloads.1password.com/linux/keys/1password.asc",
+             fingerprint = "3FEF9748469ADBE15DA7CA80AC2D62742012EA22"),
+        pkg("1password", source = zypper()),
+        pkg("tools", source = zypper(["htop", "jq"])),
+    ],
+)]
+"#,
+        &[],
+    )
+    .unwrap();
+    let host = spec.host("e1504g").unwrap();
+    let Some(fspec_core::resource::System::Distro(d)) = &host.system else { panic!("{:?}", host.system) };
+    assert_eq!(d.distro, "opensuse-tumbleweed");
+    assert!(matches!(&host.resources[0], Resource::Repo(r) if r.name == "1password" && r.key.is_some()));
+    let Resource::Pkg(tools) = &host.resources[2] else { panic!() };
+    assert!(matches!(&tools.source, Source::Zypper(z) if z.names == ["htop", "jq"]));
+    assert!(eval_str("x = repo(\"a\", url = \"u\", gpg = \"k\")\nhosts = []\n", &[]).is_err());
+}

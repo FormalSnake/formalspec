@@ -34,7 +34,9 @@ struct Want {
 }
 
 fn names(fam: Family, p: &Pkg) -> Result<Vec<String>> {
-    let (Source::Dnf(d) | Source::Pacman(d) | Source::Apt(d) | Source::Xbps(d) | Source::Moss(d)) = &p.source else {
+    let (Source::Dnf(d) | Source::Pacman(d) | Source::Apt(d) | Source::Xbps(d) | Source::Moss(d) | Source::Zypper(d)) =
+        &p.source
+    else {
         bail!("pkg:{} is not a {} package", p.name, fam.label())
     };
     Ok(if d.names.is_empty() { vec![p.name.clone()] } else { d.names.clone() })

@@ -45,3 +45,11 @@ family_backend!(
     "moss",
     Family::Moss
 );
+
+family_backend!(
+    /// Packages from openSUSE's repos and `repo(...)` ones. They lock by name only: the locked
+    /// Tumbleweed snapshot the distro repos point at fixes their versions.
+    ZypperBackend,
+    "zypper",
+    Family::Zypper
+);

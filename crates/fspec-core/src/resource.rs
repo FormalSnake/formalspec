@@ -91,6 +91,21 @@ pub struct Distro {
     pub packages: Vec<String>,
 }
 
+/// A third-party package repository on a zypper distro, e.g. 1Password's or Packman.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Repo {
+    /// The repo's zypper alias.
+    pub name: String,
+    pub url: String,
+    /// URL of the signing key, imported into rpm's keyring only when its fingerprint matches.
+    #[serde(default)]
+    pub key: Option<String>,
+    /// Full fingerprint of `key`, hex as `gpg --show-keys` prints it.
+    #[serde(default)]
+    pub fingerprint: Option<String>,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Resource {
@@ -103,6 +118,7 @@ pub enum Resource {
     Defaults(Defaults),
     Image(Image),
     Distro(Distro),
+    Repo(Repo),
 }
 
 /// Where a resource's record lives: the system state file or the user one.
@@ -125,6 +141,7 @@ impl Resource {
             Resource::Defaults(_) => "defaults",
             Resource::Image(_) => "image",
             Resource::Distro(_) => "distro",
+            Resource::Repo(_) => "repo",
         }
     }
 
@@ -138,6 +155,7 @@ impl Resource {
             Resource::User(u) => u.name.clone(),
             Resource::Secret(s) => s.path.clone(),
             Resource::Defaults(d) => format!("{} {}", d.domain, d.key),
+            Resource::Repo(r) => r.name.clone(),
             Resource::Image(_) | Resource::Distro(_) => "system".into(),
         };
         Key { kind: self.kind().into(), id }
@@ -279,6 +297,7 @@ pub enum Source {
     Apt(DistroPkgs),
     Xbps(DistroPkgs),
     Moss(DistroPkgs),
+    Zypper(DistroPkgs),
     Git {
         url: String,
         #[serde(default = "main")]
@@ -326,6 +345,7 @@ impl Source {
             Source::Apt(_) => "apt",
             Source::Xbps(_) => "xbps",
             Source::Moss(_) => "moss",
+            Source::Zypper(_) => "zypper",
             Source::Git { .. } => "git",
             Source::Nix { .. } => "nix",
             Source::Url { .. } => "url",
@@ -347,7 +367,12 @@ impl fmt::Display for Source {
             Source::Github { repo, .. } => write!(f, "{kind}:{repo}"),
             Source::Flatpak { id, .. } => write!(f, "{kind}{}", opt(id)),
             Source::Brew { name, cask } => write!(f, "{kind}{}{}", if *cask { ":cask" } else { "" }, opt(name)),
-            Source::Dnf(d) | Source::Pacman(d) | Source::Apt(d) | Source::Xbps(d) | Source::Moss(d) => {
+            Source::Dnf(d)
+            | Source::Pacman(d)
+            | Source::Apt(d)
+            | Source::Xbps(d)
+            | Source::Moss(d)
+            | Source::Zypper(d) => {
                 write!(f, "{kind}:{}", d.names.join(","))
             }
             Source::Git { url, rev } => write!(f, "{kind}:{url}@{rev}"),
