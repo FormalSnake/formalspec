@@ -661,81 +661,177 @@ interrupted run repeats on the next boot. tmpfiles then recreates the image's
 `/etc/subgid`) are always kept, like the homes: `apply` recreates declared users
 but not their passwords.
 
-To or from a classic distro, `fspec switch --distro void` (fedora, arch, debian
-or void). The host's `system` must already declare the target distro, so edit
-`system =` to `void(...)` first and pass `--host` for that host; the command
-refuses any other host. Nothing is built from a second declaration. The root
-must be btrfs and `/home` must be its own subvolume, else the command stops
-before touching anything. It reads the machine through the runner: the
-filesystems mounted at `/boot`, `/efi` and `/boot/efi`, the bootloader
-(systemd-boot when a mounted ESP holds `EFI/systemd`, else GRUB when
-`/boot/grub2`, `/boot/grub`, `grub2-mkconfig` or `grub-mkconfig` exists), and
-the firmware (EFI when `/sys/firmware/efi` exists, else BIOS and the disk under
-the root filesystem). Then it:
+To or from a classic distro, `fspec switch --distro void` (fedora, arch,
+debian, ubuntu or void). The host's `system` must already declare the target
+distro, so edit `system =` to `void(...)` first and pass `--host` for that
+host; the command refuses any other host. Nothing is built from a second
+declaration. Every root lives on one disk in one of the layouts below, side by
+side with the others, and boots through one shared bootloader.
 
-1. Mounts the btrfs top level and refuses if `@<distro>` already exists. Under
-   GRUB it also refuses unless the running root owns boot (see below). The
-   first switch on a machine records the running root as the owner.
-2. Creates the subvolume `@<distro>` and mounts it under `/run/fspec/switch/`.
+### Disk layout
+
+The default layout, the one `fspec disk init` creates and the one to use:
+
+- A GPT disk.
+- A 2 GiB EFI system partition (FAT32), mounted at `/efi` in every root as the
+  UAPI Boot Loader Specification places it, and shared by every distro and by
+  Windows if it is there. 2 GiB holds several distros' unified kernel images
+  next to Windows' loader.
+- Optionally a LUKS2 container holding the rest of the disk.
+- One btrfs filesystem with the subvolumes `@<distro>` (one per root), `@home`
+  (shared), `@swap` (no copy-on-write, holding `swapfile`), `@snapshots`, and
+  `@fspec` mounted at `/opt/fspec`, so a switch does not download the store
+  again. Store paths are keyed by the artifact's hash and the lock keys
+  artifacts by platform, so every root of a host converges on the same store
+  and `current`.
+- systemd-boot on the ESP. Kernels go onto the ESP per distro, so roots never
+  overwrite each other's kernels or bootloader config: unified kernel images
+  as `/efi/EFI/Linux/<distro>-*.efi` where the distro builds them, otherwise
+  `/efi/<distro>/` with a Boot Loader Specification entry in
+  `/efi/loader/entries/<distro>-*.conf`. systemd-boot finds both at boot time,
+  so a kernel update in a root that does not own boot never leaves a stale
+  entry. Each root keeps its own `/boot` for the distro's packages, and its
+  own tooling writes the ESP files: `kernel-install` with `layout=uki` on
+  Fedora, Debian and Ubuntu, a `default_uki` mkinitcpio preset on Arch, and a
+  kernel hook fspec installs on Void, which has no UKI tooling. The kernel
+  command line comes from each root's `/etc/kernel/cmdline`.
+- With LUKS, every root gets an `/etc/crypttab` line, `cryptsetup` in its
+  initramfs and `rd.luks.name=` on its command line.
+
+Two more layouts are supported:
+
+- ZFS: a pool `rpool` with `rpool/ROOT/<distro>` boot environments,
+  `rpool/home` and `rpool/fspec`, booted by ZFSBootMenu from the ESP.
+  ZFSBootMenu is built for several boot environments on one pool: it reads
+  each root's kernels from that root's own `/boot`, so nothing is copied to
+  the ESP. Every root needs the ZFS module in its initramfs, which Debian
+  (from `contrib`, built by DKMS), Ubuntu and Void provide; Arch and Fedora
+  ship ZFS only from third-party repositories, so fspec refuses them on ZFS.
+  Out-of-tree ZFS modules are not signed by the distro's keys, Ubuntu's being
+  the exception, so Secure Boot, and with it EAC Linux v2, only works with
+  Ubuntu on ZFS; `plan` says so.
+- BIOS (or an MBR disk): GRUB in BIOS mode, from a `bios_grub` partition on
+  GPT or the MBR gap, and a shared ext4 boot partition mounted at
+  `/var/lib/fspec/boot` in every root. Each root bind-mounts its own folder
+  `<distro>/` from it at `/boot`, so its packages write their kernels there,
+  and GRUB itself lives in the folder of the root that owns boot. No unified
+  kernel images. GRUB's menu is written when the owner runs `grub-mkconfig`,
+  so every root keeps stable kernel names in its folder (Arch's own
+  `vmlinuz-linux`, Debian's `link_in_boot` symlinks, and a kernel hook on
+  Fedora and Void). `plan` says that Secure Boot, and so EAC, is impossible
+  there.
+
+Each distro's recipe declares what it needs: the smallest ESP it fits on,
+the filesystems it boots from, whether it builds unified kernel images, and
+whether bootc can install it (`--to-image` needs EFI and a btrfs root, since
+bootc supports neither a ZFS root nor the shared BIOS boot partition). `fspec
+plan` prints the layout it found and, when the host declares a distro other
+than the running one, whether the switch fits the disk; a switch the disk
+cannot satisfy is refused with the fix, usually a `fspec disk` command.
+
+### Getting a disk onto a supported layout
+
+- `fspec disk plan [<device>]` prints the steps that bring the running disk
+  (or `<device>`) onto a supported layout, and which of them need the disk
+  unmounted.
+- `fspec disk migrate [<device>]` runs the steps that can be done in place:
+  `btrfs-convert` from ext4, adding the shared subvolumes and moving `/home`
+  and `/opt/fspec` into them, moving a root that sits at the top level into
+  `@<distro>`, putting the root's kernels on the ESP, and carving a 2 GiB ESP
+  (or the BIOS boot partition) out of the btrfs partition: the filesystem and
+  its partition shrink, a new partition takes the freed space at the end of
+  the disk, the old ESP's files are copied over, and the new ESP takes the
+  old one's partition GUID and FAT serial, so firmware entries and every
+  root's `fstab` keep pointing at it. The old ESP is retyped as Linux data
+  and given a new GUID and serial, and stays as a copy. A partition cannot be
+  grown into the space in front of a btrfs filesystem, which is why the ESP
+  moves rather than grows. Encrypting an existing disk is not migrated, and
+  neither is shrinking a btrfs filesystem inside LUKS; both need
+  `fspec disk init`. An ext4 root converts only while unmounted, so
+  `disk migrate <device>` runs from a live system, keeps the filesystem
+  UUID, fixes the root's `fstab` line and rebuilds its initramfs and GRUB
+  config; the rest of the steps run after booting it. After a reboot into
+  `@<distro>`, `disk plan` lists what the move left behind (the old root's
+  files, the copies of `/home` and `/opt/fspec` under their new mounts) as
+  destructive steps.
+- `fspec disk init <device> [--layout default|zfs|bios] [--luks] [--distro d
+  --host h]` partitions and formats a disk from scratch, creates the shared
+  subvolumes or datasets, installs the bootloader, and with `--distro`
+  installs the first root the same way `switch --distro` does. It refuses a
+  partition, a disk with anything mounted, and a disk under 16 GiB. ZFS
+  takes no `--luks`, since it encrypts datasets itself.
+
+Every destructive step asks for the device name to be typed back, refuses a
+mounted target unless the step is built for one (`btrfs filesystem resize`
+and the subvolume moves run on the mounted filesystem), and first checks that
+a backup exists: a read-only snapshot under `@snapshots` taken in the last 24
+hours, or `--backup <path>` naming a backup modified in the last 24 hours. A
+blank disk needs neither.
+
+### Switching
+
+The switch reads the machine through the runner: the layout (`lsblk` and
+`findmnt`), the firmware (EFI when `/sys/firmware/efi` exists), the running
+root and its kernel command line. Then it:
+
+1. Checks the target distro's recipe against the layout and stops with the
+   fix if it does not fit. It refuses unless the running root owns boot when
+   the layout is BIOS (see below). The first switch on a machine records the
+   running root as the owner.
+2. Creates the root, `@<distro>` or `rpool/ROOT/<distro>`, and mounts it under
+   `/run/fspec/switch/`.
 3. Bootstraps the base system from the running OS: `dnf --installroot` (needs
-   `--release <n>`), `pacstrap -K`, `debootstrap` (`--release` is the suite,
-   default `stable`) or `xbps-install -r` (answering its repository key
-   prompt). Under GRUB the bootstrap includes the distro's GRUB packages for
-   the firmware (`grub-pc` or `grub-efi-amd64` on Debian, `grub2-pc` or
-   `grub2-efi-x64` with `grub2-tools` on Fedora, `grub` plus `efibootmgr` on
-   Arch, `grub` or `grub-x86_64-efi` on Void), so the new root can take boot
-   over later.
-4. Writes the new root's `fstab`: `/` on `@<distro>`, `/home` on the shared
-   home subvolume, and every filesystem mounted at `/boot`, `/efi` or
-   `/boot/efi`, whatever the bootloader. It copies `resolv.conf`.
+   `--release <n>`; the Fedora repositories are named on the command line,
+   since a fresh root has none), `pacstrap -K`, `debootstrap` (`--release` is
+   the suite, default `stable` on Debian and `noble` on Ubuntu) or
+   `xbps-install -r` (answering its repository key prompt). The bootstrap
+   includes the recipe's boot packages for the layout: UKI tooling, GRUB,
+   `cryptsetup` or ZFS.
+4. Writes the new root's `fstab` (`/`, `/home`, `/efi`, `/opt/fspec`, the
+   swapfile, and on BIOS the shared boot partition and the `/boot` bind),
+   `crypttab`, `/etc/kernel/cmdline` and the recipe's kernel tooling config,
+   and copies `resolv.conf`. The command line keeps the running kernel's
+   options (`console=`, `net.ifnames=0`, extra `rootflags=`) with only the
+   root swapped, since the machine's serial and network setup can depend on
+   them.
 5. Applies the spec inside it. `--root` only logs commands, so the apply runs as
    `chroot <new root> fspec --spec <copy of the spec> apply --local --scope
    system --host <host>` with the running `fspec` and the spec directory copied
-   in, the shared `/home` bound in (so a declared user's home lands in it), and
-   a `PATH` with the `sbin` directories, which Arch's lacks. The new distro's
-   backends do the work. The binary must run in the new root, so it has to be
-   static: a glibc or nix-store build does not run in a fresh root. systemd
-   units are enabled without `--now`, which `systemctl` refuses in a chroot,
-   and then started, which it ignores there. The user scope applies at first
-   login.
-6. Copies the newest kernel and initramfs into `fspec/<distro>/` on the ESP
-   (systemd-boot, with a `loader/entries/fspec-<distro>.conf`) or in `/boot`
-   (GRUB, with an executable `/etc/grub.d/42_fspec_<distro>` and a regenerated
-   config). The GRUB entry searches the filesystem that holds `/boot`: a
-   separate `/boot`, or the btrfs root with `/boot` under the running
-   subvolume. The kernel is copied once; a later kernel update inside the new
-   distro needs the copy repeated by hand. The entry keeps the running kernel's options
-   (`console=`, `net.ifnames=0`, extra `rootflags=`) with only the root
-   swapped, since the machine's serial and network setup can depend on them.
+   in, the shared `/home`, `/opt/fspec` and `/efi` bound in (so a declared
+   user's home lands in the shared one), and a `PATH` with the `sbin`
+   directories, which Arch's lacks. The new distro's backends do the work. The
+   binary must run in the new root, so it has to be static: a glibc or
+   nix-store build does not run in a fresh root. systemd units are enabled
+   without `--now`, which `systemctl` refuses in a chroot, and then started,
+   which it ignores there. The user scope applies at first login.
+6. Runs the recipe's kernel tooling in the new root once, which puts its
+   kernels where the layout boots them (on ZFS it sets the boot environment's
+   `org.zfsbootmenu:commandline`), and on BIOS regenerates the owner's GRUB
+   menu.
 7. Unmounts, also after a failure, and says to run `fspec switch --adopt-boot`
    from the new root before forgetting the old one.
 
-Under `--root` the probes are skipped and btrfs with systemd-boot on an ESP at
-`/boot` is assumed, with the rooted system owning boot, so the plan is logged to
+Under `--root` the probes are skipped and the default layout is assumed, with
+the rooted system owning boot, so the plan is logged to
 `<root>/var/log/fspec-commands.log` without running anything.
 
 ### Who owns boot
 
-Exactly one root owns boot: its bootloader is the one the firmware starts. The
-owner is recorded as its subvolume (`/@void`, or `/` for the top level) and
-its kernel command line in `.fspec-boot-owner` on the btrfs top level, which
-every root can mount. `fspec
+Exactly one root owns boot: on the default layout the one systemd-boot boots
+by default, on ZFS the pool's `bootfs`, on BIOS the one whose GRUB the boot
+sector loads. On BIOS the owner is recorded with its kernel command line in
+`.fspec-boot-owner` on the btrfs top level, which every root can mount. `fspec
 plan`, run as root on a classic distro, prints which root owns boot.
 
-`fspec switch --adopt-boot`, run from the new root, makes it the owner and
-then records it:
+`fspec switch --adopt-boot`, run from the new root, makes it the owner:
 
-- systemd-boot: writes this root's entry on the ESP (kernel copied from its own
-  `/boot`), sets `default fspec-<distro>.conf` in `loader/loader.conf`, and runs
-  `bootctl set-default` where `bootctl` exists, since that EFI variable outranks
-  `loader.conf`. The previous owner's own entries stay as the fallback.
-- GRUB: `grub-install` (`grub2-install` on Fedora) to the ESP with
-  `--bootloader-id=fspec-<distro>` under EFI (Fedora's also gets `--force`,
-  since it bypasses shim), or to the boot sector of the root's disk under BIOS.
-  The previous owner's newest kernel is copied into this root's
-  `/boot/fspec/<distro>/` with a `42_fspec_<distro>` fallback entry booting its
-  subvolume with the kernel options recorded for it, and `grub-mkconfig`
-  writes this root's config.
+- Default layout: `default <distro>-*` in `/efi/loader/loader.conf`, and
+  `bootctl set-default ""` so no EFI variable outranks it.
+- ZFS: `zpool set bootfs=rpool/ROOT/<distro> rpool`.
+- BIOS: `grub-install --target=i386-pc --boot-directory=/boot` (`grub2-install`
+  on Fedora) to the disk's boot sector, and `grub-mkconfig`, whose
+  `/etc/grub.d/42_fspec` lists every other root it finds in the shared boot
+  partition with the kernel options that root recorded there. Then the marker.
 
 bootc roots keep bootupd as their bootloader owner; `--adopt-boot` refuses them
 for now and says so.
@@ -743,21 +839,22 @@ for now and says so.
 `fspec switch --to-image` turns a classic machine into the host's bootc image
 with `podman run ... <locked image> bootc install to-existing-root
 --acknowledge-destructive`. It needs an `image(...)` host with a digest in
-`fspec.lock`, refuses a machine that already runs bootc, and needs `--yes`
-because the install reinitialises `/boot`.
+`fspec.lock`, refuses a machine that already runs bootc, refuses a layout
+bootc cannot install to, and needs `--yes` because the install reinitialises
+`/boot`.
 
 The old root stays bootable until `fspec forget <distro>` deletes it. It
-refuses the running distro and a root booted from `@<distro>`, and stops when
-that subvolume does not exist. It is a hard refusal, not a warning, whenever
-the running root does not own boot, nothing records an owner, or the default
-systemd-boot entry boots `@<distro>`; the message says to run `fspec switch
---adopt-boot` from the running root first. That way the bootloader never goes
-with a deleted root. It removes the boot entry and kernel copy (under GRUB,
-also from every other root, which keeps its own `grub.d` scripts and would list
-the deleted root once it adopts boot), then runs
-`btrfs subvolume delete --recursive` on the subvolume, which takes every
-leftover system file with it. All of these need root; every step is a pure
-planning function in `fspec-switch` that returns the command list.
+refuses the running distro and the root it booted from, and stops when that
+root does not exist. It is a hard refusal, not a warning, whenever the running
+root does not own boot (the default entry, `bootfs` or the GRUB owner points
+at another root, or nothing records an owner); the message says to run `fspec
+switch --adopt-boot` from the running root first. That way the bootloader
+never goes with a deleted root. It removes the root's kernels and entries from
+the ESP or its folder in the shared boot partition (and regenerates GRUB's
+menu on BIOS), then deletes the root with `btrfs subvolume delete --recursive`
+or `zfs destroy -r`, which takes every leftover system file with it. All of
+these need root; every step is a pure planning function in `fspec-switch`
+that returns the command list.
 
 Only the `system` block differs per distro. Everything from FormalSpec's own
 sources, Flatpaks and files moves unchanged. Base packages are named per
@@ -786,6 +883,9 @@ distro, so the `system` block is where those names live.
 | `fspec switch --reset-var` | Stage a reset of `/etc` and `/var` for the next boot of a bootc host |
 | `fspec switch --to-image --yes` | Convert a classic machine to the host's bootc image |
 | `fspec forget <distro>` | Delete an old distro root, from the root that owns boot |
+| `fspec disk plan [device]` | Steps that bring a disk onto a supported layout |
+| `fspec disk migrate [device]` | Run the in-place steps of `disk plan` |
+| `fspec disk init <device>` | Partition and format a disk with a supported layout |
 
 ## Remote hosts
 

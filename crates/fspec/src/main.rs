@@ -151,6 +151,11 @@ enum Command {
         #[arg(value_parser = fspec_switch::DISTROS)]
         distro: String,
     },
+    /// Put a disk onto a layout that `switch --distro` installs roots side by side on.
+    Disk {
+        #[command(subcommand)]
+        cmd: DiskCommand,
+    },
     /// Print what this machine is, as `apply` compares it with the declaration.
     #[command(hide = true)]
     Facts {
@@ -211,6 +216,53 @@ enum CiCommand {
     Packages,
 }
 
+#[derive(Subcommand)]
+enum DiskCommand {
+    /// Show the steps that bring this disk, or the unmounted ext4 root partition DEVICE, onto a
+    /// supported layout.
+    Plan { device: Option<String> },
+    /// Run those steps: in place on the running system, or converting DEVICE to btrfs.
+    Migrate {
+        device: Option<String>,
+        /// A backup taken in the last 24 hours, when there is no recent snapshot under @snapshots.
+        #[arg(long)]
+        backup: Option<PathBuf>,
+        /// Size of the swapfile in @swap, in GiB.
+        #[arg(long, default_value_t = 4)]
+        swap: u64,
+    },
+    /// Partition and format DEVICE from scratch.
+    Init {
+        device: String,
+        #[arg(long, value_enum, default_value = "default")]
+        layout: LayoutArg,
+        /// Put the btrfs filesystem in a LUKS2 container.
+        #[arg(long)]
+        luks: bool,
+        /// Install this distro as the first root; the host's `system` must declare it.
+        #[arg(long, value_parser = fspec_switch::DISTROS, requires = "host")]
+        distro: Option<String>,
+        #[arg(long)]
+        host: Option<String>,
+        /// Fedora release number, or Debian or Ubuntu suite.
+        #[arg(long, requires = "distro")]
+        release: Option<String>,
+        /// A backup of the disk's contents taken in the last 24 hours; not needed for a blank disk.
+        #[arg(long)]
+        backup: Option<PathBuf>,
+        /// Size of the swapfile in @swap, in GiB.
+        #[arg(long, default_value_t = 4)]
+        swap: u64,
+    },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum LayoutArg {
+    Default,
+    Zfs,
+    Bios,
+}
+
 #[derive(Clone, Copy, ValueEnum)]
 enum ShellArg {
     Fish,
@@ -249,6 +301,24 @@ fn main() -> Result<()> {
             let host = named(&spec, host.as_deref())?;
             let alias = remote_alias(host, &local_hostname(), &paths, *local);
             let here = alias.is_none();
+            if let Some(System::Distro(d)) = &host.system
+                && here
+                && !*json
+                && is_live(&paths)
+            {
+                let running = Facts::probe_local().1;
+                if d.distro != running {
+                    println!(
+                        "host {} declares {} and this machine runs {running}: `fspec switch --distro {}` installs it \
+                         beside this root",
+                        host.name, d.distro, d.distro
+                    );
+                    if let Some(line) = boot_line(&paths, host) {
+                        println!("{line}");
+                    }
+                    return Ok(());
+                }
+            }
             let plan = match alias {
                 Some(alias) => {
                     let remote = Remote {
@@ -454,6 +524,7 @@ fn main() -> Result<()> {
             switch(&paths, &spec_path, host, &opts, release.as_deref(), *yes)
         }
         Command::Forget { distro } => forget(&paths, distro),
+        Command::Disk { cmd } => disk(&paths, &spec_path, cmd),
         Command::Facts { json } => {
             let probe = Probe::local(local_hostname());
             if *json {
@@ -532,20 +603,22 @@ fn run_plan(paths: &Paths, runner: &dyn Runner, plan: &fspec_switch::Plan) -> Re
     Ok(())
 }
 
-fn machine(paths: &Paths, runner: &dyn Runner) -> Result<fspec_switch::Machine> {
-    if is_live(paths) { fspec_switch::detect(runner, paths) } else { Ok(fspec_switch::assumed()) }
+fn machine(paths: &Paths, runner: &dyn Runner, host: &Host) -> Result<fspec_switch::Machine> {
+    if is_live(paths) {
+        return fspec_switch::detect(runner, paths);
+    }
+    match &host.system {
+        Some(System::Distro(d)) => Ok(fspec_switch::assumed(&d.distro)),
+        _ => bail!("host {} declares no distro, which a rooted run needs to name its root", host.name),
+    }
 }
 
-/// A `--root` run cannot read the record, so it assumes the rooted system owns boot.
-fn owner(paths: &Paths, runner: &dyn Runner, m: &fspec_switch::Machine) -> Result<Option<fspec_switch::Owner>> {
+/// A `--root` run cannot read the bootloader, so it assumes the rooted system owns boot.
+fn owner(paths: &Paths, runner: &dyn Runner, m: &fspec_switch::Machine) -> Result<Option<String>> {
     if is_live(paths) {
         return fspec_switch::boot_owner(runner, paths, m);
     }
-    Ok(Some(fspec_switch::Owner {
-        subvol: m.root_subvol.clone(),
-        distro: m.running.clone(),
-        cmdline: m.cmdline.clone(),
-    }))
+    Ok(Some(m.running.clone()))
 }
 
 fn switch(paths: &Paths, spec_path: &Path, host: &Host, opts: &Switch, release: Option<&str>, yes: bool) -> Result<()> {
@@ -553,32 +626,17 @@ fn switch(paths: &Paths, spec_path: &Path, host: &Host, opts: &Switch, release: 
     let spec_dir = spec_path.parent().context("spec has no parent directory")?;
     let live = is_live(paths);
     if let Some(distro) = opts.distro {
-        match &host.system {
-            Some(System::Distro(d)) if d.distro == distro => {}
-            _ => bail!(
-                "host {} does not declare {distro} as its system. Edit `system =` to {distro}(...) first: the new \
-                 root is built from that block",
-                host.name
-            ),
-        }
-        let arch = host.platform.split('-').next().unwrap_or_default();
+        let spec_file = file_name(spec_path)?;
         let exe = std::env::current_exe()?;
-        let target = fspec_switch::Target {
-            distro,
-            host: &host.name,
-            arch,
-            release,
-            spec_dir,
-            spec_file: &file_name(spec_path)?,
-            exe: &exe,
-        };
-        let m = machine(paths, runner.as_ref())?;
-        let plan = fspec_switch::switch_distro(paths, &m, owner(paths, runner.as_ref(), &m)?.as_ref(), &target)?;
+        let target = target(host, distro, release, spec_dir, &spec_file, &exe)?;
+        let m = machine(paths, runner.as_ref(), host)?;
+        let plan = fspec_switch::switch_distro(paths, &m, owner(paths, runner.as_ref(), &m)?.as_deref(), &target)?;
         run_plan(paths, runner.as_ref(), &plan)?;
         if live {
             println!(
-                "{distro} is installed in @{distro}: reboot and pick \"{}\" from the boot menu. Run `fspec switch \
+                "{distro} is installed beside {}: reboot and pick \"{}\" from the boot menu. Run `fspec switch \
                  --adopt-boot` there to hand boot over before you `fspec forget` this root",
+                m.running,
                 fspec_switch::title(distro)
             );
         }
@@ -589,18 +647,10 @@ fn switch(paths: &Paths, spec_path: &Path, host: &Host, opts: &Switch, release: 
                  bootc roots yet"
             );
         }
-        let m = machine(paths, runner.as_ref())?;
-        let arch = host.platform.split('-').next().unwrap_or_default();
-        // A rooted run has no os-release to read, so it names the root after the declared distro.
-        let here = match &host.system {
-            _ if !m.running.is_empty() => m.running.clone(),
-            Some(System::Distro(d)) => d.distro.clone(),
-            _ => bail!("could not tell which distro this root is from /etc/os-release or the host's system"),
-        };
-        let plan = fspec_switch::adopt_boot(paths, &m, owner(paths, runner.as_ref(), &m)?.as_ref(), &here, arch)?;
-        run_plan(paths, runner.as_ref(), &plan)?;
+        let m = machine(paths, runner.as_ref(), host)?;
+        run_plan(paths, runner.as_ref(), &fspec_switch::adopt_boot(paths, &m)?)?;
         if live {
-            println!("this root ({}) owns boot now", m.root_subvol);
+            println!("this root ({}) owns boot now", m.running);
         }
     } else if opts.reset_var {
         let Some(System::Image(_)) = &host.system else { bail!("host {} has no image(...) system layer", host.name) };
@@ -627,6 +677,19 @@ fn switch(paths: &Paths, spec_path: &Path, host: &Host, opts: &Switch, release: 
             if fspec_switch::is_bootc(runner.as_ref())? {
                 bail!("this machine already runs bootc; change image(base = ...) and apply instead");
             }
+            let m = fspec_switch::detect(runner.as_ref(), paths)?;
+            match &m.layout {
+                fspec_switch::Layout::Default { .. } => {}
+                fspec_switch::Layout::Zfs { .. } => bail!("bootc does not install to a ZFS root"),
+                fspec_switch::Layout::Bios { .. } => bail!(
+                    "bootc's bootupd would install its own GRUB over the shared one of the BIOS layout; --to-image \
+                     needs the default EFI layout"
+                ),
+                fspec_switch::Layout::Unsupported { reasons } => bail!(
+                    "this disk is not on a supported layout: {}; run `fspec disk plan` for the steps",
+                    reasons.join("; ")
+                ),
+            }
             if !yes {
                 bail!("bootc install to-existing-root reinitialises /boot and replaces this system; rerun with --yes");
             }
@@ -638,27 +701,268 @@ fn switch(paths: &Paths, spec_path: &Path, host: &Host, opts: &Switch, release: 
     Ok(())
 }
 
-/// Which root owns boot, for `plan` on a classic distro that `switch --distro` has run on. Reading
-/// the record mounts the btrfs top level, so only root sees it.
+/// The new root `switch --distro` or `disk init --distro` builds from the host's declaration.
+fn target<'a>(
+    host: &'a Host,
+    distro: &'a str,
+    release: Option<&'a str>,
+    spec_dir: &'a Path,
+    spec_file: &'a str,
+    exe: &'a Path,
+) -> Result<fspec_switch::Target<'a>> {
+    match &host.system {
+        Some(System::Distro(d)) if d.distro == distro => {}
+        _ => bail!(
+            "host {} does not declare {distro} as its system. Edit `system =` to {distro}(...) first: the new root \
+             is built from that block",
+            host.name
+        ),
+    }
+    let arch = host.platform.split('-').next().unwrap_or_default();
+    Ok(fspec_switch::Target { distro, host: &host.name, arch, release, spec_dir, spec_file, exe })
+}
+
+/// The disk layout, which root owns boot, and whether the declared distro fits, for `plan` on a
+/// classic distro. Reading them mounts filesystems, so only root sees them.
 fn boot_line(paths: &Paths, host: &Host) -> Option<String> {
-    if !is_live(paths) || !matches!(host.system, Some(System::Distro(_))) || !is_root(&LiveRunner).ok()? {
+    let Some(System::Distro(declared)) = &host.system else { return None };
+    if !is_live(paths) || !is_root(&LiveRunner).ok()? {
         return None;
     }
     let m = fspec_switch::detect(&LiveRunner, paths).ok()?;
-    let o = fspec_switch::boot_owner(&LiveRunner, paths, &m).ok()??;
-    let here = if o.subvol == m.root_subvol { ", this root" } else { "" };
-    Some(format!("boot is owned by {} ({}{here})", o.subvol, o.distro))
+    let mut lines = vec![match &m.layout {
+        fspec_switch::Layout::Unsupported { reasons } => {
+            format!("disk: not on a supported layout ({}); see `fspec disk plan`", reasons.join("; "))
+        }
+        l => format!("disk: the {} layout", l.name()),
+    }];
+    if let Some(o) = fspec_switch::boot_owner(&LiveRunner, paths, &m).ok()? {
+        let here = if o == m.running { ", this root" } else { "" };
+        lines.push(format!("boot is owned by {o}{here}"));
+    }
+    let d = declared.distro.as_str();
+    if d != m.running {
+        match fspec_switch::recipe(d).ok().map(|r| fspec_switch::misfit(r, &m.layout, &m.firmware)) {
+            Some(None) => lines.push(format!("switch --distro {d}: fits this disk")),
+            Some(Some(why)) => lines.push(format!("switch --distro {d}: refused, {why}")),
+            None => {}
+        }
+    }
+    lines.extend(fspec_switch::caveats(d, &m.layout));
+    Some(lines.join("\n"))
 }
 
 fn forget(paths: &Paths, distro: &str) -> Result<()> {
     let runner = switch_runner(paths)?;
-    let m = machine(paths, runner.as_ref())?;
-    let plan = fspec_switch::forget(paths, &m, owner(paths, runner.as_ref(), &m)?.as_ref(), distro)?;
+    if !is_live(paths) {
+        bail!("forget reads the disk it deletes from, so it only runs on a live system");
+    }
+    let m = fspec_switch::detect(runner.as_ref(), paths)?;
+    let plan = fspec_switch::forget(paths, &m, owner(paths, runner.as_ref(), &m)?.as_deref(), distro)?;
     run_plan(paths, runner.as_ref(), &plan)?;
-    if is_live(paths) {
-        println!("{distro} and its boot entry are deleted");
+    println!("{distro} and its boot entries are deleted");
+    Ok(())
+}
+
+/// A random UUID from the kernel.
+fn new_uuid() -> Result<String> {
+    Ok(std::fs::read_to_string("/proc/sys/kernel/random/uuid").context("reading a random UUID")?.trim().to_string())
+}
+
+fn new_ids() -> Result<fspec_switch::Ids> {
+    let serial = new_uuid()?.replace('-', "")[..8].to_uppercase();
+    Ok(fspec_switch::Ids { fs: new_uuid()?, luks: new_uuid()?, serial, boot: new_uuid()? })
+}
+
+/// Ask for `device` to be typed back before a step that destroys data on it.
+fn confirm(device: &str, what: &str) -> Result<()> {
+    use std::io::Write;
+    print!("{what}\nType {device} to continue: ");
+    std::io::stdout().flush()?;
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    if line.trim() != device {
+        bail!("you typed `{}`, not {device}; nothing was changed", line.trim());
     }
     Ok(())
+}
+
+/// `path` was modified in the last 24 hours.
+fn recent_backup(path: &Path) -> Result<()> {
+    let age = std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .with_context(|| format!("reading the backup {}", path.display()))?
+        .elapsed()
+        .unwrap_or_default();
+    if age > std::time::Duration::from_secs(24 * 3600) {
+        bail!("the backup {} is {} hours old; take a new one first", path.display(), age.as_secs() / 3600);
+    }
+    Ok(())
+}
+
+/// A read-only snapshot under @snapshots created in the last 24 hours. A snapshot's root inode
+/// keeps the birth time of the subvolume it was taken from, so the age comes from btrfs instead.
+fn recent_snapshot(runner: &dyn Runner, paths: &Paths, m: &fspec_switch::Machine) -> Result<bool> {
+    if m.fstype != "btrfs" {
+        return Ok(false);
+    }
+    let top = paths.system("/run/fspec/disk/look").display().to_string();
+    runner.check(&Cmd::new("mkdir").arg("-p").arg(&top))?;
+    runner.check(&Cmd::new("mount").args(["-o", "ro,subvolid=5"]).arg(format!("UUID={}", m.fs_uuid)).arg(&top))?;
+    let check = r#"now=$(date +%s); for s in "$1"/@snapshots/* "$1"/@snapshots/*/*; do [ -d "$s" ] || continue; btrfs property get -ts "$s" ro 2>/dev/null | grep -q true || continue; t=$(btrfs subvolume show "$s" | sed -n 's/^[[:space:]]*Creation time:[[:space:]]*//p'); [ "$(date -d "$t" +%s)" -ge $((now - 86400)) ] && exit 0; done; exit 1"#;
+    let found = runner.run(&Cmd::new("sh").args(["-c", check, "sh", &top]));
+    runner.run(&Cmd::new("umount").arg(&top))?;
+    Ok(found?.status == 0)
+}
+
+/// The whole disk `device`, refusing a partition, a mounted disk, and a disk too small for the
+/// layout. Answers whether it holds anything at all.
+fn blank_disk(runner: &dyn Runner, device: &str) -> Result<bool> {
+    let out =
+        runner.check(&Cmd::new("lsblk").args(["-J", "-b", "-p", "-o", "NAME,TYPE,FSTYPE,SIZE,MOUNTPOINTS", device]))?;
+    let json: serde_json::Value = serde_json::from_str(&out.stdout)?;
+    let disk = &json["blockdevices"][0];
+    if disk["type"].as_str() != Some("disk") {
+        bail!("{device} is not a whole disk");
+    }
+    fn mounted(v: &serde_json::Value) -> bool {
+        v["mountpoints"].as_array().is_some_and(|m| m.iter().any(|x| x.is_string()))
+            || v["children"].as_array().is_some_and(|c| c.iter().any(mounted))
+    }
+    if mounted(disk) {
+        bail!("{device} has mounted filesystems; unmount them first");
+    }
+    if disk["size"].as_u64().unwrap_or_default() < 16 << 30 {
+        bail!("{device} is smaller than 16 GiB, too small for a 2 GiB ESP and a root");
+    }
+    Ok(disk["children"].as_array().is_none_or(|c| c.is_empty()) && disk["fstype"].is_null())
+}
+
+fn disk(paths: &Paths, spec_path: &Path, cmd: &DiskCommand) -> Result<()> {
+    if !is_live(paths) {
+        bail!("fspec disk works on real disks, so it does not run under --root");
+    }
+    let runner = switch_runner(paths)?;
+    let runner = runner.as_ref();
+    match cmd {
+        DiskCommand::Plan { device: Some(device) } | DiskCommand::Migrate { device: Some(device), .. } => {
+            let fstype = runner.check(&Cmd::new("lsblk").args(["-no", "FSTYPE,MOUNTPOINTS", device]))?.stdout;
+            let mut f = fstype.split_whitespace();
+            if f.next() != Some("ext4") {
+                bail!("{device} is not an ext4 filesystem; `disk migrate <device>` only converts an ext4 root");
+            }
+            if f.next().is_some() {
+                bail!("{device} is mounted; it converts only from a live system with it unmounted");
+            }
+            let m = fspec_switch::detect(runner, paths)?;
+            let disk = runner.check(&Cmd::new("lsblk").args(["-ndpo", "PKNAME", device]))?.stdout.trim().to_string();
+            let plan = fspec_switch::convert(paths, device, &disk, &m.firmware);
+            match cmd {
+                DiskCommand::Migrate { backup, .. } => {
+                    let Some(backup) = backup else {
+                        bail!("converting {device} needs a backup taken in the last 24 hours, named with --backup")
+                    };
+                    recent_backup(backup)?;
+                    confirm(device, &format!("This converts the ext4 filesystem on {device} to btrfs."))?;
+                    plan.execute(runner)?;
+                    println!("{device} is btrfs now; boot it and run `fspec disk migrate` for the rest");
+                }
+                _ => {
+                    println!("1. convert the ext4 root {device} to btrfs in place, keeping its UUID (destructive)");
+                    println!("then boot it and run `fspec disk plan` again");
+                }
+            }
+            Ok(())
+        }
+        DiskCommand::Plan { device: None } | DiskCommand::Migrate { device: None, .. } => {
+            let m = fspec_switch::detect(runner, paths)?;
+            let left = fspec_switch::leftovers(runner, paths, &m)?;
+            let swap = match cmd {
+                DiskCommand::Migrate { swap, .. } => *swap,
+                _ => 4,
+            };
+            let steps = fspec_switch::migrate(paths, &m, &left, &new_ids()?, swap)?;
+            if steps.is_empty() {
+                println!("this disk is on the {} layout; nothing to migrate", m.layout.name());
+                return Ok(());
+            }
+            let DiskCommand::Migrate { backup, .. } = cmd else {
+                for (i, s) in steps.iter().enumerate() {
+                    let mark = if s.destructive { " (destructive)" } else { "" };
+                    println!("{}. {}{mark}", i + 1, s.what);
+                }
+                return Ok(());
+            };
+            for (i, step) in steps.iter().enumerate() {
+                println!("step {} of {}: {}", i + 1, steps.len(), step.what);
+                if step.destructive {
+                    match backup {
+                        Some(b) => recent_backup(b)?,
+                        None if recent_snapshot(runner, paths, &m)? => {}
+                        None => bail!(
+                            "this step changes {} in place; take a read-only snapshot under @snapshots or a backup \
+                             first (name it with --backup)",
+                            m.disk
+                        ),
+                    }
+                    confirm(&m.disk, &format!("This step changes the partitions or files on {}.", m.disk))?;
+                }
+                step.plan.execute(runner)?;
+            }
+            println!("done; reboot, then run `fspec disk plan` to see what the move left behind");
+            Ok(())
+        }
+        DiskCommand::Init { device, layout, luks, distro, host, release, backup, swap } => {
+            if !blank_disk(runner, device)? {
+                let Some(backup) = backup else {
+                    bail!("{device} holds data; name a backup taken in the last 24 hours with --backup")
+                };
+                recent_backup(backup)?;
+            }
+            let kind = match layout {
+                LayoutArg::Default => fspec_switch::Kind::Default,
+                LayoutArg::Zfs => fspec_switch::Kind::Zfs,
+                LayoutArg::Bios => fspec_switch::Kind::Bios,
+            };
+            let spec_dir = spec_path.parent().context("spec has no parent directory")?;
+            let spec_file = file_name(spec_path)?;
+            let exe = std::env::current_exe()?;
+            let spec;
+            let target = match (distro, host) {
+                (Some(d), Some(h)) => {
+                    spec = fspec_eval::evaluate(spec_path)?;
+                    Some(target(spec.host(h)?, d, release.as_deref(), spec_dir, &spec_file, &exe)?)
+                }
+                _ => None,
+            };
+            let ids = new_ids()?;
+            let efi_vars = std::path::Path::new("/sys/firmware/efi").is_dir();
+            let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
+            let init = fspec_switch::Init {
+                device,
+                kind,
+                luks: *luks,
+                ids: &ids,
+                swap_gib: *swap,
+                efi_vars,
+                target: target.as_ref(),
+                cmdline: &cmdline,
+            };
+            let plan = fspec_switch::init(paths, &init)?;
+            confirm(device, &format!("This erases everything on {device}."))?;
+            plan.execute(runner)?;
+            println!("{device} has the {} layout", kind_name(kind));
+            Ok(())
+        }
+    }
+}
+
+fn kind_name(k: fspec_switch::Kind) -> &'static str {
+    match k {
+        fspec_switch::Kind::Default => "default",
+        fspec_switch::Kind::Zfs => "zfs",
+        fspec_switch::Kind::Bios => "bios",
+    }
 }
 
 fn scope_name(s: ScopeArg) -> &'static str {

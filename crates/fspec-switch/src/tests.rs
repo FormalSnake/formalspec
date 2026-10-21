@@ -2,10 +2,11 @@ use std::path::Path;
 
 use fspec_core::Paths;
 use fspec_core::runner::{Output, RecordingRunner};
+use serde_json::json;
 
 use crate::{
-    BootMount, Bootloader, Firmware, Machine, Owner, Target, adopt_boot, assumed, detect, forget, reset_var,
-    switch_distro, to_image,
+    Btrfs, Facts, Firmware, Ids, Init, Kind, Layout, Leftovers, Machine, Part, Target, adopt_boot, assumed, classify,
+    forget, init, migrate, reset_var, switch_distro, to_image,
 };
 
 const UUID: &str = "1111-aaaa";
@@ -14,42 +15,67 @@ fn paths() -> Paths {
     Paths::new("/r".into(), "/r/home/u".into())
 }
 
-fn mount(target: &str, uuid: &str, fstype: &str) -> BootMount {
-    BootMount { target: target.into(), uuid: uuid.into(), fstype: fstype.into() }
+fn esp(dev: &str, partn: u64, mib: u64, at: &[&str]) -> serde_json::Value {
+    json!({"name": dev, "type": "part", "fstype": "vfat", "size": mib << 20, "uuid": "EEEE-0001",
+        "partuuid": "esp-guid", "parttype": "C12A7328-F81F-11D2-BA4B-00A0C93EC93B", "mountpoints": at,
+        "fsavail": (mib / 2) << 20, "partn": partn, "start": 2048})
 }
 
-fn machine(bootloader: Bootloader, boot_mounts: Vec<BootMount>, firmware: Firmware) -> Machine {
-    Machine {
-        uuid: UUID.into(),
-        root_subvol: "/@".into(),
-        home_subvol: "/@home".into(),
-        bootloader,
-        running: "fedora".into(),
-        boot_mounts,
-        firmware,
-        cmdline: String::new(),
+fn btrfs_part(dev: &str, partn: u64, at: &[&str]) -> serde_json::Value {
+    json!({"name": dev, "type": "part", "fstype": "btrfs", "size": 40u64 << 30, "uuid": UUID, "partuuid": "root-guid",
+        "parttype": "4f68bce3-e8cd-4db1-96e7-fbcaf984b709", "mountpoints": at, "partn": partn, "start": 4198400})
+}
+
+fn lsblk(pttype: &str, parts: Vec<serde_json::Value>) -> String {
+    json!({"blockdevices": [{"name": "/dev/vda", "type": "disk", "size": 64u64 << 30, "pttype": pttype,
+        "mountpoints": [], "children": parts}]})
+    .to_string()
+}
+
+const SHARED: [&str; 4] = ["@home", "@swap", "@snapshots", "@fspec"];
+
+fn facts(root: &str, lsblk: String, efi: bool) -> Facts {
+    Facts {
+        root_mount: format!("btrfs /dev/vda2 {root}"),
+        lsblk,
+        efi,
+        home: "/@home".into(),
+        fspec: "/@fspec".into(),
+        volumes: SHARED.iter().map(|s| s.to_string()).chain([root.trim_start_matches('/').to_string()]).collect(),
+        ..Facts::default()
     }
 }
 
-fn systemd_boot() -> Machine {
-    machine(
-        Bootloader::SystemdBoot { esp: "/efi".into(), default: None },
-        vec![mount("/efi", "EEEE-0001", "vfat")],
-        Firmware::Efi,
-    )
+/// Arch on the default layout: a 2 GiB ESP at /efi and btrfs with every shared subvolume.
+fn default_arch() -> Machine {
+    let l = lsblk("gpt", vec![esp("/dev/vda1", 1, 2048, &["/efi"]), btrfs_part("/dev/vda2", 2, &["/", "/home"])]);
+    classify(&facts("/@arch", l, true), "arch".into(), "BOOT_IMAGE=/x root=UUID=old rw console=ttyS0,115200".into())
+        .unwrap()
 }
 
-fn grub() -> Machine {
-    machine(
-        Bootloader::Grub { mkconfig: "grub-mkconfig", cfg: "/boot/grub/grub.cfg" },
-        Vec::new(),
-        Firmware::Bios { disk: "/dev/vda".into() },
-    )
+fn bios_debian() -> Machine {
+    let boot = json!({"name": "/dev/vda3", "type": "part", "fstype": "ext4", "size": 2u64 << 30, "uuid": "boot-uuid",
+        "parttype": "0fc63daf-8483-4772-8e79-3d69d8477de4", "mountpoints": ["/var/lib/fspec/boot", "/boot"],
+        "fsavail": 1u64 << 30, "partn": 3});
+    let grub = json!({"name": "/dev/vda1", "type": "part", "size": 1u64 << 20,
+        "parttype": "21686148-6449-6e6f-744e-656564454649", "partn": 1, "mountpoints": []});
+    let mut f = facts("/@debian", lsblk("gpt", vec![grub, btrfs_part("/dev/vda2", 2, &["/"]), boot]), false);
+    f.boot = "/debian".into();
+    classify(&f, "debian".into(), String::new()).unwrap()
 }
 
-/// The running root `/@` owns boot.
-fn owned() -> Owner {
-    Owner { subvol: "/@".into(), distro: "fedora".into(), cmdline: String::new() }
+fn zfs_debian() -> Machine {
+    let pool = json!({"name": "/dev/vda2", "type": "part", "fstype": "zfs_member", "size": 40u64 << 30, "partn": 2,
+        "mountpoints": []});
+    let f = Facts {
+        root_mount: "zfs rpool/ROOT/debian /".into(),
+        lsblk: lsblk("gpt", vec![esp("/dev/vda1", 1, 2048, &["/efi"]), pool]),
+        efi: true,
+        volumes: ["rpool", "rpool/ROOT", "rpool/ROOT/debian", "rpool/home", "rpool/fspec"].map(String::from).to_vec(),
+        zpool: "rpool\t40G\n\t/dev/vda2\t40G\n".into(),
+        ..Facts::default()
+    };
+    classify(&f, "debian".into(), String::new()).unwrap()
 }
 
 fn target(distro: &str) -> Target<'_> {
@@ -57,106 +83,10 @@ fn target(distro: &str) -> Target<'_> {
         distro,
         host: "box",
         arch: "x86_64",
-        release: Some("42"),
+        release: Some("44"),
         spec_dir: Path::new("/work/spec"),
         spec_file: "spec.star",
         exe: Path::new("/usr/bin/fspec"),
-    }
-}
-
-/// Everything before the bootstrap command and everything between it and the boot entry.
-fn expected(distro: &str, bootstrap: &str, boot: &[String]) -> Vec<String> {
-    let new = format!("/r/run/fspec/switch/{distro}");
-    let top = "/r/run/fspec/switch/top";
-    let mut v = vec![
-        format!("mkdir -p {top}"),
-        format!("mount -o subvolid=5 UUID={UUID} {top}"),
-        format!("test -e {top}/@{distro}"),
-        format!("btrfs subvolume create {top}/@{distro}"),
-        format!("mkdir -p {new}"),
-        format!("mount -o subvol=@{distro} UUID={UUID} {new}"),
-        bootstrap.to_string(),
-        format!("cp -L /r/etc/resolv.conf {new}/etc/resolv.conf"),
-        format!("tee {new}/etc/fstab"),
-        format!("mount --rbind /r/home {new}/home"),
-        format!("mount --make-rslave {new}/home"),
-        format!("mount --rbind /r/dev {new}/dev"),
-        format!("mount --make-rslave {new}/dev"),
-        format!("mount --rbind /r/sys {new}/sys"),
-        format!("mount --make-rslave {new}/sys"),
-        format!("mount -t proc proc {new}/proc"),
-        format!("mkdir -p {new}/var/lib/fspec/spec {new}/usr/local/bin"),
-        format!("cp /usr/bin/fspec {new}/usr/local/bin/fspec"),
-        format!("cp -a /work/spec/. {new}/var/lib/fspec/spec"),
-        format!(
-            "chroot {new} /usr/local/bin/fspec --spec /var/lib/fspec/spec/spec.star apply --local --scope system \
-             --host box"
-        ),
-    ];
-    v.extend(boot.iter().cloned());
-    v.push(format!("umount -R {new}"));
-    v.push(format!("umount {top}"));
-    v
-}
-
-fn copy_kernel(from: &str, stage: &str, kernel: &str, initrd: &str) -> Vec<String> {
-    vec![
-        format!("mkdir -p {stage}"),
-        format!("sh -c 'cp \"$(ls -1 $1 | sort -V | tail -n 1)\" \"$2\"' sh {from}/{kernel} {stage}/vmlinuz"),
-        format!("sh -c 'cp \"$(ls -1 $1 | sort -V | tail -n 1)\" \"$2\"' sh {from}/{initrd} {stage}/initrd"),
-    ]
-}
-
-fn sdboot_tail(distro: &str, kernel: &str, initrd: &str) -> Vec<String> {
-    let from = format!("/r/run/fspec/switch/{distro}");
-    let mut v = copy_kernel(&from, &format!("/r/efi/fspec/{distro}"), kernel, initrd);
-    v.push("mkdir -p /r/efi/loader/entries".into());
-    v.push(format!("tee /r/efi/loader/entries/fspec-{distro}.conf"));
-    v
-}
-
-fn grub_tail(from: &str, distro: &str, kernel: &str, initrd: &str) -> Vec<String> {
-    let mut v = copy_kernel(from, &format!("/r/boot/fspec/{distro}"), kernel, initrd);
-    v.push(format!("tee /r/etc/grub.d/42_fspec_{distro}"));
-    v.push(format!("chmod 755 /r/etc/grub.d/42_fspec_{distro}"));
-    v.push("grub-mkconfig -o /r/boot/grub/grub.cfg".into());
-    v
-}
-
-/// The bootstrap command, with the GRUB packages a BIOS machine needs for `--adopt-boot`.
-fn bootstrap_line(distro: &str, grub: bool) -> String {
-    let root = format!("/r/run/fspec/switch/{distro}");
-    let pkgs = |p: &str| if grub { format!(" {p}") } else { String::new() };
-    match distro {
-        "fedora" => {
-            let mirror = "https://download.fedoraproject.org/pub/fedora/linux";
-            let key = "https://src.fedoraproject.org/rpms/fedora-repos/raw/rawhide/f/RPM-GPG-KEY-fedora-42-primary";
-            format!(
-                "dnf --installroot {root} --releasever 42 -y --setopt=install_weak_deps=False \
-                 --repofrompath=fedora,{mirror}/releases/42/Everything/x86_64/os --setopt=fedora.gpgcheck=1 \
-                 --setopt=fedora.gpgkey={key} --repofrompath=updates,{mirror}/updates/42/Everything/x86_64 \
-                 --setopt=updates.gpgcheck=1 --setopt=updates.gpgkey={key} install systemd dnf fedora-release \
-                 fedora-repos passwd btrfs-progs kernel{}",
-                pkgs("grub2-tools grub2-pc")
-            )
-        }
-        "arch" => format!("pacstrap -K {root} base linux linux-firmware btrfs-progs{}", pkgs("grub")),
-        "debian" => format!(
-            "debootstrap --arch amd64 --include=systemd-sysv,btrfs-progs,linux-image-amd64{} 42 {root}",
-            if grub { ",grub-pc" } else { "" }
-        ),
-        _ => format!(
-            "xbps-install -S -y -r {root} -R https://repo-default.voidlinux.org/current base-system linux btrfs-progs{}",
-            pkgs("grub")
-        ),
-    }
-}
-
-fn globs(distro: &str) -> (&'static str, &'static str) {
-    match distro {
-        "arch" => ("boot/vmlinuz-linux", "boot/initramfs-linux.img"),
-        "debian" => ("boot/vmlinuz-*", "boot/initrd.img-*"),
-        _ => ("boot/vmlinuz-*", "boot/initramfs-*.img"),
     }
 }
 
@@ -170,224 +100,544 @@ fn stdin_of(plan: &crate::Plan, prefix: &str) -> String {
         .unwrap_or_else(|| panic!("no `{prefix}` in {:#?}", plan.lines()))
 }
 
+fn position(lines: &[String], prefix: &str) -> usize {
+    lines.iter().position(|l| l.starts_with(prefix)).unwrap_or_else(|| panic!("no `{prefix}` in {lines:#?}"))
+}
+
 #[test]
-fn every_distro_on_both_bootloaders_plans_the_exact_sequence() {
-    let o = owned();
-    for distro in ["fedora", "arch", "debian", "void"] {
-        let (k, i) = globs(distro);
-        let plan = switch_distro(&paths(), &systemd_boot(), Some(&o), &target(distro)).unwrap();
-        assert_eq!(
-            plan.lines(),
-            expected(distro, &bootstrap_line(distro, false), &sdboot_tail(distro, k, i)),
-            "{distro} sdboot"
-        );
-        let plan = switch_distro(&paths(), &grub(), Some(&o), &target(distro)).unwrap();
-        let from = format!("/r/run/fspec/switch/{distro}");
-        assert_eq!(
-            plan.lines(),
-            expected(distro, &bootstrap_line(distro, true), &grub_tail(&from, distro, k, i)),
-            "{distro} grub"
-        );
+fn classify_reads_the_default_layout() {
+    let m = default_arch();
+    let Layout::Default { esp, btrfs } = &m.layout else { panic!("{:?}", m.layout) };
+    assert_eq!((esp.dev.as_str(), esp.uuid.as_str(), esp.size), ("/dev/vda1", "EEEE-0001", 2 << 30));
+    assert_eq!(btrfs, &Btrfs { uuid: UUID.into(), luks: None, home: "/@home".into() });
+    assert_eq!((m.root.as_str(), m.disk.as_str(), m.firmware.clone()), ("/@arch", "/dev/vda", Firmware::Efi));
+    assert_eq!(m.root_part.partn, 2);
+}
+
+#[test]
+fn classify_finds_the_luks_container_under_btrfs() {
+    let crypt = json!({"name": "/dev/mapper/luks-cccc", "type": "crypt", "fstype": "btrfs", "uuid": UUID,
+        "mountpoints": ["/"]});
+    let luks = json!({"name": "/dev/vda2", "type": "part", "fstype": "crypto_LUKS", "uuid": "cccc", "partn": 2,
+        "size": 40u64 << 30, "mountpoints": [], "children": [crypt]});
+    let mut f = facts("/@arch", lsblk("gpt", vec![esp("/dev/vda1", 1, 2048, &["/efi"]), luks]), true);
+    f.root_mount = "btrfs /dev/mapper/luks-cccc /@arch".into();
+    let m = classify(&f, "arch".into(), String::new()).unwrap();
+    assert_eq!(m.layout.btrfs().unwrap().luks.as_deref(), Some("cccc"));
+    assert_eq!(m.root_part.dev, "/dev/vda2");
+}
+
+#[test]
+fn classify_names_what_keeps_a_disk_off_the_layouts() {
+    // A cloud image: root at the top level, a small ESP at /boot/efi, nothing shared.
+    let l = lsblk("gpt", vec![esp("/dev/vda1", 1, 300, &["/boot/efi"]), btrfs_part("/dev/vda2", 2, &["/"])]);
+    let mut f = facts("/", l, true);
+    f.volumes = vec!["@home".into()];
+    f.fspec = String::new();
+    let m = classify(&f, "arch".into(), String::new()).unwrap();
+    let Layout::Unsupported { reasons } = &m.layout else { panic!("{:?}", m.layout) };
+    assert_eq!(
+        reasons,
+        &[
+            "the root sits at the btrfs top level instead of in @arch",
+            "the shared subvolumes @swap, @snapshots, @fspec are missing",
+            "the ESP is mounted at /boot/efi, not /efi",
+        ]
+    );
+}
+
+#[test]
+fn classify_reads_the_bios_and_zfs_layouts() {
+    let m = bios_debian();
+    let Layout::Bios { boot, .. } = &m.layout else { panic!("{:?}", m.layout) };
+    assert_eq!(boot.uuid, "boot-uuid");
+    let m = zfs_debian();
+    assert_eq!(
+        m.layout,
+        Layout::Zfs {
+            esp: match &m.layout {
+                Layout::Zfs { esp, .. } => esp.clone(),
+                _ => panic!(),
+            },
+            pool: "rpool".into()
+        }
+    );
+    assert_eq!(m.root, "rpool/ROOT/debian");
+}
+
+#[test]
+fn switching_on_the_default_layout_builds_a_uki_root() {
+    let plan = switch_distro(&paths(), &default_arch(), Some("arch"), &target("fedora")).unwrap();
+    let lines = plan.lines();
+    let at = |p: &str| position(&lines, p);
+    assert!(at("mount -o subvolid=5 UUID=1111-aaaa") < at("test -e /r/run/fspec/switch/top/@fedora"));
+    assert!(at("btrfs subvolume create /r/run/fspec/switch/top/@fedora") < at("dnf --installroot"));
+    assert!(lines[at("dnf --installroot")].ends_with("kernel systemd-ukify systemd-boot-unsigned"));
+    assert!(at("tee /r/run/fspec/switch/fedora/etc/kernel/install.conf") < at("mount --rbind /r/efi"));
+    assert!(
+        at("chroot /r/run/fspec/switch/fedora /usr/local/bin/fspec") < at("chroot /r/run/fspec/switch/fedora sh -c")
+    );
+    assert_eq!(
+        stdin_of(&plan, "tee /r/run/fspec/switch/fedora/etc/fstab"),
+        "UUID=1111-aaaa / btrfs subvol=@fedora,compress=zstd 0 0\n\
+         UUID=1111-aaaa /home btrfs subvol=@home,compress=zstd 0 0\n\
+         UUID=1111-aaaa /opt/fspec btrfs subvol=@fspec,compress=zstd 0 0\n\
+         UUID=1111-aaaa /swap btrfs subvol=@swap 0 0\n\
+         /swap/swapfile none swap defaults,nofail 0 0\n\
+         UUID=EEEE-0001 /efi vfat umask=0077 0 2\n"
+    );
+    assert_eq!(
+        stdin_of(&plan, "tee /r/run/fspec/switch/fedora/etc/kernel/cmdline"),
+        "root=UUID=1111-aaaa rootflags=subvol=@fedora rw console=ttyS0,115200\n"
+    );
+    // Boot is already owned, so the default entry stays.
+    assert!(!lines.iter().any(|l| l.contains("loader.conf")));
+    assert_eq!(
+        lines[lines.len() - 3..],
+        ["umount -R /r/run/fspec/switch/fedora", "umount /r/run/fspec/switch/top", "umount /r/run/fspec/switch"]
+    );
+}
+
+#[test]
+fn the_first_switch_keeps_the_running_root_the_default() {
+    let plan = switch_distro(&paths(), &default_arch(), None, &target("void")).unwrap();
+    assert!(plan.lines().iter().any(|l| l.ends_with("sh /r/efi/loader/loader.conf arch")), "{:#?}", plan.lines());
+    let void = stdin_of(&plan, "tee /r/run/fspec/switch/void/etc/kernel.d/post-install/60-fspec");
+    assert!(void.contains("/efi/loader/entries/void-fspec.conf"));
+}
+
+#[test]
+fn switching_on_the_bios_layout_puts_the_kernels_in_the_shared_partition() {
+    let plan = switch_distro(&paths(), &bios_debian(), Some("debian"), &target("arch")).unwrap();
+    let lines = plan.lines();
+    let at = |p: &str| position(&lines, p);
+    assert!(at("mount --bind /r/var/lib/fspec/boot/arch /r/run/fspec/switch/arch/boot") < at("pacstrap"));
+    assert!(lines[at("pacstrap")].ends_with("btrfs-progs grub"));
+    assert!(stdin_of(&plan, "tee /r/run/fspec/switch/arch/etc/fstab").ends_with(
+        "UUID=boot-uuid /var/lib/fspec/boot ext4 defaults 0 2\n/var/lib/fspec/boot/arch /boot none bind 0 0\n"
+    ));
+    assert_eq!(
+        stdin_of(&plan, "tee /r/var/lib/fspec/boot/arch/fspec-cmdline"),
+        "root=UUID=1111-aaaa rootflags=subvol=@arch rw\n"
+    );
+    assert!(lines.iter().any(|l| l.ends_with("sh /r/var/lib/fspec/boot boot-uuid debian")), "{lines:#?}");
+    assert!(!lines.iter().any(|l| l.contains("rbind /r/efi")));
+}
+
+#[test]
+fn switching_on_zfs_makes_a_boot_environment() {
+    let plan = switch_distro(&paths(), &zfs_debian(), Some("debian"), &target("void")).unwrap();
+    let lines = plan.lines();
+    let at = |p: &str| position(&lines, p);
+    assert!(
+        at("zfs list -H -o name rpool/ROOT/void") < at("zfs create -o canmount=noauto -o mountpoint=/ rpool/ROOT/void")
+    );
+    assert!(at("mount -t zfs -o zfsutil rpool/ROOT/void /r/run/fspec/switch/void") < at("xbps-install"));
+    assert!(lines[at("xbps-install")].ends_with("btrfs-progs zfs linux-headers"));
+    assert!(lines.contains(&"cp /r/etc/hostid /r/run/fspec/switch/void/etc/hostid".to_string()));
+    assert!(lines.contains(&"zfs set org.zfsbootmenu:commandline= rpool/ROOT/void".to_string()));
+    assert_eq!(stdin_of(&plan, "tee /r/run/fspec/switch/void/etc/fstab"), "UUID=EEEE-0001 /efi vfat umask=0077 0 2\n");
+}
+
+#[test]
+fn a_switch_the_disk_cannot_take_is_refused_with_the_fix() {
+    let mut m = default_arch();
+    if let Layout::Default { esp, .. } = &mut m.layout {
+        esp.size = 300 << 20;
+    }
+    let err = switch_distro(&paths(), &m, Some("arch"), &target("fedora")).unwrap_err().to_string();
+    assert!(err.contains("the ESP is 300 MiB and fedora needs 1024 MiB; run `fspec disk migrate`"), "{err}");
+    let err = switch_distro(&paths(), &zfs_debian(), Some("debian"), &target("arch")).unwrap_err().to_string();
+    assert!(err.contains("arch ships ZFS only from a third-party repository"), "{err}");
+    let unsupported = Machine { layout: Layout::Unsupported { reasons: vec!["no ESP".into()] }, ..default_arch() };
+    let err = switch_distro(&paths(), &unsupported, None, &target("void")).unwrap_err().to_string();
+    assert!(err.contains("not on a supported layout: no ESP; run `fspec disk plan`"), "{err}");
+    assert!(crate::caveats("debian", &zfs_debian().layout)[0].contains("Secure Boot"));
+    assert!(crate::caveats("ubuntu", &zfs_debian().layout).is_empty());
+}
+
+#[test]
+fn the_kernel_command_line_keeps_the_machine_options_and_adds_luks() {
+    let mut m = default_arch();
+    m.cmdline = "BOOT_IMAGE=/v root=UUID=x ro rootflags=subvol=@old,compress=zstd:1 rd.luks.uuid=old quiet".into();
+    if let Layout::Default { btrfs, .. } = &mut m.layout {
+        btrfs.luks = Some("cccc".into());
+    }
+    let plan = switch_distro(&paths(), &m, Some("arch"), &target("debian")).unwrap();
+    assert_eq!(
+        stdin_of(&plan, "tee /r/run/fspec/switch/debian/etc/kernel/cmdline"),
+        "root=UUID=1111-aaaa rootflags=subvol=@debian,compress=zstd:1 rw rd.luks.uuid=cccc quiet\n"
+    );
+    assert_eq!(
+        stdin_of(&plan, "tee /r/run/fspec/switch/debian/etc/crypttab"),
+        "luks-cccc UUID=cccc none luks,discard,initramfs\n"
+    );
+    let populate = plan.lines().into_iter().find(|l| l.starts_with("chroot /r/run/fspec/switch/debian sh -c")).unwrap();
+    assert!(populate.contains("systemd-ukify systemd-boot-efi cryptsetup cryptsetup-initramfs"), "{populate}");
+    assert!(populate.contains("update-initramfs -c -k"));
+}
+
+#[test]
+fn a_stub_resolver_is_replaced_by_the_upstream_servers() {
+    let plan = switch_distro(&paths(), &default_arch(), Some("arch"), &target("void")).unwrap();
+    let line = plan.lines().into_iter().find(|l| l.contains("resolv.conf")).unwrap();
+    assert!(
+        line.ends_with(
+            "sh /r/etc/resolv.conf /r/run/systemd/resolve/resolv.conf /r/run/fspec/switch/void/etc/resolv.conf"
+        ),
+        "{line}"
+    );
+}
+
+#[test]
+fn forget_refuses_unless_this_root_owns_boot() {
+    let m = default_arch();
+    let err = forget(&paths(), &m, Some("void"), "fedora").unwrap_err().to_string();
+    assert_eq!(err, "boot is owned by void, not this root (arch); run `fspec switch --adopt-boot` from arch first");
+    let err = forget(&paths(), &m, None, "fedora").unwrap_err().to_string();
+    assert!(err.starts_with("no root is recorded as owning boot"));
+    assert!(forget(&paths(), &m, Some("arch"), "arch").unwrap_err().to_string().contains("is the system you booted"));
+}
+
+#[test]
+fn forget_clears_the_roots_boot_files_on_each_layout() {
+    let plan = forget(&paths(), &default_arch(), Some("arch"), "fedora").unwrap();
+    assert_eq!(
+        plan.lines()[5..],
+        [
+            "test -e /r/run/fspec/switch/top/@fedora",
+            r#"sh -c 'rm -rf "$1/$2" "$1"/EFI/Linux/"$2"-*.efi "$1"/loader/entries/"$2"-*.conf' sh /r/efi fedora"#,
+            "btrfs subvolume delete --recursive /r/run/fspec/switch/top/@fedora",
+            "umount /r/run/fspec/switch/top",
+            "umount /r/run/fspec/switch"
+        ]
+    );
+    let lines = forget(&paths(), &bios_debian(), Some("debian"), "arch").unwrap().lines();
+    assert!(lines.contains(&"rm -rf /r/var/lib/fspec/boot/arch".to_string()));
+    assert!(lines.iter().any(|l| l.ends_with("sh /r/var/lib/fspec/boot boot-uuid debian")));
+    assert_eq!(
+        forget(&paths(), &zfs_debian(), Some("debian"), "void").unwrap().lines(),
+        ["zfs list -H -o name rpool/ROOT/void", "zfs destroy -r rpool/ROOT/void"]
+    );
+}
+
+#[test]
+fn adopt_boot_makes_this_root_the_default_on_each_layout() {
+    let lines = adopt_boot(&paths(), &default_arch()).unwrap().lines();
+    assert!(lines[0].ends_with("sh /r/efi/loader/loader.conf arch") && lines[1].contains("bootctl set-default ''"));
+    let lines = adopt_boot(&paths(), &bios_debian()).unwrap().lines();
+    assert_eq!(lines[0], "grub-install --target=i386-pc --boot-directory=/r/var/lib/fspec/boot /dev/vda");
+    assert!(lines[1].ends_with("sh /r/var/lib/fspec/boot boot-uuid debian"));
+    assert_eq!(adopt_boot(&paths(), &zfs_debian()).unwrap().lines(), ["zpool set bootfs=rpool/ROOT/debian rpool"]);
+}
+
+#[test]
+fn the_grub_menu_lists_every_root_folder_with_its_stable_kernel_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let b = dir.path();
+    for (d, files) in [
+        ("arch", vec!["vmlinuz-linux", "initramfs-linux.img"]),
+        ("debian", vec!["vmlinuz", "initrd.img"]),
+        ("void", vec!["vmlinuz"]),
+        ("lost+found", vec![]),
+    ] {
+        std::fs::create_dir_all(b.join(d)).unwrap();
+        for f in files {
+            std::fs::write(b.join(d).join(f), "").unwrap();
+        }
+        std::fs::write(
+            b.join(d).join("fspec-cmdline"),
+            format!("root=UUID=x rootflags=subvol=@{d} rw console=ttyS0\n"),
+        )
+        .unwrap();
+    }
+    std::fs::remove_file(b.join("lost+found/fspec-cmdline")).unwrap();
+    let out = std::process::Command::new("sh")
+        .args(["-c", crate::classic::GRUB_MENU, "sh"])
+        .arg(b)
+        .args(["boot-uuid", "debian"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let cfg = std::fs::read_to_string(b.join("grub/grub.cfg")).unwrap();
+    assert_eq!(std::fs::read_to_string(b.join("grub2/grub.cfg")).unwrap(), cfg);
+    assert!(cfg.starts_with("set timeout=5\nset default=\"fspec-debian\"\nserial --unit=0"), "{cfg}");
+    assert!(cfg.contains(
+        "menuentry 'Arch (fspec)' --id fspec-arch {\n\tsearch --no-floppy --fs-uuid --set=root boot-uuid\n\tlinux \
+         /arch/vmlinuz-linux root=UUID=x rootflags=subvol=@arch rw console=ttyS0\n\tinitrd /arch/initramfs-linux.img\n}"
+    ));
+    assert!(cfg.contains("linux /debian/vmlinuz ") && cfg.contains("initrd /debian/initrd.img"));
+    // Void has no initramfs yet, so it gets no entry.
+    assert!(!cfg.contains("void") && !cfg.contains("lost"));
+}
+
+fn ids() -> Ids {
+    Ids { fs: "ffff".into(), luks: "cccc".into(), serial: "ABCD1234".into(), boot: "bbbb".into() }
+}
+
+#[test]
+fn init_formats_the_default_layout_with_luks() {
+    let ids = ids();
+    let i = Init {
+        device: "/dev/vdb",
+        kind: Kind::Default,
+        luks: true,
+        ids: &ids,
+        swap_gib: 4,
+        efi_vars: false,
+        target: None,
+        cmdline: "",
+    };
+    let plan = init(&paths(), &i).unwrap();
+    assert_eq!(
+        plan.lines(),
+        [
+            "mkdir -p /r/run/fspec/disk",
+            "mount --bind /r/run/fspec/disk /r/run/fspec/disk",
+            "mount --make-private /r/run/fspec/disk",
+            "wipefs -a /dev/vdb",
+            "sgdisk --zap-all /dev/vdb",
+            "sgdisk -n1:0:+2G -t1:ef00 -c1:EFI -n2:0:0 -t2:8309 -c2:root /dev/vdb",
+            "udevadm settle",
+            "wipefs -a /dev/vdb1 /dev/vdb2",
+            "mkfs.vfat -F 32 -n EFI -i ABCD1234 /dev/vdb1",
+            "mkdir -p /r/run/fspec/disk/efi",
+            "mount /dev/vdb1 /r/run/fspec/disk/efi",
+            "cryptsetup luksFormat --type luks2 --uuid cccc /dev/vdb2",
+            "cryptsetup open /dev/vdb2 luks-cccc",
+            "mkfs.btrfs -f -L root -U ffff /dev/mapper/luks-cccc",
+            "mkdir -p /r/run/fspec/disk/top",
+            "mount /dev/mapper/luks-cccc /r/run/fspec/disk/top",
+            "btrfs subvolume create /r/run/fspec/disk/top/@home",
+            "btrfs subvolume create /r/run/fspec/disk/top/@swap",
+            "btrfs subvolume create /r/run/fspec/disk/top/@snapshots",
+            "btrfs subvolume create /r/run/fspec/disk/top/@fspec",
+            "btrfs filesystem mkswapfile --size 4g /r/run/fspec/disk/top/@swap/swapfile",
+            "bootctl --esp-path=/r/run/fspec/disk/efi install --no-variables",
+            "umount /r/run/fspec/disk/efi",
+            "umount /r/run/fspec/disk/top",
+            "cryptsetup close --deferred luks-cccc",
+            "umount /r/run/fspec/disk"
+        ]
+    );
+    assert_eq!(crate::partition("/dev/nvme0n1", 2), "/dev/nvme0n1p2");
+}
+
+#[test]
+fn init_with_a_distro_installs_the_first_root_onto_the_new_disk() {
+    let ids = ids();
+    let t = target("arch");
+    let i = Init {
+        device: "/dev/vdb",
+        kind: Kind::Bios,
+        luks: false,
+        ids: &ids,
+        swap_gib: 2,
+        efi_vars: false,
+        target: Some(&t),
+        cmdline: "console=ttyS0",
+    };
+    let plan = init(&paths(), &i).unwrap();
+    let lines = plan.lines();
+    let at = |p: &str| position(&lines, p);
+    assert_eq!(
+        lines[5],
+        "sgdisk -n1:0:+1M -t1:ef02 -c1:bios -n2:0:+2G -t2:8300 -c2:boot -n3:0:0 -t3:8300 -c3:root /dev/vdb"
+    );
+    assert!(
+        at("mkfs.ext4 -F -L boot -U bbbb /dev/vdb2")
+            < at("grub-install --target=i386-pc --boot-directory=/r/run/fspec/disk/boot /dev/vdb")
+    );
+    assert!(at("mount -o subvol=@arch UUID=ffff /r/run/fspec/disk/arch") < at("pacstrap -K /r/run/fspec/disk/arch"));
+    assert!(lines.contains(&"mount --rbind /r/run/fspec/disk/top/@home /r/run/fspec/disk/arch/home".to_string()));
+    assert_eq!(
+        stdin_of(&plan, "tee /r/run/fspec/disk/boot/arch/fspec-cmdline"),
+        "root=UUID=ffff rootflags=subvol=@arch rw console=ttyS0\n"
+    );
+    assert!(lines[lines.len() - 5].ends_with("sh /r/run/fspec/disk/boot bbbb arch"), "{lines:#?}");
+    assert_eq!(
+        lines[lines.len() - 4..],
+        [
+            "umount -R /r/run/fspec/disk/arch",
+            "umount /r/run/fspec/disk/boot",
+            "umount /r/run/fspec/disk/top",
+            "umount /r/run/fspec/disk"
+        ]
+    );
+}
+
+/// The Arch cloud image the live tests start from: BIOS, root at the top level, an unused ESP.
+fn arch_cloud() -> Machine {
+    let grub = json!({"name": "/dev/vda1", "type": "part", "size": 1u64 << 20, "partuuid": "g",
+        "parttype": "21686148-6449-6e6f-744e-656564454649", "partn": 1, "mountpoints": []});
+    let l = lsblk("gpt", vec![grub, esp("/dev/vda2", 2, 300, &["/efi"]), btrfs_part("/dev/vda3", 3, &["/", "/home"])]);
+    let mut f = facts("/", l, false);
+    f.root_mount = "btrfs /dev/vda3 /".into();
+    f.volumes = vec!["@home".into(), "swap".into()];
+    f.fspec = String::new();
+    classify(&f, "arch".into(), "console=ttyS0".into()).unwrap()
+}
+
+#[test]
+fn migrate_moves_a_bios_cloud_image_onto_the_bios_layout() {
+    let m = arch_cloud();
+    let steps = migrate(&paths(), &m, &Leftovers::default(), &ids(), 4).unwrap();
+    let what: Vec<&str> = steps.iter().map(|s| s.what.as_str()).collect();
+    assert_eq!(
+        what,
+        [
+            "create the shared subvolumes @swap, @snapshots, @fspec",
+            "shrink the btrfs partition by 2 GiB and create the shared boot partition at /dev/vda4",
+            "copy this root into @arch as a snapshot and set up its boot there",
+        ]
+    );
+    assert_eq!(steps.iter().map(|s| s.destructive).collect::<Vec<_>>(), [false, true, false]);
+    let carve = steps[1].plan.lines();
+    let size = (40u64 << 30) - (2 << 30) - (2 << 20);
+    assert_eq!(carve[3], format!("btrfs filesystem resize {} /r/", size - (1 << 20)));
+    assert_eq!(carve[4], "sfdisk --no-reread -N 3 /dev/vda");
+    assert_eq!(stdin_of(&steps[1].plan, "sfdisk"), format!(", {}\n", size / 512));
+    let start = (4198400 + size / 512).div_ceil(2048) * 2048;
+    assert!(carve.contains(&format!("sgdisk -n4:{start}:+2G -t4:8300 -c4:boot /dev/vda")), "{carve:#?}");
+    assert!(carve.contains(&"partx -a -n 4:4 /dev/vda".to_string()));
+    let root = steps[2].plan.lines();
+    assert!(root.contains(&"btrfs subvolume snapshot /r/run/fspec/disk/top /r/run/fspec/disk/top/@arch".to_string()));
+    assert!(root.contains(&"cp -a /r/run/fspec/disk/arch/boot/. /r/var/lib/fspec/boot/arch/".to_string()));
+    assert!(
+        root.contains(&"grub-install --target=i386-pc --boot-directory=/r/var/lib/fspec/boot /dev/vda".to_string())
+    );
+    assert_eq!(
+        stdin_of(&steps[2].plan, "tee /r/var/lib/fspec/boot/arch/fspec-cmdline"),
+        "root=UUID=1111-aaaa rootflags=subvol=@arch rw console=ttyS0\n"
+    );
+}
+
+#[test]
+fn migrate_finishes_a_partition_an_earlier_run_carved() {
+    let mut m = arch_cloud();
+    let made = json!({"name": "/dev/vda4", "type": "part", "size": 2u64 << 30, "partlabel": "boot", "partn": 4,
+        "parttype": "0fc63daf-8483-4772-8e79-3d69d8477de4", "mountpoints": []});
+    m.parts.push(crate::machine::part(&made));
+    let steps = migrate(&paths(), &m, &Leftovers::default(), &ids(), 4).unwrap();
+    assert_eq!(steps[1].what, "format the shared boot partition at /dev/vda4");
+    let lines = steps[1].plan.lines();
+    assert!(!lines.iter().any(|l| l.starts_with("btrfs filesystem resize") || l.starts_with("sgdisk")), "{lines:#?}");
+    assert!(lines.contains(&"mkfs.ext4 -F -L boot -U bbbb /dev/vda4".to_string()));
+}
+
+#[test]
+fn migrate_replaces_a_small_esp_and_keeps_its_identity() {
+    let l = lsblk("gpt", vec![esp("/dev/vda1", 1, 100, &["/boot/efi"]), btrfs_part("/dev/vda2", 2, &["/", "/home"])]);
+    let mut f = facts("/root", l, true);
+    f.home = "/home".into();
+    f.volumes = vec!["root".into(), "home".into()];
+    f.fspec = String::new();
+    let m = classify(&f, "fedora".into(), String::new()).unwrap();
+    let steps = migrate(&paths(), &m, &Leftovers::default(), &ids(), 4).unwrap();
+    assert_eq!(
+        steps[1].what,
+        "shrink the btrfs partition by 2 GiB and create a 2 GiB ESP at /dev/vda3 and move the 100 MiB ESP /dev/vda1 into it"
+    );
+    let lines = steps[1].plan.lines();
+    let at = |p: &str| position(&lines, p);
+    assert!(at("mkfs.vfat -F 32 -n EFI -i EEEE0001 /dev/vda3") < at("cp -a /r/boot/efi/. /r/run/fspec/disk/esp/"));
+    assert!(at("fatlabel -r -i /dev/vda1") < at("sgdisk -u3:esp-guid /dev/vda"));
+    assert!(at("sgdisk -u1:R -t1:8300 -c1:old-esp /dev/vda") < at("sgdisk -u3:esp-guid /dev/vda"));
+    assert_eq!(lines[lines.len() - 2], "mount /dev/vda3 /r/efi");
+    let root = steps[2].plan.lines();
+    assert!(
+        root.contains(&"btrfs subvolume snapshot /r/run/fspec/disk/top/root /r/run/fspec/disk/top/@fedora".to_string())
+    );
+    assert!(root.contains(&"bootctl --esp-path=/r/efi install".to_string()));
+    assert!(stdin_of(&steps[2].plan, "tee /r/run/fspec/disk/fedora/etc/fstab").contains("subvol=home,compress=zstd"));
+}
+
+#[test]
+fn migrate_offers_to_delete_what_the_move_left_behind() {
+    let left = Leftovers { old_root: Some(String::new()), shadowed: vec!["/home".into()] };
+    let steps = migrate(&paths(), &default_arch(), &left, &ids(), 4).unwrap();
+    let what: Vec<(&str, bool)> = steps.iter().map(|s| (s.what.as_str(), s.destructive)).collect();
+    assert_eq!(
+        what,
+        [
+            ("delete the old root's files from the btrfs top level", true),
+            ("delete the copies of /home left under their mounts in @arch", true),
+        ]
+    );
+    let left = Leftovers { old_root: Some("root".into()), shadowed: vec![] };
+    let steps = migrate(&paths(), &default_arch(), &left, &ids(), 4).unwrap();
+    assert!(
+        steps[0].plan.lines().contains(&"btrfs subvolume delete --recursive /r/run/fspec/disk/top/root".to_string())
+    );
+    assert!(migrate(&paths(), &default_arch(), &Leftovers::default(), &ids(), 4).unwrap().is_empty());
+}
+
+#[test]
+fn migrate_sends_ext4_to_a_live_system_and_refuses_luks_shrinks() {
+    let mut m = arch_cloud();
+    m.fstype = "ext4".into();
+    let err = migrate(&paths(), &m, &Leftovers::default(), &ids(), 4).unwrap_err().to_string();
+    assert!(err.contains("boot a live system and run `fspec disk migrate /dev/vda3`"), "{err}");
+    let mut m = arch_cloud();
+    m.luks = Some("cccc".into());
+    let err = migrate(&paths(), &m, &Leftovers::default(), &ids(), 4).unwrap_err().to_string();
+    assert!(err.contains("does not shrink a LUKS container"), "{err}");
+}
+
+#[test]
+fn convert_keeps_the_uuid_and_fixes_the_fstab_type() {
+    let plan = crate::convert(&paths(), "/dev/vdb1", "/dev/vdb", &Firmware::Efi);
+    let lines = plan.lines();
+    assert_eq!(lines[3..5], ["e2fsck -fy /dev/vdb1", "btrfs-convert --uuid copy /dev/vdb1"]);
+    assert!(lines.iter().any(|l| l.starts_with("sed -i -e")));
+    for (from, to) in [
+        ("UUID=abc / ext4 rw,discard,errors=remount-ro 0 1\n", "UUID=abc / btrfs rw,discard 0 0\n"),
+        ("UUID=abc\t/\text4\terrors=remount-ro,noatime\t0\t1\n", "UUID=abc\t/\tbtrfs\tnoatime\t0\t0\n"),
+        ("UUID=E /boot/efi vfat defaults 0 1\n", "UUID=E /boot/efi vfat defaults 0 1\n"),
+        ("UUID=h /home ext4 errors=remount-ro 0 2\n", "UUID=h /home ext4 errors=remount-ro 0 2\n"),
+    ] {
+        let mut sed = std::process::Command::new("sed");
+        for e in crate::disk::FSTAB_SED {
+            sed.args(["-e", e]);
+        }
+        let out = sed.stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).spawn().unwrap();
+        use std::io::Write;
+        out.stdin.as_ref().unwrap().write_all(from.as_bytes()).unwrap();
+        let out = out.wait_with_output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert_eq!(String::from_utf8(out.stdout).unwrap(), to);
     }
 }
 
 #[test]
-fn efi_grub_bootstraps_the_efi_packages() {
-    let mut m = grub();
-    m.firmware = Firmware::Efi;
-    let plan = switch_distro(&paths(), &m, Some(&owned()), &target("debian")).unwrap();
-    assert!(plan.lines()[6].contains("linux-image-amd64,grub-efi-amd64 "), "{}", plan.lines()[6]);
-    let plan = switch_distro(&paths(), &m, Some(&owned()), &target("arch")).unwrap();
-    assert!(plan.lines()[6].ends_with(" grub efibootmgr"), "{}", plan.lines()[6]);
+fn rooted_runs_assume_the_default_layout() {
+    let m = assumed("arch");
+    assert!(matches!(m.layout, Layout::Default { .. }));
+    assert_eq!(m.root, "/@arch");
 }
 
 #[test]
-fn the_first_switch_records_the_running_root_as_the_boot_owner() {
-    let plan = switch_distro(&paths(), &grub(), None, &target("void")).unwrap();
-    let marker = "tee /r/run/fspec/switch/top/.fspec-boot-owner";
-    assert_eq!(plan.lines()[3], marker);
-    assert_eq!(stdin_of(&plan, marker), "/@\n\n");
-    let plan = switch_distro(&paths(), &grub(), Some(&owned()), &target("void")).unwrap();
-    assert!(!plan.lines().iter().any(|l| l == marker));
-}
-
-#[test]
-fn a_grub_switch_from_a_root_that_does_not_own_boot_is_refused() {
-    let other = Owner { subvol: "/@arch".into(), distro: "arch".into(), cmdline: String::new() };
-    let err = switch_distro(&paths(), &grub(), Some(&other), &target("void")).unwrap_err().to_string();
-    assert!(err.contains("owned by the root /@arch") && err.contains("--adopt-boot` from /@ first"), "{err}");
-    assert!(switch_distro(&paths(), &systemd_boot(), Some(&other), &target("void")).is_ok());
-}
-
-#[test]
-fn void_bootstrap_sets_the_architecture() {
-    let plan = switch_distro(&paths(), &systemd_boot(), Some(&owned()), &target("void")).unwrap();
-    let crate::Step::Run(cmd) = &plan.steps[6] else { panic!("not a run step") };
-    assert_eq!(cmd.env, [("XBPS_ARCH".to_string(), "x86_64".to_string())]);
-    assert_eq!(cmd.stdin.as_deref(), Some("y\n"));
-}
-
-#[test]
-fn the_chroot_apply_gets_a_path_with_sbin() {
-    let plan = switch_distro(&paths(), &systemd_boot(), Some(&owned()), &target("debian")).unwrap();
-    let chroot = plan.steps.iter().find_map(|s| match s {
-        crate::Step::Run(c) if c.program == "chroot" => Some(c),
-        _ => None,
-    });
-    let path = chroot.unwrap().env.iter().find(|(k, _)| k == "PATH").map(|(_, v)| v.as_str());
-    assert!(path.unwrap().split(':').any(|d| d == "/usr/sbin"));
-}
-
-#[test]
-fn debian_defaults_to_stable_and_maps_the_architecture() {
-    let mut t = target("debian");
-    t.release = None;
-    t.arch = "aarch64";
-    let plan = switch_distro(&paths(), &systemd_boot(), Some(&owned()), &t).unwrap();
-    assert_eq!(
-        plan.lines()[6],
-        "debootstrap --arch arm64 --include=systemd-sysv,btrfs-progs,linux-image-arm64 stable \
-         /r/run/fspec/switch/debian"
-    );
-}
-
-#[test]
-fn fedora_without_a_release_is_refused_before_anything_is_planned() {
-    let mut t = target("fedora");
-    t.release = None;
-    let err = switch_distro(&paths(), &systemd_boot(), Some(&owned()), &t).unwrap_err();
-    assert!(err.to_string().contains("--release"), "{err}");
-    assert!(switch_distro(&paths(), &systemd_boot(), Some(&owned()), &target("ubuntu")).is_err());
-}
-
-#[test]
-fn fstab_shares_home_and_boot_and_the_boot_entries_name_the_new_subvolume() {
-    let plan = switch_distro(&paths(), &systemd_boot(), Some(&owned()), &target("void")).unwrap();
-    assert_eq!(
-        stdin_of(&plan, "tee /r/run/fspec/switch/void/etc/fstab"),
-        format!(
-            "UUID={UUID} / btrfs subvol=@void,compress=zstd 0 0\nUUID={UUID} /home btrfs subvol=@home,compress=zstd 0 \
-             0\nUUID=EEEE-0001 /efi vfat umask=0077 0 2\n"
-        )
-    );
-    assert_eq!(
-        stdin_of(&plan, "tee /r/efi/loader/entries/fspec-void.conf"),
-        format!(
-            "title Void (fspec)\nlinux /fspec/void/vmlinuz\ninitrd /fspec/void/initrd\noptions root=UUID={UUID} \
-             rootflags=subvol=@void rw\n"
-        )
-    );
-
-    let plan = switch_distro(&paths(), &grub(), Some(&owned()), &target("void")).unwrap();
-    let script = stdin_of(&plan, "tee /r/etc/grub.d/42_fspec_void");
-    assert!(script.starts_with("#!/bin/sh\nexec tail -n +3 $0\nmenuentry 'Void (fspec)'"));
-    assert!(script.contains(&format!("search --no-floppy --fs-uuid --set=root {UUID}")));
-    assert!(script.contains("linux /@/boot/fspec/void/vmlinuz root=UUID=1111-aaaa rootflags=subvol=@void rw"));
-}
-
-#[test]
-fn grub_finds_kernels_on_a_separate_boot_and_at_the_top_level() {
-    let mut m = grub();
-    m.boot_mounts = vec![mount("/boot", "BBBB-0002", "ext4")];
-    let plan = switch_distro(&paths(), &m, Some(&owned()), &target("void")).unwrap();
-    assert!(
-        stdin_of(&plan, "tee /r/run/fspec/switch/void/etc/fstab").ends_with("UUID=BBBB-0002 /boot ext4 defaults 0 2\n")
-    );
-    let script = stdin_of(&plan, "tee /r/etc/grub.d/42_fspec_void");
-    assert!(script.contains("search --no-floppy --fs-uuid --set=root BBBB-0002"), "{script}");
-    assert!(script.contains("linux /fspec/void/vmlinuz "), "{script}");
-
-    let mut m = grub();
-    m.root_subvol = "/".into();
-    let top = Owner { subvol: "/".into(), distro: "arch".into(), cmdline: String::new() };
-    let plan = switch_distro(&paths(), &m, Some(&top), &target("void")).unwrap();
-    assert!(stdin_of(&plan, "tee /r/etc/grub.d/42_fspec_void").contains("linux /boot/fspec/void/vmlinuz "));
-}
-
-#[test]
-fn an_existing_subvolume_stops_the_switch_and_still_unmounts() {
-    let plan = switch_distro(&paths(), &systemd_boot(), Some(&owned()), &target("arch")).unwrap();
-    let runner = RecordingRunner::default();
-    runner.respond("test -e", Output::default());
-    let err = plan.execute(&runner).unwrap_err();
-    assert!(err.to_string().contains("fspec forget arch"), "{err}");
-    let lines = runner.lines();
-    assert!(!lines.iter().any(|l| l.starts_with("btrfs subvolume create")));
-    assert_eq!(lines[lines.len() - 2..], ["umount -R /r/run/fspec/switch/arch", "umount /r/run/fspec/switch/top"]);
-}
-
-#[test]
-fn a_failing_step_stops_the_plan_and_reports_the_command() {
-    let plan = switch_distro(&paths(), &systemd_boot(), Some(&owned()), &target("arch")).unwrap();
-    let runner = RecordingRunner::default();
-    runner.respond("test -e", Output { status: 1, ..Output::default() });
-    runner.respond("pacstrap", Output { status: 2, stdout: String::new(), stderr: "no space".into() });
-    let err = plan.execute(&runner).unwrap_err();
-    assert!(err.to_string().contains("pacstrap") && err.to_string().contains("no space"), "{err}");
-    assert!(runner.lines().iter().all(|l| !l.starts_with("chroot")));
+fn every_part_keeps_its_partition_number() {
+    let m = default_arch();
+    assert_eq!(m.parts.iter().map(|p: &Part| p.partn).collect::<Vec<_>>(), [1, 2]);
 }
 
 fn answer(r: &RecordingRunner, prefix: &str, status: i32, stdout: &str) {
     r.respond(prefix, Output { status, stdout: stdout.into(), stderr: String::new() });
 }
 
-fn btrfs_host(r: &RecordingRunner) {
-    answer(r, "findmnt -no FSTYPE,UUID,FSROOT -T /r", 0, "btrfs 1111-aaaa /@\n");
-    answer(r, "findmnt -no FSROOT -T /r/home", 0, "/@home\n");
-}
-
 #[test]
-fn detect_reads_systemd_boot_from_the_esp() {
-    let r = RecordingRunner::default();
-    let dir = tempfile::tempdir().unwrap();
-    let at = |p: &str| dir.path().join(p);
-    std::fs::create_dir_all(at("etc")).unwrap();
-    std::fs::create_dir_all(at("efi/EFI/systemd")).unwrap();
-    std::fs::create_dir_all(at("efi/loader/entries")).unwrap();
-    std::fs::write(at("etc/os-release"), "ID=fedora\n").unwrap();
-    std::fs::write(at("efi/loader/loader.conf"), "timeout 3\ndefault fspec-void.conf\n").unwrap();
-    std::fs::write(at("efi/loader/entries/fspec-void.conf"), "options rootflags=subvol=@void rw\n").unwrap();
-    let p = Paths::new(dir.path().into(), at("home/u"));
-    let root = dir.path().display().to_string();
-    answer(&r, &format!("findmnt -no FSTYPE,UUID,FSROOT -T {root}"), 0, "btrfs 1111-aaaa /@\n");
-    answer(&r, &format!("findmnt -no FSROOT -T {root}/home"), 0, "/@home\n");
-    answer(&r, &format!("findmnt -no UUID,FSTYPE {root}/efi"), 0, "EEEE-0001 vfat\n");
-    let m = detect(&r, &p).unwrap();
-    assert_eq!(
-        m,
-        Machine {
-            uuid: UUID.into(),
-            root_subvol: "/@".into(),
-            home_subvol: "/@home".into(),
-            bootloader: Bootloader::SystemdBoot {
-                esp: "/efi".into(),
-                default: Some("options rootflags=subvol=@void rw\n".into())
-            },
-            running: "fedora".into(),
-            boot_mounts: vec![mount("/efi", "EEEE-0001", "vfat")],
-            firmware: Firmware::Efi,
-            cmdline: String::new(),
-        }
-    );
+fn a_failing_step_stops_the_plan_and_reports_the_command() {
+    let plan = switch_distro(&paths(), &default_arch(), Some("arch"), &target("void")).unwrap();
+    let runner = RecordingRunner::default();
+    answer(&runner, "test -e", 1, "");
+    runner.respond("xbps-install", Output { status: 2, stdout: String::new(), stderr: "no space".into() });
+    let err = plan.execute(&runner).unwrap_err();
+    assert!(err.to_string().contains("xbps-install") && err.to_string().contains("no space"), "{err}");
+    assert!(runner.lines().iter().all(|l| !l.starts_with("chroot")));
+    assert_eq!(runner.lines().last().unwrap(), "umount /r/run/fspec/switch");
 }
 
-#[test]
-fn detect_falls_back_to_grub_and_its_fedora_spelling() {
-    let r = RecordingRunner::default();
-    btrfs_host(&r);
-    answer(&r, "test -d /r/boot/grub2", 0, "");
-    let m = detect(&r, &paths()).unwrap();
-    assert_eq!(m.bootloader, Bootloader::Grub { mkconfig: "grub2-mkconfig", cfg: "/boot/grub2/grub.cfg" });
-
-    let r = RecordingRunner::default();
-    btrfs_host(&r);
-    answer(&r, "test -d /r/boot/grub2", 1, "");
-    answer(&r, "grub2-mkconfig", 1, "");
-    let m = detect(&r, &paths()).unwrap();
-    assert_eq!(m.bootloader, Bootloader::Grub { mkconfig: "grub-mkconfig", cfg: "/boot/grub/grub.cfg" });
-}
-
-/// Fails to spawn `program`, as the live runner does when it is not installed.
 struct Missing<'a>(&'a RecordingRunner, &'static str);
 
 impl fspec_core::runner::Runner for Missing<'_> {
@@ -401,204 +651,9 @@ impl fspec_core::runner::Runner for Missing<'_> {
 }
 
 #[test]
-fn detect_finds_grub_in_a_root_that_never_installed_it_by_its_tools() {
-    let r = RecordingRunner::default();
-    btrfs_host(&r);
-    answer(&r, "test -d /r/boot", 1, "");
-    let m = detect(&Missing(&r, "grub2-mkconfig"), &paths()).unwrap();
-    assert_eq!(m.bootloader, Bootloader::Grub { mkconfig: "grub-mkconfig", cfg: "/boot/grub/grub.cfg" });
-}
-
-#[test]
 fn a_machine_without_bootc_is_not_a_bootc_deployment() {
     let r = RecordingRunner::default();
     assert!(!crate::is_bootc(&Missing(&r, "bootc")).unwrap());
-}
-
-#[test]
-fn detect_reads_the_bios_boot_disk() {
-    let r = RecordingRunner::default();
-    btrfs_host(&r);
-    answer(&r, "test -d /r/boot/grub2", 0, "");
-    answer(&r, "test -d /r/sys/firmware/efi", 1, "");
-    answer(&r, "findmnt -nvo SOURCE -T /r", 0, "/dev/vda3\n");
-    answer(&r, "lsblk -ndpo PKNAME /dev/vda3", 0, "/dev/vda\n");
-    assert_eq!(detect(&r, &paths()).unwrap().firmware, Firmware::Bios { disk: "/dev/vda".into() });
-}
-
-#[test]
-fn detect_refuses_non_btrfs_roots_and_bad_layouts() {
-    let r = RecordingRunner::default();
-    answer(&r, "findmnt -no FSTYPE,UUID,FSROOT", 0, "ext4 2222-bbbb /\n");
-    let err = detect(&r, &paths()).unwrap_err().to_string();
-    assert!(err.contains("ext4, not btrfs"), "{err}");
-    assert!(r.lines().len() == 1, "nothing else probed: {:?}", r.lines());
-
-    let r = RecordingRunner::default();
-    answer(&r, "findmnt -no FSTYPE,UUID,FSROOT", 0, "btrfs 1111-aaaa /@\n");
-    answer(&r, "findmnt -no FSROOT", 0, "/@\n");
-    let err = detect(&r, &paths()).unwrap_err().to_string();
-    assert!(err.contains("/home is not its own btrfs subvolume"), "{err}");
-
-    let r = RecordingRunner::default();
-    btrfs_host(&r);
-    answer(&r, "test -d", 1, "");
-    answer(&r, "grub2-mkconfig", 1, "");
-    answer(&r, "grub-mkconfig", 1, "");
-    let err = detect(&r, &paths()).unwrap_err().to_string();
-    assert!(err.contains("found neither systemd-boot"), "{err}");
-}
-
-#[test]
-fn forget_deletes_the_subvolume_and_entry_on_each_bootloader() {
-    let plan = forget(&paths(), &systemd_boot(), Some(&owned()), "void").unwrap();
-    assert_eq!(
-        plan.lines(),
-        [
-            "mkdir -p /r/run/fspec/switch/top",
-            "mount -o subvolid=5 UUID=1111-aaaa /r/run/fspec/switch/top",
-            "test -e /r/run/fspec/switch/top/@void",
-            "rm -rf /r/efi/fspec/void",
-            "rm -f /r/efi/loader/entries/fspec-void.conf",
-            "btrfs subvolume delete --recursive /r/run/fspec/switch/top/@void",
-            "umount /r/run/fspec/switch/top",
-        ]
-    );
-    let plan = forget(&paths(), &grub(), Some(&owned()), "arch").unwrap();
-    assert_eq!(
-        plan.lines()[3..],
-        [
-            "rm -rf /r/boot/fspec/arch",
-            "rm -f /r/etc/grub.d/42_fspec_arch",
-            "grub-mkconfig -o /r/boot/grub/grub.cfg",
-            r#"sh -c 'rm -rf "$1"/etc/grub.d/42_fspec_"$2" "$1"/*/etc/grub.d/42_fspec_"$2" "$1"/boot/fspec/"$2" "$1"/*/boot/fspec/"$2"' sh /r/run/fspec/switch/top arch"#,
-            "btrfs subvolume delete --recursive /r/run/fspec/switch/top/@arch",
-            "umount /r/run/fspec/switch/top",
-        ]
-    );
-}
-
-#[test]
-fn forget_refuses_the_booted_root() {
-    let err = forget(&paths(), &systemd_boot(), Some(&owned()), "fedora").unwrap_err().to_string();
-    assert!(err.contains("fedora is the system you booted"), "{err}");
-
-    let mut m = systemd_boot();
-    m.running = String::new();
-    m.root_subvol = "/@void".into();
-    assert!(forget(&paths(), &m, Some(&owned()), "void").unwrap_err().to_string().contains("booted"));
-    assert!(forget(&paths(), &m, Some(&owned()), "gentoo").unwrap_err().to_string().contains("not a distro"));
-}
-
-#[test]
-fn forget_refuses_unless_this_root_owns_boot() {
-    let other = Owner { subvol: "/@void".into(), distro: "void".into(), cmdline: String::new() };
-    for m in [systemd_boot(), grub()] {
-        let err = forget(&paths(), &m, Some(&other), "void").unwrap_err().to_string();
-        assert!(err.contains("owned by the root /@void") && err.contains("--adopt-boot` from /@ first"), "{err}");
-        let err = forget(&paths(), &m, None, "arch").unwrap_err().to_string();
-        assert!(err.contains("no root is recorded as owning boot"), "{err}");
-    }
-
-    let mut m = systemd_boot();
-    m.bootloader =
-        Bootloader::SystemdBoot { esp: "/efi".into(), default: Some("options rootflags=subvol=@void\n".into()) };
-    let err = forget(&paths(), &m, Some(&owned()), "void").unwrap_err().to_string();
-    assert!(err.contains("default systemd-boot entry boots @void"), "{err}");
-    assert!(forget(&paths(), &m, Some(&owned()), "arch").is_ok());
-}
-
-#[test]
-fn forget_stops_when_the_subvolume_is_missing() {
-    let plan = forget(&paths(), &systemd_boot(), Some(&owned()), "void").unwrap();
-    let runner = RecordingRunner::default();
-    runner.respond("test -e", Output { status: 1, ..Output::default() });
-    let err = plan.execute(&runner).unwrap_err();
-    assert!(err.to_string().contains("no @void subvolume"), "{err}");
-    assert!(runner.lines().iter().all(|l| !l.starts_with("btrfs") && !l.starts_with("rm")));
-}
-
-/// Debian in `@debian`, switched to from the Arch root at the top level, which owns boot.
-fn debian_on(m: Machine) -> (Machine, Owner) {
-    let m = Machine { root_subvol: "/@debian".into(), running: "debian".into(), ..m };
-    (m, Owner { subvol: "/".into(), distro: "arch".into(), cmdline: String::new() })
-}
-
-#[test]
-fn adopt_boot_under_bios_grub_installs_grub_and_lists_the_old_root() {
-    let (m, old) = debian_on(grub());
-    let plan = adopt_boot(&paths(), &m, Some(&old), "debian", "x86_64").unwrap();
-    let top = "/r/run/fspec/switch/top";
-    let mut want = vec![
-        format!("mkdir -p {top}"),
-        format!("mount -o subvolid=5 UUID={UUID} {top}"),
-        "grub-install --target=i386-pc /dev/vda".into(),
-    ];
-    want.extend(grub_tail(top, "arch", "boot/vmlinuz-linux", "boot/initramfs-linux.img"));
-    want.push(format!("tee {top}/.fspec-boot-owner"));
-    want.push(format!("umount {top}"));
-    assert_eq!(plan.lines(), want);
-    let script = stdin_of(&plan, "tee /r/etc/grub.d/42_fspec_arch");
-    assert!(script.contains("linux /@debian/boot/fspec/arch/vmlinuz root=UUID=1111-aaaa rootflags=subvol=/ rw"));
-    assert_eq!(stdin_of(&plan, "tee /r/run/fspec/switch/top/.fspec-boot-owner"), "/@debian\n\n");
-}
-
-#[test]
-fn the_old_root_entry_keeps_its_recorded_kernel_options() {
-    let (mut m, mut old) = debian_on(grub());
-    m.cmdline = "BOOT_IMAGE=/@debian/boot/vmlinuz root=UUID=1111-aaaa rootflags=subvol=@debian rw".into();
-    old.cmdline = "BOOT_IMAGE=/boot/vmlinuz-linux root=UUID=1111-aaaa ro rootflags=compress=zstd:1 net.ifnames=0 \
-                   console=ttyS0,115200"
-        .into();
-    let plan = adopt_boot(&paths(), &m, Some(&old), "debian", "x86_64").unwrap();
-    let script = stdin_of(&plan, "tee /r/etc/grub.d/42_fspec_arch");
-    assert!(
-        script
-            .contains("root=UUID=1111-aaaa rootflags=subvol=/,compress=zstd:1 rw net.ifnames=0 console=ttyS0,115200\n")
-    );
-    assert_eq!(stdin_of(&plan, "tee /r/run/fspec/switch/top/.fspec-boot-owner"), format!("/@debian\n{}\n", m.cmdline));
-}
-
-#[test]
-fn adopt_boot_under_efi_grub_installs_to_the_esp() {
-    let (mut m, old) = debian_on(grub());
-    m.firmware = Firmware::Efi;
-    assert!(
-        adopt_boot(&paths(), &m, Some(&old), "debian", "x86_64").unwrap_err().to_string().contains("no ESP is mounted")
-    );
-    m.boot_mounts = vec![mount("/boot/efi", "EEEE-0001", "vfat")];
-    let plan = adopt_boot(&paths(), &m, Some(&old), "debian", "x86_64").unwrap();
-    assert_eq!(
-        plan.lines()[2],
-        "grub-install --target=x86_64-efi --efi-directory=/r/boot/efi --bootloader-id=fspec-debian"
-    );
-
-    m.bootloader = Bootloader::Grub { mkconfig: "grub2-mkconfig", cfg: "/boot/grub2/grub.cfg" };
-    let plan = adopt_boot(&paths(), &m, Some(&old), "debian", "aarch64").unwrap();
-    assert!(plan.lines()[2].starts_with("grub2-install --target=arm64-efi") && plan.lines()[2].ends_with(" --force"));
-}
-
-#[test]
-fn adopt_boot_by_the_owner_only_regenerates_its_config() {
-    let plan = adopt_boot(&paths(), &grub(), Some(&owned()), "fedora", "x86_64").unwrap();
-    assert_eq!(
-        plan.lines()[2..4],
-        ["grub-install --target=i386-pc /dev/vda", "grub-mkconfig -o /r/boot/grub/grub.cfg"]
-    );
-}
-
-#[test]
-fn adopt_boot_under_systemd_boot_makes_this_root_the_default() {
-    let (m, old) = debian_on(systemd_boot());
-    let plan = adopt_boot(&paths(), &m, Some(&old), "debian", "x86_64").unwrap();
-    let lines = plan.lines();
-    assert_eq!(
-        lines[3],
-        "sh -c 'cp \"$(ls -1 $1 | sort -V | tail -n 1)\" \"$2\"' sh /r/boot/vmlinuz-* /r/efi/fspec/debian/vmlinuz"
-    );
-    assert!(stdin_of(&plan, "tee /r/efi/loader/entries/fspec-debian.conf").contains("rootflags=subvol=@debian rw"));
-    assert!(lines.iter().any(|l| l.contains("/r/efi/loader/loader.conf fspec-debian.conf")), "{lines:#?}");
-    assert!(lines.iter().any(|l| l.contains("bootctl set-default") && l.ends_with("sh fspec-debian.conf")));
 }
 
 #[test]
@@ -695,22 +750,31 @@ fn to_image_runs_bootc_from_the_image_itself() {
 }
 
 #[test]
-fn rooted_runs_assume_systemd_boot_on_btrfs() {
-    let m = assumed();
-    assert!(matches!(m.bootloader, Bootloader::SystemdBoot { .. }));
-    let own = Owner { subvol: m.root_subvol.clone(), distro: String::new(), cmdline: String::new() };
-    assert!(forget(&paths(), &m, Some(&own), "void").is_ok());
-}
-
-#[test]
-fn boot_owner_reads_the_subvolume_and_the_kernel_options() {
-    let r = RecordingRunner::default();
-    let top = "/r/run/fspec/switch/owner";
-    answer(&r, &format!("cat {top}/.fspec-boot-owner"), 0, "/\nroot=UUID=1111-aaaa net.ifnames=0\n");
-    answer(&r, &format!("cat {top}/etc/os-release"), 0, "ID=arch\n");
-    let owner = crate::boot_owner(&r, &paths(), &grub()).unwrap().unwrap();
-    assert_eq!(
-        owner,
-        Owner { subvol: "/".into(), distro: "arch".into(), cmdline: "root=UUID=1111-aaaa net.ifnames=0".into() }
-    );
+fn populate_adds_the_update_and_security_pockets() {
+    let dir = tempfile::tempdir().unwrap();
+    let list = dir.path().join("sources.list");
+    for (distro, release, security) in [
+        ("ubuntu", "deb http://archive.ubuntu.com/ubuntu noble main universe\n", "http://archive.ubuntu.com/ubuntu"),
+        (
+            "debian",
+            "deb http://deb.debian.org/debian stable main contrib\n",
+            "http://security.debian.org/debian-security",
+        ),
+    ] {
+        std::fs::write(&list, release).unwrap();
+        let script = crate::recipe::populate(distro, "x86_64", crate::recipe::Boot::Zbm, false);
+        let sources =
+            script.split("\nexport").next().unwrap().replace("/etc/apt/sources.list", &list.display().to_string());
+        let out = std::process::Command::new("sh").arg("-c").arg(&sources).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let (_, mirror_suite) = release.trim_end().split_once(' ').unwrap();
+        let (mirror, rest) = mirror_suite.split_once(' ').unwrap();
+        let (suite, comps) = rest.split_once(' ').unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&list).unwrap(),
+            format!(
+                "deb {mirror} {suite} {comps}\ndeb {mirror} {suite}-updates {comps}\ndeb {security} {suite}-security {comps}\n"
+            )
+        );
+    }
 }

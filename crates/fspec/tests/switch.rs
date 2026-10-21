@@ -52,7 +52,7 @@ fn a_rooted_distro_switch_only_logs_the_plan() {
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let lines = log(dir.path());
     let root = dir.path().join("root").display().to_string();
-    assert!(lines[0].starts_with(&format!("mkdir -p {root}/run/fspec/switch/top")), "{lines:?}");
+    assert!(lines[3].starts_with(&format!("mkdir -p {root}/run/fspec/switch/top")), "{lines:?}");
     assert!(lines.iter().any(|l| l.starts_with("xbps-install -S -y -r")));
     assert!(lines.iter().any(|l| l.contains("apply --local --scope system --host void")));
 }
@@ -95,15 +95,14 @@ fn adopt_boot_logs_the_new_default_entry() {
     let out = fspec(dir.path(), &["switch", "--adopt-boot", "--host", "void"]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let lines = log(dir.path());
-    assert!(lines.iter().any(|l| l.ends_with("loader/entries/fspec-void.conf")), "{lines:?}");
-    assert!(lines.last().unwrap().ends_with("/run/fspec/switch/top"));
+    assert!(lines[0].ends_with("/root/efi/loader/loader.conf void"), "{lines:?}");
     assert!(!fspec(dir.path(), &["switch", "--adopt-boot", "--host", "box"]).status.success());
 }
 
 #[test]
-fn forget_logs_the_delete_and_rejects_unknown_distros() {
+fn forget_needs_a_live_disk_and_rejects_unknown_distros() {
     let dir = setup();
-    assert!(fspec(dir.path(), &["forget", "arch"]).status.success());
-    assert!(log(dir.path()).iter().any(|l| l.contains("btrfs subvolume delete --recursive") && l.ends_with("@arch")));
+    let out = fspec(dir.path(), &["forget", "arch"]);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("only runs on a live system"));
     assert!(!fspec(dir.path(), &["forget", "gentoo"]).status.success());
 }

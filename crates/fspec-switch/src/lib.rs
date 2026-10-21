@@ -4,8 +4,10 @@
 mod adopt;
 mod bootc;
 mod classic;
+mod disk;
 mod forget;
 mod machine;
+mod recipe;
 #[cfg(test)]
 mod tests;
 
@@ -15,11 +17,13 @@ use fspec_core::runner::{Cmd, Runner};
 pub use adopt::adopt_boot;
 pub use bootc::{ResetVar, has_staged, is_bootc, reset_var, to_image};
 pub use classic::{Target, switch_distro, title};
+pub use disk::*;
 pub use forget::forget;
-pub use machine::{BootMount, Bootloader, Firmware, Machine, Owner, assumed, boot_owner, detect};
+pub use machine::{Btrfs, Facts, Firmware, Layout, Machine, Part, assumed, boot_owner, classify, detect};
+pub use recipe::{Recipe, caveats, misfit, recipe};
 
 /// The distros `fspec switch --distro` can bootstrap.
-pub const DISTROS: [&str; 4] = ["fedora", "arch", "debian", "void"];
+pub const DISTROS: [&str; 5] = ["fedora", "arch", "debian", "ubuntu", "void"];
 
 /// The runner could not start the program because it is not installed.
 pub(crate) fn not_installed(e: &anyhow::Error) -> bool {
@@ -55,6 +59,21 @@ impl Plan {
 
     pub(crate) fn expect(&mut self, probe: Cmd, ok: bool, msg: impl Into<String>) {
         self.steps.push(Step::Expect { probe, ok, msg: msg.into() });
+    }
+
+    /// The plan with `dir` mounted on itself as a private mount around it. What the plan mounts
+    /// under `dir` then stays out of the namespaces of services that start meanwhile, where a copy
+    /// would keep the filesystem busy after the plan unmounts it.
+    pub(crate) fn private(mut self, dir: &str) -> Plan {
+        let mut steps = vec![
+            Step::Run(Cmd::new("mkdir").arg("-p").arg(dir)),
+            Step::Run(Cmd::new("mount").arg("--bind").arg(dir).arg(dir)),
+            Step::Run(Cmd::new("mount").arg("--make-private").arg(dir)),
+        ];
+        steps.append(&mut self.steps);
+        self.steps = steps;
+        self.cleanup.push(Cmd::new("umount").arg(dir));
+        self
     }
 
     /// Every command in execution order, probes and cleanup included.

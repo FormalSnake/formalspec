@@ -462,6 +462,10 @@ fn builtins(builder: &mut GlobalsBuilder) {
         distro_("debian", "systemd", kwargs)
     }
 
+    fn ubuntu<'v>(#[starlark(kwargs)] kwargs: Value<'v>) -> anyhow::Result<Resource_> {
+        distro_("ubuntu", "systemd", kwargs)
+    }
+
     fn void<'v>(#[starlark(kwargs)] kwargs: Value<'v>) -> anyhow::Result<Resource_> {
         distro_("void", "runit", kwargs)
     }

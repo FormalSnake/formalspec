@@ -4,12 +4,9 @@ use anyhow::{Result, bail};
 use fspec_core::Paths;
 use fspec_core::runner::Cmd;
 
-use crate::machine::{Bootloader, Firmware, Machine, OWNER_FILE, Owner, owner_record, subvol_arg};
-use crate::{DISTROS, Plan, subvol};
-
-/// Where fspec stages the kernel and initramfs of a switched-to distro, relative to the boot
-/// directory (the ESP, or the host's `/boot` under GRUB).
-const STAGE: &str = "fspec";
+use crate::machine::{Layout, Machine, SHARED_BOOT};
+use crate::recipe::{Boot, boot_files, bootstrap, misfit, populate, recipe};
+use crate::{Plan, subvol};
 
 /// What `switch --distro` builds. The host's `system` already declares `distro`, so the apply
 /// inside the new root installs the packages that block names.
@@ -18,7 +15,7 @@ pub struct Target<'a> {
     pub host: &'a str,
     /// `x86_64` or `aarch64`.
     pub arch: &'a str,
-    /// Fedora release number or Debian suite. Fedora needs it, Debian defaults to `stable`.
+    /// Fedora release number, or Debian or Ubuntu suite. Fedora needs it.
     pub release: Option<&'a str>,
     pub spec_dir: &'a Path,
     pub spec_file: &'a str,
@@ -26,7 +23,7 @@ pub struct Target<'a> {
     pub exe: &'a Path,
 }
 
-fn s(p: &Path) -> String {
+pub(crate) fn s(p: &Path) -> String {
     p.display().to_string()
 }
 
@@ -35,121 +32,11 @@ pub(crate) struct Mounts {
     pub root: String,
 }
 
+/// Where a switch mounts the btrfs top level and the new root.
+pub(crate) const WORK: &str = "/run/fspec/switch";
+
 pub(crate) fn mounts(paths: &Paths, distro: &str) -> Mounts {
-    Mounts {
-        top: s(&paths.system("/run/fspec/switch/top")),
-        root: s(&paths.system(format!("/run/fspec/switch/{distro}"))),
-    }
-}
-
-fn stage_dir(paths: &Paths, m: &Machine, distro: &str) -> String {
-    let base = match &m.bootloader {
-        Bootloader::SystemdBoot { esp, .. } => esp.as_str(),
-        Bootloader::Grub { .. } => "/boot",
-    };
-    s(&paths.system(format!("{base}/{STAGE}/{distro}")))
-}
-
-pub(crate) fn grub_script(paths: &Paths, distro: &str) -> String {
-    s(&paths.system(format!("/etc/grub.d/42_fspec_{distro}")))
-}
-
-fn entry_file(paths: &Paths, esp: &str, distro: &str) -> String {
-    s(&paths.system(format!("{esp}/loader/entries/fspec-{distro}.conf")))
-}
-
-/// The packages that let a root run `grub-install` and `grub-mkconfig` for `switch --adopt-boot`.
-fn grub_packages(distro: &str, arch: &str, firmware: &Firmware) -> Vec<String> {
-    let efi = matches!(firmware, Firmware::Efi);
-    let arm = arch == "aarch64";
-    let names: Vec<&str> = match (distro, efi) {
-        ("arch", true) => vec!["grub", "efibootmgr"],
-        ("arch", false) => vec!["grub"],
-        ("debian", true) => vec![if arm { "grub-efi-arm64" } else { "grub-efi-amd64" }],
-        ("debian", false) => vec!["grub-pc"],
-        ("fedora", true) => vec!["grub2-tools", if arm { "grub2-efi-aa64" } else { "grub2-efi-x64" }],
-        ("fedora", false) => vec!["grub2-tools", "grub2-pc"],
-        ("void", true) => vec![if arm { "grub-arm64-efi" } else { "grub-x86_64-efi" }],
-        _ => vec!["grub"],
-    };
-    names.into_iter().map(String::from).collect()
-}
-
-fn bootstrap(t: &Target, m: &Machine, root: &str) -> Result<Vec<Cmd>> {
-    let arch = t.arch;
-    let grub = match m.bootloader {
-        Bootloader::Grub { .. } => grub_packages(t.distro, arch, &m.firmware),
-        Bootloader::SystemdBoot { .. } => Vec::new(),
-    };
-    Ok(match t.distro {
-        "fedora" => {
-            let Some(rel) = t.release else { bail!("fedora needs --release <number>, the Fedora release to install") };
-            // dnf reads repositories from the installroot, which has none yet, so they are named here.
-            // Arch's dnf is dnf 4 and Fedora's is dnf5; both take these options.
-            let mirror = "https://download.fedoraproject.org/pub/fedora/linux";
-            let key = format!(
-                "https://src.fedoraproject.org/rpms/fedora-repos/raw/rawhide/f/RPM-GPG-KEY-fedora-{rel}-primary"
-            );
-            let mut dnf = Cmd::new("dnf").args([
-                "--installroot",
-                root,
-                "--releasever",
-                rel,
-                "-y",
-                "--setopt=install_weak_deps=False",
-            ]);
-            for (id, path) in [
-                ("fedora", format!("releases/{rel}/Everything/{arch}/os")),
-                ("updates", format!("updates/{rel}/Everything/{arch}")),
-            ] {
-                dnf = dnf
-                    .arg(format!("--repofrompath={id},{mirror}/{path}"))
-                    .arg(format!("--setopt={id}.gpgcheck=1"))
-                    .arg(format!("--setopt={id}.gpgkey={key}"));
-            }
-            vec![
-                dnf.args([
-                    "install",
-                    "systemd",
-                    "dnf",
-                    "fedora-release",
-                    "fedora-repos",
-                    "passwd",
-                    "btrfs-progs",
-                    "kernel",
-                ])
-                .args(&grub),
-            ]
-        }
-        "arch" => {
-            vec![Cmd::new("pacstrap").args(["-K", root, "base", "linux", "linux-firmware", "btrfs-progs"]).args(&grub)]
-        }
-        "debian" => {
-            let deb = if arch == "aarch64" { "arm64" } else { "amd64" };
-            let mut include = format!("--include=systemd-sysv,btrfs-progs,linux-image-{deb}");
-            grub.iter().for_each(|g| include.push_str(&format!(",{g}")));
-            vec![Cmd::new("debootstrap").args(["--arch", deb, &include, t.release.unwrap_or("stable"), root])]
-        }
-        "void" => vec![
-            Cmd::new("xbps-install")
-                .args(["-S", "-y", "-r", root, "-R", "https://repo-default.voidlinux.org/current"])
-                .args(["base-system", "linux", "btrfs-progs"])
-                .args(&grub)
-                .env("XBPS_ARCH", arch)
-                // A fresh root has no repository key yet, and `-y` does not answer the import prompt.
-                .stdin("y\n"),
-        ],
-        other => bail!("cannot bootstrap `{other}`; --distro takes one of {}", DISTROS.join(", ")),
-    })
-}
-
-/// Kernel and initramfs globs inside the new root, newest version wins.
-fn kernel_globs(distro: &str) -> (&'static str, &'static str) {
-    match distro {
-        "arch" => ("boot/vmlinuz-linux", "boot/initramfs-linux.img"),
-        "debian" => ("boot/vmlinuz-*", "boot/initrd.img-*"),
-        _ => ("boot/vmlinuz-*", "boot/initramfs-*.img"),
-    }
+    Mounts { top: s(&paths.system(format!("{WORK}/top"))), root: s(&paths.system(format!("{WORK}/{distro}"))) }
 }
 
 /// The boot menu name of `distro`'s entry, e.g. `Void (fspec)`.
@@ -159,147 +46,251 @@ pub fn title(distro: &str) -> String {
     format!("{first}{} (fspec)", c.as_str())
 }
 
-/// A root to boot: `distro` names the entry and the kernel globs, `kernels` is the directory the
-/// kernels are copied from, `subvol` the root subvolume as findmnt prints it, and `cmdline` the
-/// kernel command line whose options the entry keeps.
-pub(crate) struct Entry<'a> {
-    pub distro: &'a str,
-    pub kernels: &'a str,
-    pub subvol: &'a str,
-    pub cmdline: &'a str,
-}
-
-/// `cmdline` with its root swapped for `subvol`. Mount options in its `rootflags=`, like
-/// `compress=zstd:1`, stay.
-fn kernel_options(uuid: &str, cmdline: &str, subvol: &str) -> String {
-    let mut flags = vec![format!("subvol={}", subvol_arg(subvol))];
-    let mut rest = Vec::new();
+/// The options of `cmdline` that belong to the machine rather than to a root, like `console=` and
+/// `net.ifnames=0`, and the extra mount options of its `rootflags=`.
+fn carried(cmdline: &str) -> (Vec<&str>, Vec<&str>) {
+    let (mut rest, mut flags) = (Vec::new(), Vec::new());
     for arg in cmdline.split_whitespace() {
         let key = arg.split('=').next().unwrap_or(arg);
         match key {
-            "BOOT_IMAGE" | "root" | "initrd" | "ro" | "rw" => {}
+            "BOOT_IMAGE" | "root" | "initrd" | "ro" | "rw" | "rd.luks.uuid" | "rd.luks.name" | "cryptdevice" => {}
             "rootflags" => flags.extend(
                 arg["rootflags=".len()..]
                     .split(',')
-                    .filter(|f| !f.is_empty() && !f.starts_with("subvol=") && !f.starts_with("subvolid="))
-                    .map(String::from),
+                    .filter(|f| !f.is_empty() && !f.starts_with("subvol=") && !f.starts_with("subvolid=")),
             ),
             _ => rest.push(arg),
         }
     }
-    let mut options = format!("root=UUID={uuid} rootflags={} rw", flags.join(","));
-    for arg in rest {
-        options.push(' ');
-        options.push_str(arg);
-    }
-    options
+    (rest, flags)
 }
 
-pub(crate) fn boot_entry(plan: &mut Plan, paths: &Paths, m: &Machine, e: &Entry) {
-    let stage = stage_dir(paths, m, e.distro);
-    let (kernel, initrd) = kernel_globs(e.distro);
-    plan.run(Cmd::new("mkdir").arg("-p").arg(&stage));
-    for (glob, name) in [(kernel, "vmlinuz"), (initrd, "initrd")] {
-        plan.run(
-            Cmd::new("sh")
-                .args(["-c", r#"cp "$(ls -1 $1 | sort -V | tail -n 1)" "$2""#, "sh"])
-                .arg(format!("{}/{glob}", e.kernels.trim_end_matches('/')))
-                .arg(format!("{stage}/{name}")),
-        );
-    }
-    let options = kernel_options(&m.uuid, e.cmdline, e.subvol);
-    let distro = e.distro;
-    match &m.bootloader {
-        Bootloader::SystemdBoot { esp, .. } => {
-            let entry = format!(
-                "title {}\nlinux /{STAGE}/{distro}/vmlinuz\ninitrd /{STAGE}/{distro}/initrd\noptions {options}\n",
-                title(distro)
-            );
-            plan.run(Cmd::new("mkdir").arg("-p").arg(s(&paths.system(format!("{esp}/loader/entries")))));
-            plan.run(Cmd::new("tee").arg(entry_file(paths, esp, distro)).stdin(entry));
-        }
-        Bootloader::Grub { mkconfig, cfg } => {
-            let (uuid, prefix) = m.grub_boot();
-            let script = format!(
-                "#!/bin/sh\nexec tail -n +3 $0\nmenuentry '{}' {{\n\tinsmod btrfs\n\tsearch --no-floppy --fs-uuid \
-                 --set=root {uuid}\n\tlinux {prefix}/{STAGE}/{distro}/vmlinuz {options}\n\tinitrd \
-                 {prefix}/{STAGE}/{distro}/initrd\n}}\n",
-                title(distro),
-            );
-            let path = grub_script(paths, distro);
-            plan.run(Cmd::new("tee").arg(&path).stdin(script));
-            plan.run(Cmd::new("chmod").arg("755").arg(&path));
-            plan.run(Cmd::new(*mkconfig).arg("-o").arg(s(&paths.system(cfg))));
+/// The kernel command line of the root `distro` on `layout`, keeping the machine's options from
+/// `cmdline`. On ZFS, ZFSBootMenu adds the root itself.
+pub(crate) fn kernel_options(layout: &Layout, distro: &str, cmdline: &str) -> String {
+    let (rest, extra) = carried(cmdline);
+    let mut out = Vec::new();
+    if let Some(b) = layout.btrfs() {
+        let mut flags = vec![format!("subvol={}", subvol(distro))];
+        flags.extend(extra.iter().map(|f| f.to_string()));
+        out.push(format!("root=UUID={} rootflags={} rw", b.uuid, flags.join(",")));
+        if let Some(luks) = &b.luks {
+            out.push(format!("rd.luks.uuid={luks}"));
         }
     }
+    out.extend(rest.iter().map(|a| a.to_string()));
+    out.join(" ")
 }
 
-/// Refuse to touch boot from a root that does not own it: its GRUB config is not the one the
-/// firmware reads, and changing the owner's would need its files.
-pub(crate) fn require_owner(m: &Machine, owner: Option<&Owner>) -> Result<()> {
-    match owner {
-        Some(o) if o.subvol == m.root_subvol => Ok(()),
-        Some(o) => bail!(
-            "boot is owned by the root {}, not this one ({}); run `fspec switch --adopt-boot` from {} first",
-            o.subvol,
-            m.root_subvol,
-            m.root_subvol
-        ),
-        None => {
-            bail!("no root is recorded as owning boot; run `fspec switch --adopt-boot` from {} first", m.root_subvol)
-        }
+pub(crate) fn fstab(layout: &Layout, distro: &str) -> String {
+    let mut text = String::new();
+    if let Some(b) = layout.btrfs() {
+        let u = &b.uuid;
+        let home = b.home.trim_start_matches('/');
+        text.push_str(&format!("UUID={u} / btrfs subvol={},compress=zstd 0 0\n", subvol(distro)));
+        text.push_str(&format!("UUID={u} /home btrfs subvol={home},compress=zstd 0 0\n"));
+        text.push_str(&format!("UUID={u} /opt/fspec btrfs subvol=@fspec,compress=zstd 0 0\n"));
+        text.push_str(&format!("UUID={u} /swap btrfs subvol=@swap 0 0\n"));
+        text.push_str("/swap/swapfile none swap defaults,nofail 0 0\n");
     }
-}
-
-fn fstab(m: &Machine, new: &str) -> String {
-    let uuid = &m.uuid;
-    let home = m.home_subvol.trim_start_matches('/');
-    let mut text = format!(
-        "UUID={uuid} / btrfs subvol={new},compress=zstd 0 0\nUUID={uuid} /home btrfs subvol={home},compress=zstd 0 0\n"
-    );
-    for b in &m.boot_mounts {
-        let opts = if b.fstype == "vfat" { "umask=0077" } else { "defaults" };
-        text.push_str(&format!("UUID={} {} {} {opts} 0 2\n", b.uuid, b.target, b.fstype));
+    match layout {
+        Layout::Default { esp, .. } | Layout::Zfs { esp, .. } => {
+            text.push_str(&format!("UUID={} /efi vfat umask=0077 0 2\n", esp.uuid));
+        }
+        Layout::Bios { boot, .. } => {
+            text.push_str(&format!("UUID={} {SHARED_BOOT} ext4 defaults 0 2\n", boot.uuid));
+            text.push_str(&format!("{SHARED_BOOT}/{distro} /boot none bind 0 0\n"));
+        }
+        Layout::Unsupported { .. } => {}
     }
     text
 }
 
-/// Install `t.distro` into a new btrfs subvolume next to the running root, apply the spec in it
-/// and add a boot entry. The old root, and `/home`, are untouched.
-pub fn switch_distro(paths: &Paths, m: &Machine, owner: Option<&Owner>, t: &Target) -> Result<Plan> {
-    if owner.is_some() && matches!(m.bootloader, Bootloader::Grub { .. }) {
-        require_owner(m, owner)?;
-    }
-    let mut plan = Plan::default();
-    let Mounts { top, root } = mounts(paths, t.distro);
-    let (uuid, new) = (format!("UUID={}", m.uuid), subvol(t.distro));
-    let bootstrap = bootstrap(t, m, &root)?;
+/// Writes the shared GRUB menu of the BIOS layout: an entry per root folder that holds a kernel
+/// command line, using the stable kernel names each root keeps there. Fedora's grub2-install
+/// looks for it under grub2/ and everyone else's under grub/, so both get a copy.
+pub(crate) const GRUB_MENU: &str = r#"set -eu
+boot=$1 uuid=$2 default=$3
+mkdir -p "$boot/grub" "$boot/grub2"
+{
+	echo "set timeout=5"
+	echo "set default=\"fspec-$default\""
+	if grep -qs 'console=ttyS' "$boot"/*/fspec-cmdline; then
+		echo "serial --unit=0 --speed=115200"
+		echo "terminal_input console serial"
+		echo "terminal_output console serial"
+	fi
+	for dir in "$boot"/*/; do
+		d=$(basename "$dir")
+		[ -f "$dir/fspec-cmdline" ] || continue
+		kernel= initrd=
+		for k in vmlinuz-linux vmlinuz; do if [ -e "$dir/$k" ]; then kernel=$k; break; fi; done
+		for i in initramfs-linux.img initrd.img initramfs.img; do if [ -e "$dir/$i" ]; then initrd=$i; break; fi; done
+		if [ -z "$kernel" ] || [ -z "$initrd" ]; then continue; fi
+		title="$(printf %s "$d" | cut -c1 | tr a-z A-Z)$(printf %s "$d" | cut -c2-) (fspec)"
+		printf "menuentry '%s' --id fspec-%s {\n\tsearch --no-floppy --fs-uuid --set=root %s\n\tlinux /%s/%s %s\n\tinitrd /%s/%s\n}\n" \
+			"$title" "$d" "$uuid" "$d" "$kernel" "$(cat "$dir/fspec-cmdline")" "$d" "$initrd"
+	done
+} >"$boot/grub/grub.cfg.new"
+cp "$boot/grub/grub.cfg.new" "$boot/grub2/grub.cfg.new"
+mv "$boot/grub2/grub.cfg.new" "$boot/grub2/grub.cfg"
+mv "$boot/grub/grub.cfg.new" "$boot/grub/grub.cfg"
+"#;
 
-    plan.run(Cmd::new("mkdir").arg("-p").arg(&top));
-    plan.run(Cmd::new("mount").args(["-o", "subvolid=5"]).arg(&uuid).arg(&top));
-    plan.cleanup.push(Cmd::new("umount").arg(&top));
-    plan.expect(
-        Cmd::new("test").arg("-e").arg(format!("{top}/{new}")),
-        false,
-        format!("the subvolume {new} already exists; run `fspec forget {}` first", t.distro),
-    );
-    if owner.is_none() {
-        plan.run(Cmd::new("tee").arg(format!("{top}/{OWNER_FILE}")).stdin(owner_record(m)));
-    }
-    plan.run(Cmd::new("btrfs").args(["subvolume", "create"]).arg(format!("{top}/{new}")));
-    plan.run(Cmd::new("mkdir").arg("-p").arg(&root));
-    plan.run(Cmd::new("mount").arg("-o").arg(format!("subvol={new}")).arg(&uuid).arg(&root));
-    plan.cleanup.insert(0, Cmd::new("umount").arg("-R").arg(&root));
+pub(crate) fn grub_menu(boot_dir: &str, uuid: &str, default: &str) -> Cmd {
+    Cmd::new("sh").args(["-c", GRUB_MENU, "sh", boot_dir, uuid, default])
+}
 
+/// Makes `default`'s root the one systemd-boot starts, and drops an EFI variable that would
+/// outrank `loader.conf`.
+pub(crate) fn sd_default(esp_dir: &str, default: &str) -> Vec<Cmd> {
+    let conf = format!("{esp_dir}/loader/loader.conf");
+    let edit =
+        r#"mkdir -p "${1%/*}" && touch "$1" && sed -i '/^default[[:space:]]/d' "$1" && echo "default $2-*" >> "$1""#;
+    vec![
+        Cmd::new("sh").args(["-c", edit, "sh", &conf, default]),
+        Cmd::new("sh").args(["-c", "if command -v bootctl >/dev/null; then bootctl set-default '' || true; fi"]),
+    ]
+}
+
+/// Host-side paths the new root gets bound in or copied from.
+pub(crate) struct Sources {
+    pub home: String,
+    pub fspec: String,
+    pub esp: String,
+    pub shared_boot: String,
+    pub resolv: String,
+    /// systemd-resolved's list of upstream servers, used when `resolv` is its local stub.
+    pub resolved: String,
+    pub hostid: String,
+}
+
+impl Sources {
+    pub(crate) fn running(paths: &Paths) -> Sources {
+        let p = |x: &str| s(&paths.system(x));
+        Sources {
+            home: p("/home"),
+            fspec: p("/opt/fspec"),
+            esp: p("/efi"),
+            shared_boot: p(SHARED_BOOT),
+            resolv: p("/etc/resolv.conf"),
+            resolved: p("/run/systemd/resolve/resolv.conf"),
+            hostid: p("/etc/hostid"),
+        }
+    }
+}
+
+/// Create `distro`'s root on the layout and mount it at `root`. `top` is where the btrfs top
+/// level is mounted.
+pub(crate) fn create_root(plan: &mut Plan, layout: &Layout, distro: &str, top: &str, root: &str) {
+    match layout {
+        Layout::Zfs { pool, .. } => {
+            let ds = format!("{pool}/ROOT/{distro}");
+            plan.expect(
+                Cmd::new("zfs").args(["list", "-H", "-o", "name", &ds]),
+                false,
+                format!("the dataset {ds} already exists; run `fspec forget {distro}` first"),
+            );
+            plan.run(Cmd::new("zfs").args(["create", "-o", "canmount=noauto", "-o", "mountpoint=/", &ds]));
+            plan.run(Cmd::new("mkdir").arg("-p").arg(root));
+            plan.run(Cmd::new("mount").args(["-t", "zfs", "-o", "zfsutil", &ds]).arg(root));
+        }
+        _ => {
+            let new = subvol(distro);
+            let uuid = layout.btrfs().map(|b| format!("UUID={}", b.uuid)).unwrap_or_default();
+            plan.expect(
+                Cmd::new("test").arg("-e").arg(format!("{top}/{new}")),
+                false,
+                format!("the subvolume {new} already exists; run `fspec forget {distro}` first"),
+            );
+            plan.run(Cmd::new("btrfs").args(["subvolume", "create"]).arg(format!("{top}/{new}")));
+            plan.run(Cmd::new("mkdir").arg("-p").arg(root));
+            plan.run(Cmd::new("mount").arg("-o").arg(format!("subvol={new}")).arg(&uuid).arg(root));
+        }
+    }
+    plan.cleanup.insert(0, Cmd::new("umount").arg("-R").arg(root));
+}
+
+fn write(plan: &mut Plan, path: &str, text: String, exec: bool) {
+    plan.run(Cmd::new("mkdir").arg("-p").arg(Path::new(path).parent().map(s).unwrap_or_default()));
+    plan.run(Cmd::new("tee").arg(path).stdin(text));
+    if exec {
+        plan.run(Cmd::new("chmod").arg("755").arg(path));
+    }
+}
+
+/// `cmd` run inside `root` with chroot.
+fn in_root(root: &str, cmd: Cmd) -> Cmd {
+    Cmd::new("chroot")
+        .arg(root)
+        .arg(&cmd.program)
+        .args(&cmd.args)
+        .env("HOME", "/root")
+        // The running distro's PATH can miss the new root's tool dirs: Arch has no /usr/sbin.
+        .env("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+}
+
+/// Bootstrap `t.distro` into the mounted `root`, set up its boot files for the layout, apply the
+/// spec in it and build its kernels where the layout boots them.
+pub(crate) fn install_root(
+    plan: &mut Plan,
+    layout: &Layout,
+    t: &Target,
+    root: &str,
+    src: &Sources,
+    cmdline: &str,
+) -> Result<()> {
+    let Some(boot) = Boot::of(layout) else { bail!("the disk is not on a supported layout") };
+    let luks = layout.btrfs().is_some_and(|b| b.luks.is_some());
+    let bootstrap = bootstrap(t, boot, luks, root)?;
+    let d = t.distro;
+    let options = kernel_options(layout, d, cmdline);
+    let shared = format!("{}/{d}", src.shared_boot);
+
+    if boot == Boot::Grub {
+        // The kernel packages install into /boot, which is this root's folder of the shared partition.
+        plan.run(Cmd::new("mkdir").arg("-p").arg(&shared).arg(format!("{root}/boot")));
+        plan.run(Cmd::new("mount").arg("--bind").arg(&shared).arg(format!("{root}/boot")));
+    }
     bootstrap.into_iter().for_each(|c| plan.run(c));
-    plan.run(Cmd::new("cp").arg("-L").arg(s(&paths.system("/etc/resolv.conf"))).arg(format!("{root}/etc/resolv.conf")));
-    plan.run(Cmd::new("tee").arg(format!("{root}/etc/fstab")).stdin(fstab(m, &new)));
+    let resolv = r#"src=$1; if grep -qs '^nameserver 127\.0\.0\.53' "$src" && [ -s "$2" ]; then src=$2; fi; rm -f "$3"; cp -L "$src" "$3""#;
+    plan.run(
+        Cmd::new("sh").args(["-c", resolv, "sh", &src.resolv, &src.resolved]).arg(format!("{root}/etc/resolv.conf")),
+    );
+    write(plan, &format!("{root}/etc/fstab"), fstab(layout, d), false);
+    if let Some(luks) = layout.btrfs().and_then(|b| b.luks.as_ref()) {
+        let opts = if matches!(d, "debian" | "ubuntu") { "luks,discard,initramfs" } else { "luks,discard" };
+        write(plan, &format!("{root}/etc/crypttab"), format!("luks-{luks} UUID={luks} none {opts}\n"), false);
+    }
+    match layout {
+        Layout::Zfs { pool, .. } => {
+            plan.run(Cmd::new("cp").arg(&src.hostid).arg(format!("{root}/etc/hostid")));
+            plan.run(
+                Cmd::new("zfs")
+                    .arg("set")
+                    .arg(format!("org.zfsbootmenu:commandline={options}"))
+                    .arg(format!("{pool}/ROOT/{d}")),
+            );
+        }
+        _ => write(plan, &format!("{root}/etc/kernel/cmdline"), format!("{options}\n"), false),
+    }
+    if boot == Boot::Grub {
+        write(plan, &format!("{shared}/fspec-cmdline"), format!("{options}\n"), false);
+    }
+    for f in boot_files(d, boot, luks) {
+        write(plan, &format!("{root}{}", f.path), f.text, f.exec);
+    }
 
     // The shared home goes in before the apply, so a declared user's home lands in it.
-    for (src, dst) in [("/home", "home"), ("/dev", "dev"), ("/sys", "sys")] {
-        let dst = format!("{root}/{dst}");
-        plan.run(Cmd::new("mount").arg("--rbind").arg(s(&paths.system(src))).arg(&dst));
-        plan.run(Cmd::new("mount").arg("--make-rslave").arg(&dst));
+    let mut binds = vec![(src.home.as_str(), "home"), (src.fspec.as_str(), "opt/fspec")];
+    if boot != Boot::Grub {
+        binds.push((src.esp.as_str(), "efi"));
+    }
+    for (from, to) in binds.into_iter().chain([("/dev", "dev"), ("/sys", "sys")]) {
+        let to = format!("{root}/{to}");
+        plan.run(Cmd::new("mkdir").arg("-p").arg(&to));
+        plan.run(Cmd::new("mount").arg("--rbind").arg(from).arg(&to));
+        plan.run(Cmd::new("mount").arg("--make-rslave").arg(&to));
     }
     plan.run(Cmd::new("mount").args(["-t", "proc", "proc"]).arg(format!("{root}/proc")));
 
@@ -307,32 +298,56 @@ pub fn switch_distro(paths: &Paths, m: &Machine, owner: Option<&Owner>, t: &Targ
     plan.run(Cmd::new("mkdir").arg("-p").arg(&spec_copy).arg(format!("{root}/usr/local/bin")));
     plan.run(Cmd::new("cp").arg(s(t.exe)).arg(format!("{root}/usr/local/bin/fspec")));
     plan.run(Cmd::new("cp").arg("-a").arg(format!("{}/.", s(t.spec_dir))).arg(&spec_copy));
-    plan.run(
-        Cmd::new("chroot")
-            .arg(&root)
-            .args(["/usr/local/bin/fspec", "--spec"])
-            .arg(format!("/var/lib/fspec/spec/{}", t.spec_file))
-            .args(["apply", "--local", "--scope", "system", "--host", t.host])
-            .env("HOME", "/root")
-            // The running distro's PATH can miss the new root's tool dirs: Arch has no /usr/sbin.
-            .env("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"),
-    );
-
-    let subvol = format!("/{new}");
-    boot_entry(&mut plan, paths, m, &Entry { distro: t.distro, kernels: &root, subvol: &subvol, cmdline: &m.cmdline });
-    Ok(plan)
+    let apply = Cmd::new("/usr/local/bin/fspec")
+        .arg("--spec")
+        .arg(format!("/var/lib/fspec/spec/{}", t.spec_file))
+        .args(["apply", "--local", "--scope", "system", "--host", t.host]);
+    plan.run(in_root(root, apply));
+    plan.run(in_root(root, Cmd::new("sh").args(["-c", &populate(d, t.arch, boot, luks)])));
+    Ok(())
 }
 
-/// Commands that undo [`boot_entry`] for `distro`.
-pub(crate) fn remove_boot_entry(plan: &mut Plan, paths: &Paths, m: &Machine, distro: &str) {
-    plan.run(Cmd::new("rm").arg("-rf").arg(stage_dir(paths, m, distro)));
-    match &m.bootloader {
-        Bootloader::SystemdBoot { esp, .. } => {
-            plan.run(Cmd::new("rm").arg("-f").arg(entry_file(paths, esp, distro)));
-        }
-        Bootloader::Grub { mkconfig, cfg } => {
-            plan.run(Cmd::new("rm").arg("-f").arg(grub_script(paths, distro)));
-            plan.run(Cmd::new(*mkconfig).arg("-o").arg(s(&paths.system(cfg))));
-        }
+/// Refuse to touch boot from a root that does not own it, so the bootloader's default never goes
+/// with a deleted root.
+pub(crate) fn require_owner(m: &Machine, owner: Option<&str>) -> Result<()> {
+    match owner {
+        Some(o) if o == m.running => Ok(()),
+        Some(o) => bail!(
+            "boot is owned by {o}, not this root ({}); run `fspec switch --adopt-boot` from {} first",
+            m.running,
+            m.running
+        ),
+        None => bail!("no root is recorded as owning boot; run `fspec switch --adopt-boot` from {} first", m.running),
     }
+}
+
+/// Install `t.distro` into a new root next to the running one, apply the spec in it and make it
+/// bootable. The old root, and `/home`, are untouched.
+pub fn switch_distro(paths: &Paths, m: &Machine, owner: Option<&str>, t: &Target) -> Result<Plan> {
+    if let Some(why) = misfit(recipe(t.distro)?, &m.layout, &m.firmware) {
+        bail!("cannot switch to {}: {why}", t.distro);
+    }
+    let mut plan = Plan::default();
+    let Mounts { top, root } = mounts(paths, t.distro);
+    if let Some(b) = m.layout.btrfs() {
+        plan.run(Cmd::new("mkdir").arg("-p").arg(&top));
+        plan.run(Cmd::new("mount").args(["-o", "subvolid=5"]).arg(format!("UUID={}", b.uuid)).arg(&top));
+        plan.cleanup.push(Cmd::new("umount").arg(&top));
+    }
+    create_root(&mut plan, &m.layout, t.distro, &top, &root);
+    let src = Sources::running(paths);
+    install_root(&mut plan, &m.layout, t, &root, &src, &m.cmdline)?;
+
+    // Until a root adopts boot, the running one stays the default.
+    match &m.layout {
+        Layout::Default { .. } if owner.is_none() => {
+            sd_default(&src.esp, &m.running).into_iter().for_each(|c| plan.run(c))
+        }
+        Layout::Zfs { pool, .. } if owner.is_none() => {
+            plan.run(Cmd::new("zpool").arg("set").arg(format!("bootfs={}", m.root)).arg(pool))
+        }
+        Layout::Bios { boot, .. } => plan.run(grub_menu(&src.shared_boot, &boot.uuid, owner.unwrap_or(&m.running))),
+        _ => {}
+    }
+    Ok(plan.private(&s(&paths.system(WORK))))
 }

@@ -1,78 +1,114 @@
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use fspec_core::Paths;
 use fspec_core::facts::os_release_id;
 use fspec_core::runner::{Cmd, Runner};
+use serde_json::Value;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Bootloader {
-    /// Kernels are copied onto the EFI system partition, which systemd-boot can read. `default`
-    /// is the text of the entry `loader.conf` boots by default, when it names one that exists.
-    SystemdBoot { esp: String, default: Option<String> },
-    /// GRUB reads the kernel from the owning root's `/boot`. `mkconfig` is `grub-mkconfig` or
-    /// `grub2-mkconfig`, and `cfg` the file it writes.
-    Grub { mkconfig: &'static str, cfg: &'static str },
-}
-
-/// A filesystem mounted at `/boot`, `/efi` or `/boot/efi`. Every root of the machine shares it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BootMount {
-    pub target: String,
-    pub uuid: String,
-    pub fstype: String,
-}
+pub const ESP_TYPE: &str = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b";
+pub const BIOS_GRUB_TYPE: &str = "21686148-6449-6e6f-744e-656564454649";
+/// Where the BIOS layout mounts its shared boot partition in every root.
+pub const SHARED_BOOT: &str = "/var/lib/fspec/boot";
+/// The subvolumes every root of the default and BIOS layouts shares, besides the home.
+pub const SHARED_SUBVOLS: [&str; 3] = ["@swap", "@snapshots", "@fspec"];
+pub const GIB: u64 = 1 << 30;
+pub const MIB: u64 = 1 << 20;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Firmware {
     Efi,
-    /// GRUB goes into the boot sector of `disk`, the disk holding the root filesystem.
-    Bios {
-        disk: String,
-    },
+    Bios,
+}
+
+/// A partition, as lsblk reports it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Part {
+    pub dev: String,
+    pub uuid: String,
+    pub partuuid: String,
+    pub parttype: String,
+    /// The GPT partition name.
+    pub label: String,
+    pub fstype: String,
+    pub size: u64,
+    /// Free bytes, when it is mounted.
+    pub avail: Option<u64>,
+    pub partn: u64,
+    /// First sector.
+    pub start: u64,
+    pub mounts: Vec<String>,
+}
+
+/// The btrfs filesystem holding the roots.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Btrfs {
+    pub uuid: String,
+    /// UUID of the LUKS2 container it sits in.
+    pub luks: Option<String>,
+    /// The subvolume mounted at `/home`, as findmnt prints it.
+    pub home: String,
+}
+
+/// The disk layouts `switch --distro` installs roots side by side on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Layout {
+    /// GPT, the ESP at `/efi` with systemd-boot, and btrfs (optionally in LUKS2) with a
+    /// subvolume per root plus the shared ones.
+    Default { esp: Part, btrfs: Btrfs },
+    /// A pool with `<pool>/ROOT/<distro>` boot environments, booted by ZFSBootMenu from the ESP.
+    Zfs { esp: Part, pool: String },
+    /// GRUB in BIOS mode with a shared ext4 boot partition at [`SHARED_BOOT`], and btrfs.
+    Bios { boot: Part, btrfs: Btrfs },
+    /// Anything else, with what keeps it from being one of the above.
+    Unsupported { reasons: Vec<String> },
+}
+
+impl Layout {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Layout::Default { .. } => "default",
+            Layout::Zfs { .. } => "zfs",
+            Layout::Bios { .. } => "bios",
+            Layout::Unsupported { .. } => "unsupported",
+        }
+    }
+
+    pub fn btrfs(&self) -> Option<&Btrfs> {
+        match self {
+            Layout::Default { btrfs, .. } | Layout::Bios { btrfs, .. } => Some(btrfs),
+            _ => None,
+        }
+    }
 }
 
 /// What the plans need to know about the running system.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Machine {
-    /// Filesystem UUID shared by the root and `/home` subvolumes.
-    pub uuid: String,
-    /// The booted root subvolume as findmnt prints it, e.g. `/@`, or `/` for the top level.
-    pub root_subvol: String,
-    pub home_subvol: String,
-    pub bootloader: Bootloader,
+    pub layout: Layout,
+    /// The booted root: a btrfs subvolume as findmnt prints it (`/@arch`), or a ZFS dataset
+    /// (`rpool/ROOT/arch`).
+    pub root: String,
     /// `ID=` of the running `/etc/os-release`.
     pub running: String,
-    pub boot_mounts: Vec<BootMount>,
     pub firmware: Firmware,
+    /// The whole disk holding the root, where BIOS GRUB goes.
+    pub disk: String,
     /// The running kernel's command line. Entries fspec writes keep its options, like `console=`
     /// and `net.ifnames=0`, which the machine's network and serial setup can depend on.
     pub cmdline: String,
+    /// Partitions of `disk`.
+    pub parts: Vec<Part>,
+    /// The partition holding the root filesystem, or its LUKS container.
+    pub root_part: Part,
+    /// Type and UUID of the root filesystem.
+    pub fstype: String,
+    pub fs_uuid: String,
+    pub luks: Option<String>,
+    /// What detection read, for `fspec disk plan`.
+    pub facts: Facts,
 }
 
-impl Machine {
-    /// The filesystem UUID GRUB finds the kernels on, and where this root's `/boot` sits inside it.
-    pub fn grub_boot(&self) -> (&str, String) {
-        match self.boot_mounts.iter().find(|b| b.target == "/boot") {
-            Some(b) => (&b.uuid, String::new()),
-            None => (&self.uuid, format!("{}/boot", self.root_subvol.trim_end_matches('/'))),
-        }
-    }
-
-    pub fn esp(&self) -> Option<&BootMount> {
-        self.boot_mounts.iter().find(|b| b.fstype == "vfat")
-    }
-}
-
-/// `rootflags=subvol=` for a root as findmnt prints it.
-pub(crate) fn subvol_arg(fsroot: &str) -> &str {
-    match fsroot.trim_start_matches('/') {
-        "" => "/",
-        s => s,
-    }
-}
-
-/// A tool that is not installed answers no, like one that fails: Debian ships no `grub-mkconfig`
-/// unless GRUB is installed.
-fn probe(runner: &dyn Runner, cmd: Cmd) -> Result<Option<String>> {
+/// A tool that is not installed answers no, like one that fails.
+pub(crate) fn probe(runner: &dyn Runner, cmd: Cmd) -> Result<Option<String>> {
     let out = match runner.run(&cmd) {
         Ok(out) => out,
         Err(e) if crate::not_installed(&e) => return Ok(None),
@@ -81,150 +117,321 @@ fn probe(runner: &dyn Runner, cmd: Cmd) -> Result<Option<String>> {
     Ok((out.status == 0).then(|| out.stdout.trim().to_string()))
 }
 
-const BOOT_TARGETS: [&str; 3] = ["/boot", "/efi", "/boot/efi"];
+/// What detection reads, kept apart so classification is a pure function.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Facts {
+    /// `findmnt -no FSTYPE,SOURCE,FSROOT -v -T /`.
+    pub root_mount: String,
+    /// [`LSBLK`]'s output.
+    pub lsblk: String,
+    pub efi: bool,
+    /// FSROOT of `/home`, `/opt/fspec` and `/boot`, empty when they are not mounted.
+    pub home: String,
+    pub fspec: String,
+    pub boot: String,
+    /// Top-level btrfs subvolumes, or the pool's datasets.
+    pub volumes: Vec<String>,
+    /// `zpool list -vHP <pool>` for a ZFS root.
+    pub zpool: String,
+}
 
-/// Read the running system through `runner`. Refuses a root that is not btrfs, a `/home` that is
-/// not its own subvolume, and a root with neither systemd-boot nor GRUB.
+pub const LSBLK: [&str; 6] = [
+    "lsblk",
+    "-J",
+    "-b",
+    "-p",
+    "-o",
+    "NAME,TYPE,FSTYPE,SIZE,UUID,PARTUUID,PARTTYPE,PARTLABEL,PTTYPE,MOUNTPOINTS,FSAVAIL,PARTN,START",
+];
+
+/// Read the running system through `runner`.
 pub fn detect(runner: &dyn Runner, paths: &Paths) -> Result<Machine> {
     let sys = |p: &str| paths.system(p).display().to_string();
-    let findmnt = |fields: &str, path: &str| Cmd::new("findmnt").args(["-no", fields, "-T"]).arg(sys(path));
-
-    let Some(root) = probe(runner, findmnt("FSTYPE,UUID,FSROOT", "/"))? else {
+    // Without -T, findmnt only answers for a mount point.
+    let fsroot = |p: &str| -> Result<String> {
+        Ok(probe(runner, Cmd::new("findmnt").args(["-no", "FSROOT"]).arg(sys(p)))?.unwrap_or_default())
+    };
+    let Some(root_mount) =
+        probe(runner, Cmd::new("findmnt").args(["-no", "FSTYPE,SOURCE,FSROOT", "-v", "-T"]).arg(sys("/")))?
+    else {
         bail!("could not read the root filesystem with findmnt");
     };
-    let mut f = root.split_whitespace();
-    let (Some(fstype), Some(uuid), Some(root_subvol)) = (f.next(), f.next(), f.next()) else {
-        bail!("findmnt answered `{root}` for the root filesystem, expected <fstype> <uuid> <subvolume>");
+    let lsblk = probe(runner, Cmd::new(LSBLK[0]).args(LSBLK[1..].iter().copied()))?
+        .context("lsblk could not list the disks")?;
+    let mut facts = Facts {
+        efi: probe(runner, Cmd::new("test").arg("-d").arg(sys("/sys/firmware/efi")))?.is_some(),
+        home: fsroot("/home")?,
+        fspec: fsroot("/opt/fspec")?,
+        boot: fsroot("/boot")?,
+        root_mount,
+        lsblk,
+        ..Facts::default()
     };
-    if fstype != "btrfs" {
-        bail!(
-            "the root filesystem is {fstype}, not btrfs. fspec switch --distro keeps the old system bootable in a \
-             second btrfs subvolume, so it needs a btrfs root; reinstall on btrfs or move to a bootc image"
-        );
-    }
-    let home_subvol = probe(runner, findmnt("FSROOT", "/home"))?.unwrap_or_default();
-    if home_subvol.is_empty() || home_subvol == root_subvol {
-        bail!("/home is not its own btrfs subvolume, so it cannot be shared with the new root; move it to one first");
-    }
-
-    // Without -T, findmnt only answers for a mount point.
-    let mut boot_mounts = Vec::new();
-    for target in BOOT_TARGETS {
-        let found = probe(runner, Cmd::new("findmnt").args(["-no", "UUID,FSTYPE"]).arg(sys(target)))?;
-        if let Some((uuid, fstype)) = found.as_deref().and_then(|l| l.split_once(char::is_whitespace)) {
-            boot_mounts.push(BootMount { target: target.into(), uuid: uuid.into(), fstype: fstype.trim().into() });
+    match facts.root_mount.split_whitespace().next() {
+        Some("btrfs") => {
+            let list = probe(runner, Cmd::new("btrfs").args(["subvolume", "list"]).arg(sys("/")))?.unwrap_or_default();
+            facts.volumes = top_level_subvols(&list);
         }
+        Some("zfs") => {
+            let dataset = facts.root_mount.split_whitespace().nth(1).unwrap_or_default();
+            let pool = dataset.split('/').next().unwrap_or_default().to_string();
+            let list =
+                probe(runner, Cmd::new("zfs").args(["list", "-H", "-o", "name", "-r", &pool]))?.unwrap_or_default();
+            facts.volumes = list.lines().map(String::from).collect();
+            facts.zpool = probe(runner, Cmd::new("zpool").args(["list", "-vHP", &pool]))?.unwrap_or_default();
+        }
+        _ => {}
     }
-
-    let sd_boot =
-        boot_mounts.iter().find(|b| b.fstype == "vfat" && paths.system(format!("{}/EFI/systemd", b.target)).is_dir());
-    let bootloader = if let Some(esp) = sd_boot {
-        Bootloader::SystemdBoot { esp: esp.target.clone(), default: default_entry(paths, &esp.target) }
-    } else if probe(runner, Cmd::new("test").arg("-d").arg(sys("/boot/grub2")))?.is_some()
-        || probe(runner, Cmd::new("grub2-mkconfig").arg("--version"))?.is_some()
-    {
-        Bootloader::Grub { mkconfig: "grub2-mkconfig", cfg: "/boot/grub2/grub.cfg" }
-    } else if probe(runner, Cmd::new("test").arg("-d").arg(sys("/boot/grub")))?.is_some()
-        || probe(runner, Cmd::new("grub-mkconfig").arg("--version"))?.is_some()
-    {
-        Bootloader::Grub { mkconfig: "grub-mkconfig", cfg: "/boot/grub/grub.cfg" }
-    } else {
-        bail!(
-            "found neither systemd-boot (EFI/systemd on a mounted ESP) nor GRUB (/boot/grub, /boot/grub2, grub-mkconfig)"
-        );
-    };
-
-    let firmware = if probe(runner, Cmd::new("test").arg("-d").arg(sys("/sys/firmware/efi")))?.is_some() {
-        Firmware::Efi
-    } else {
-        let source = probe(runner, Cmd::new("findmnt").args(["-nvo", "SOURCE", "-T"]).arg(sys("/")))?;
-        let disk = match source {
-            Some(dev) => probe(runner, Cmd::new("lsblk").args(["-ndpo", "PKNAME", &dev]))?.unwrap_or_default(),
-            None => String::new(),
-        };
-        Firmware::Bios { disk }
-    };
-
     let running = std::fs::read_to_string(paths.system("/etc/os-release"))
         .ok()
         .and_then(|s| os_release_id(&s))
         .unwrap_or_default();
     let cmdline = std::fs::read_to_string(paths.system("/proc/cmdline")).unwrap_or_default().trim().to_string();
-    Ok(Machine {
-        uuid: uuid.into(),
-        root_subvol: root_subvol.into(),
-        home_subvol,
-        bootloader,
-        running,
-        boot_mounts,
-        firmware,
-        cmdline,
-    })
+    classify(&facts, running, cmdline)
 }
 
-/// The entry `loader.conf` names as `default`, when it is a plain file name.
-fn default_entry(paths: &Paths, esp: &str) -> Option<String> {
-    let conf = std::fs::read_to_string(paths.system(format!("{esp}/loader/loader.conf"))).ok()?;
-    let name = conf.lines().find_map(|l| l.trim().strip_prefix("default"))?.trim();
-    std::fs::read_to_string(paths.system(format!("{esp}/loader/entries/{name}"))).ok()
+/// Names of the subvolumes directly under the btrfs top level, from `btrfs subvolume list`.
+pub(crate) fn top_level_subvols(list: &str) -> Vec<String> {
+    list.lines()
+        .filter(|l| l.contains(" top level 5 "))
+        .filter_map(|l| l.split(" path ").nth(1))
+        .map(|p| p.trim().to_string())
+        .collect()
 }
 
-/// What a `--root` run assumes, since its commands are only logged and answer nothing:
-/// systemd-boot on an ESP at `/boot`, root in `@`, home in `@home`.
-pub fn assumed() -> Machine {
-    let uuid = "00000000-0000-0000-0000-000000000000".to_string();
-    Machine {
-        uuid,
-        root_subvol: "/@".into(),
-        home_subvol: "/@home".into(),
-        bootloader: Bootloader::SystemdBoot { esp: "/boot".into(), default: None },
-        running: String::new(),
-        boot_mounts: vec![BootMount { target: "/boot".into(), uuid: "0000-0000".into(), fstype: "vfat".into() }],
-        firmware: Firmware::Efi,
-        cmdline: String::new(),
+/// A block device from lsblk's tree, with the index of its parent.
+struct Dev<'a> {
+    v: &'a Value,
+    parent: Option<usize>,
+}
+
+fn flatten<'a>(v: &'a Value, parent: Option<usize>, out: &mut Vec<Dev<'a>>) {
+    out.push(Dev { v, parent });
+    let me = out.len() - 1;
+    for c in v["children"].as_array().into_iter().flatten() {
+        flatten(c, Some(me), out);
     }
 }
 
-/// The root that owns boot: its bootloader is the one the firmware starts.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Owner {
-    /// As findmnt prints it, like [`Machine::root_subvol`].
-    pub subvol: String,
-    /// `ID=` of that root's os-release.
-    pub distro: String,
-    /// Its kernel command line when it took boot, empty when none was recorded.
-    pub cmdline: String,
+fn text(v: &Value, key: &str) -> String {
+    v[key].as_str().unwrap_or_default().to_string()
 }
 
-/// Kept on the btrfs top level, which every root can mount. Its first line is the owner's
-/// subvolume and its second the owner's kernel command line.
-pub(crate) const OWNER_FILE: &str = ".fspec-boot-owner";
-
-pub(crate) fn owner_record(m: &Machine) -> String {
-    format!("{}\n{}\n", m.root_subvol, m.cmdline)
+pub(crate) fn part(v: &Value) -> Part {
+    Part {
+        dev: text(v, "name"),
+        uuid: text(v, "uuid"),
+        partuuid: text(v, "partuuid"),
+        parttype: text(v, "parttype").to_lowercase(),
+        label: text(v, "partlabel"),
+        fstype: text(v, "fstype"),
+        size: v["size"].as_u64().unwrap_or_default(),
+        avail: v["fsavail"].as_u64(),
+        partn: v["partn"].as_u64().unwrap_or_default(),
+        start: v["start"].as_u64().unwrap_or_default(),
+        mounts: v["mountpoints"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|m| m.as_str())
+            .map(String::from)
+            .collect(),
+    }
 }
 
-/// Read which root owns boot. `switch --distro` records the running root the first time, and
-/// `switch --adopt-boot` moves it. `None` when nothing was recorded.
-pub fn boot_owner(runner: &dyn Runner, paths: &Paths, m: &Machine) -> Result<Option<Owner>> {
-    let top = paths.system("/run/fspec/switch/owner").display().to_string();
-    runner.check(&Cmd::new("mkdir").arg("-p").arg(&top))?;
-    runner.check(&Cmd::new("mount").args(["-o", "ro,subvolid=5"]).arg(format!("UUID={}", m.uuid)).arg(&top))?;
-    let read = || -> Result<Option<Owner>> {
-        let Some(record) = probe(runner, Cmd::new("cat").arg(format!("{top}/{OWNER_FILE}")))? else { return Ok(None) };
-        let mut lines = record.lines();
-        let subvol = lines.next().unwrap_or_default().trim().to_string();
-        let cmdline = lines.next().unwrap_or_default().trim().to_string();
-        if subvol.is_empty() {
-            return Ok(None);
+fn mounted_at(v: &Value, target: &str) -> bool {
+    v["mountpoints"].as_array().into_iter().flatten().any(|m| m.as_str() == Some(target))
+}
+
+/// Sort the running system into a [`Layout`].
+pub fn classify(f: &Facts, running: String, cmdline: String) -> Result<Machine> {
+    let json: Value = serde_json::from_str(&f.lsblk).context("parsing lsblk's JSON")?;
+    let mut devs = Vec::new();
+    for d in json["blockdevices"].as_array().into_iter().flatten() {
+        flatten(d, None, &mut devs);
+    }
+    let disk_of = |mut i: usize| {
+        while let Some(p) = devs[i].parent {
+            i = p;
         }
-        let release = format!("{top}/{}/etc/os-release", subvol.trim_matches('/'));
-        let distro = probe(runner, Cmd::new("cat").arg(release.replace("//", "/")))?
-            .and_then(|s| os_release_id(&s))
-            .unwrap_or_default();
-        Ok(Some(Owner { subvol, distro, cmdline }))
+        i
     };
-    let owner = read();
-    runner.run(&Cmd::new("umount").arg(&top))?;
-    owner
+    let find = |name: &str| devs.iter().position(|d| text(d.v, "name") == name);
+
+    let mut fields = f.root_mount.split_whitespace();
+    let (fstype, source) = (fields.next().unwrap_or_default(), fields.next().unwrap_or_default());
+    let fsroot = fields.next().unwrap_or("/");
+    let firmware = if f.efi { Firmware::Efi } else { Firmware::Bios };
+
+    // The device the root filesystem sits on: a partition, a LUKS mapping, or a pool member.
+    let root_dev = match fstype {
+        "zfs" => {
+            f.zpool.lines().filter_map(|l| l.split_whitespace().next()).find(|d| d.starts_with("/dev/")).and_then(&find)
+        }
+        _ => find(source),
+    };
+    let Some(root_dev) = root_dev else { bail!("lsblk does not list {source}, the device holding /") };
+    let disk_i = disk_of(root_dev);
+    let disk = text(devs[disk_i].v, "name");
+    let on_disk: Vec<&Dev> = devs.iter().enumerate().filter(|(i, _)| disk_of(*i) == disk_i).map(|(_, d)| d).collect();
+    let gpt = text(devs[disk_i].v, "pttype") == "gpt";
+    let esp_at = |target: &str| {
+        on_disk.iter().find(|d| text(d.v, "parttype").to_lowercase() == ESP_TYPE && mounted_at(d.v, target))
+    };
+    let esp = esp_at("/efi").map(|d| part(d.v));
+    let no_esp = || match ["/boot/efi", "/boot"].into_iter().find(|t| esp_at(t).is_some()) {
+        Some(t) => format!("the ESP is mounted at {t}, not /efi"),
+        None => "no ESP is mounted at /efi".into(),
+    };
+
+    let parts: Vec<Part> = on_disk.iter().filter(|d| text(d.v, "type") == "part").map(|d| part(d.v)).collect();
+    let crypt = text(devs[root_dev].v, "type") == "crypt";
+    let luks = devs[root_dev].parent.filter(|_| crypt).map(|p| text(devs[p].v, "uuid"));
+    let root_part = match devs[root_dev].parent {
+        Some(p) if crypt => part(devs[p].v),
+        _ => part(devs[root_dev].v),
+    };
+    let fs_uuid = text(devs[root_dev].v, "uuid");
+
+    let mut reasons = Vec::new();
+    let root = if fstype == "zfs" { source.to_string() } else { fsroot.to_string() };
+    let layout = match fstype {
+        "btrfs" => {
+            let own = format!("/@{running}");
+            if root == "/" {
+                reasons.push(format!("the root sits at the btrfs top level instead of in @{running}"));
+            } else if root != own {
+                reasons.push(format!("the root is the subvolume {root}, not {own}"));
+            }
+            if f.home.is_empty() || f.home == root {
+                reasons.push("/home is not its own subvolume".into());
+            }
+            let missing: Vec<&str> =
+                SHARED_SUBVOLS.iter().copied().filter(|s| !f.volumes.iter().any(|v| v == s)).collect();
+            if !missing.is_empty() {
+                reasons.push(format!("the shared subvolumes {} are missing", missing.join(", ")));
+            } else if f.fspec != "/@fspec" {
+                reasons.push("/opt/fspec is not mounted from @fspec".into());
+            }
+            let btrfs = Btrfs { uuid: fs_uuid.clone(), luks: luks.clone(), home: f.home.clone() };
+            match firmware {
+                Firmware::Efi => {
+                    if !gpt {
+                        reasons.push("the disk has no GPT partition table".into());
+                    }
+                    if esp.is_none() {
+                        reasons.push(no_esp());
+                    }
+                    match esp {
+                        Some(esp) if reasons.is_empty() => Layout::Default { esp, btrfs },
+                        _ => Layout::Unsupported { reasons },
+                    }
+                }
+                Firmware::Bios => {
+                    let boot = on_disk.iter().find(|d| text(d.v, "fstype") == "ext4" && mounted_at(d.v, SHARED_BOOT));
+                    if boot.is_none() {
+                        reasons.push(format!("no shared ext4 boot partition is mounted at {SHARED_BOOT}"));
+                    } else if f.boot != format!("/{running}") {
+                        reasons.push(format!("/boot is not the folder {running}/ of the shared boot partition"));
+                    }
+                    if gpt && !on_disk.iter().any(|d| text(d.v, "parttype").to_lowercase() == BIOS_GRUB_TYPE) {
+                        reasons.push("the GPT disk has no bios_grub partition for GRUB".into());
+                    }
+                    match boot {
+                        Some(b) if reasons.is_empty() => Layout::Bios { boot: part(b.v), btrfs },
+                        _ => Layout::Unsupported { reasons },
+                    }
+                }
+            }
+        }
+        "zfs" => {
+            let pool = source.split('/').next().unwrap_or_default().to_string();
+            if source != format!("{pool}/ROOT/{running}") {
+                reasons.push(format!("the root is the dataset {source}, not {pool}/ROOT/{running}"));
+            }
+            if firmware == Firmware::Bios {
+                reasons.push("ZFSBootMenu boots this layout through EFI, and this machine booted through BIOS".into());
+            }
+            for want in ["home", "fspec"] {
+                if !f.volumes.iter().any(|v| *v == format!("{pool}/{want}")) {
+                    reasons.push(format!("the dataset {pool}/{want} is missing"));
+                }
+            }
+            if esp.is_none() {
+                reasons.push(no_esp());
+            }
+            match esp {
+                Some(esp) if reasons.is_empty() => Layout::Zfs { esp, pool },
+                _ => Layout::Unsupported { reasons },
+            }
+        }
+        other => Layout::Unsupported {
+            reasons: vec![format!("the root filesystem is {other}; the layouts put the roots on btrfs or ZFS")],
+        },
+    };
+    Ok(Machine {
+        layout,
+        root,
+        running,
+        firmware,
+        disk,
+        cmdline,
+        parts,
+        root_part,
+        fstype: fstype.into(),
+        fs_uuid,
+        luks,
+        facts: f.clone(),
+    })
+}
+
+/// What a `--root` run assumes, since its commands are only logged and answer nothing: the
+/// default layout with the rooted system in `@<running>`.
+pub fn assumed(running: &str) -> Machine {
+    let esp = Part {
+        dev: "/dev/sda1".into(),
+        uuid: "0000-0000".into(),
+        parttype: ESP_TYPE.into(),
+        fstype: "vfat".into(),
+        size: 2 * GIB,
+        ..Part::default()
+    };
+    let btrfs = Btrfs { uuid: "00000000-0000-0000-0000-000000000000".into(), luks: None, home: "/@home".into() };
+    Machine {
+        layout: Layout::Default { esp, btrfs },
+        root: format!("/@{running}"),
+        running: running.into(),
+        firmware: Firmware::Efi,
+        disk: "/dev/sda".into(),
+        cmdline: String::new(),
+        parts: Vec::new(),
+        root_part: Part::default(),
+        fstype: "btrfs".into(),
+        fs_uuid: "00000000-0000-0000-0000-000000000000".into(),
+        luks: None,
+        facts: Facts::default(),
+    }
+}
+
+/// The distro whose root boots by default, read from the bootloader: systemd-boot's `default`,
+/// the pool's `bootfs`, or the default entry of the shared GRUB menu. `None` when none is set.
+pub fn boot_owner(runner: &dyn Runner, paths: &Paths, m: &Machine) -> Result<Option<String>> {
+    let read = |p: &str| std::fs::read_to_string(paths.system(p)).unwrap_or_default();
+    Ok(match &m.layout {
+        Layout::Default { .. } => read("/efi/loader/loader.conf")
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("default"))
+            .and_then(|d| d.trim().strip_suffix("-*"))
+            .map(String::from),
+        Layout::Zfs { pool, .. } => {
+            probe(runner, Cmd::new("zpool").args(["get", "-H", "-o", "value", "bootfs", pool]))?
+                .and_then(|v| v.strip_prefix(&format!("{pool}/ROOT/")).map(String::from))
+        }
+        Layout::Bios { .. } => read(&format!("{SHARED_BOOT}/grub/grub.cfg"))
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("set default=\"fspec-"))
+            .and_then(|d| d.strip_suffix('"'))
+            .map(String::from),
+        Layout::Unsupported { .. } => None,
+    })
 }
