@@ -5,18 +5,19 @@ mod activate;
 mod container;
 pub mod gc;
 pub mod libs;
+mod python;
 pub mod services;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Result, bail};
-use fspec_core::Lock;
+use anyhow::{Context, Result, bail};
 use fspec_core::dev::Dev;
 use fspec_core::resource::{Host, Resource};
+use fspec_core::{Lock, Paths};
 use sha2::{Digest, Sha256};
 
-pub use activate::{Activated, Machine, activate, export};
+pub use activate::{Activated, Machine, activate, export, native_misses};
 pub use container::Run;
 
 pub const FILE: &str = "dev.star";
@@ -52,7 +53,11 @@ impl Project {
     }
 
     pub fn evaluate(&self, platform: &str) -> Result<Dev> {
-        fspec_eval::evaluate_dev(&self.file(), platform)
+        let mut dev = fspec_eval::evaluate_dev(&self.file(), platform)?;
+        if dev.packages.iter().any(python::is_pypi) && !dev.packages.iter().any(|p| p.name == "uv") {
+            dev.packages.push(python::implicit_uv());
+        }
+        Ok(dev)
     }
 
     /// Eight hex digits naming this project in caches and container names.
@@ -97,7 +102,7 @@ pub fn runtime(runner: &dyn fspec_core::runner::Runner) -> Option<String> {
 
 /// `fspec update` for a project: resolve every package for the platforms that declare it, and
 /// pin each image the project runs (its container and its services) by digest.
-pub fn update(project: &Project, only: &[String], cx: &fspec_sources::Cx) -> Result<Update> {
+pub fn update(project: &Project, only: &[String], cx: &fspec_sources::Cx, paths: &Paths) -> Result<Update> {
     let devs = project.per_platform(&cx.local.0)?;
     let hosts: Vec<Host> = devs
         .iter()
@@ -106,7 +111,7 @@ pub fn update(project: &Project, only: &[String], cx: &fspec_sources::Cx) -> Res
             platform: platform.clone(),
             system: None,
             users: vec![],
-            resources: dev.packages.iter().cloned().map(Resource::Pkg).collect(),
+            resources: dev.packages.iter().filter(|p| !python::is_pypi(p)).cloned().map(Resource::Pkg).collect(),
             protect: vec![],
             persist: vec![],
             release_age: None,
@@ -116,10 +121,19 @@ pub fn update(project: &Project, only: &[String], cx: &fspec_sources::Cx) -> Res
     let old = Lock::load(&project.lock_path())?;
     let u = fspec_sources::update::update(&hosts, &old, only, cx)?;
     let (mut lock, mut changes, mut errors) = (u.lock, u.changes, u.errors);
+    if let Err(e) = update_pypi(project, &devs, &old, &mut lock, &mut changes, only, cx, paths) {
+        errors.push(format!("{e:#}"));
+    }
 
     let images: BTreeSet<String> = devs
         .values()
-        .flat_map(|d| d.container.iter().cloned().chain(d.services.iter().filter_map(|s| s.image_ref())))
+        .flat_map(|d| {
+            d.container
+                .iter()
+                .chain(&d.fallback_container)
+                .cloned()
+                .chain(d.services.iter().filter_map(|s| s.image_ref()))
+        })
         .collect();
     lock.image.clear();
     for gone in old.image.keys().filter(|r| !images.contains(*r)) {
@@ -159,6 +173,60 @@ pub fn update(project: &Project, only: &[String], cx: &fspec_sources::Cx) -> Res
         misses = resolved.misses;
     }
     Ok(Update { lock, changes, errors, misses })
+}
+
+/// Compile each `pypi(...)` package with the locked uv, for the locked python's version, and
+/// keep the old entry for any package `only` leaves out.
+#[allow(clippy::too_many_arguments)]
+fn update_pypi(
+    project: &Project,
+    devs: &BTreeMap<String, Dev>,
+    old: &Lock,
+    lock: &mut Lock,
+    changes: &mut Vec<String>,
+    only: &[String],
+    cx: &fspec_sources::Cx,
+    paths: &Paths,
+) -> Result<()> {
+    let mut wanted: BTreeMap<String, &fspec_core::resource::Pkg> = BTreeMap::new();
+    let mut tools = None;
+    for dev in devs.values() {
+        for p in dev.packages.iter().filter(|p| python::is_pypi(p)) {
+            wanted.insert(p.name.clone(), p);
+        }
+        if tools.is_none() {
+            tools = python::tools(dev)?;
+        }
+    }
+    let Some((python_pkg, uv_pkg)) = tools else { return Ok(()) };
+    let python_version = lock
+        .pkg(&python_pkg.name)
+        .and_then(|l| l.version.clone())
+        .context("pkg python did not resolve, so pypi packages cannot be compiled")?;
+    let local = &cx.local.0;
+    let uv = activate::with_store(paths, cx.runner, cx.fetch, project, lock, local, |scx, shared, own| {
+        let u = fspec_store::unpack_for_project(scx, uv_pkg, shared, own)?;
+        let rel = u.bins.get("uv").context("the uv package has no uv command")?;
+        Ok(u.dir.join(rel))
+    })?;
+    for (name, p) in wanted {
+        let before = old.pkg(&name).filter(|l| l.source == p.source.to_string());
+        if !only.is_empty() && !only.contains(&name) {
+            if let Some(b) = before {
+                lock.upsert(b.clone());
+            }
+            continue;
+        }
+        let entry = python::compile(cx.runner, &uv, p, &python_version)?;
+        let v = entry.version.clone().unwrap_or_default();
+        match before.and_then(|b| b.version.clone()) {
+            None => changes.push(format!("+ {name} {v}")),
+            Some(was) if was != v => changes.push(format!("{name} {was} -> {v}")),
+            Some(_) => {}
+        }
+        lock.upsert(entry);
+    }
+    Ok(())
 }
 
 /// Where the user's own copy of store packages goes when the system store lacks them.

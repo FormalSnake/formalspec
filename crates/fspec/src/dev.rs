@@ -132,6 +132,10 @@ fn plan(project: &Project, m: &Machine) -> Result<()> {
     let dev = project.evaluate(&m.platform)?;
     let lock = Lock::load(&project.lock_path())?;
     println!("{} ({})", project.file().display(), m.platform);
+    if !dev.platforms.contains(&m.platform) {
+        println!("  this project does not support {}; it targets {}", m.platform, dev.platforms.join(", "));
+        return Ok(());
+    }
     for p in &dev.packages {
         match lock.pkg(&p.name).filter(|l| l.source == p.source.to_string()) {
             Some(l) => {
@@ -140,9 +144,25 @@ fn plan(project: &Project, m: &Machine) -> Result<()> {
             None => println!("  ! pkg {} is not in fspec.lock, run fspec update", p.name),
         }
     }
-    let manager = match &dev.container {
+    let pinned =
+        |image: &str| lock.image.get(image).cloned().unwrap_or_else(|| "(not pinned, run fspec update)".into());
+    let misses = fspec_dev::native_misses(&dev, &lock, m.manager);
+    let image = match (&dev.container, &dev.fallback_container) {
+        (Some(image), _) => Some(image.clone()),
+        (None, Some(fallback)) if !misses.is_empty() => {
+            println!("  {}: the shell runs in fallback_container {fallback}", misses.join("; "));
+            Some(fallback.clone())
+        }
+        (None, _) => {
+            for miss in &misses {
+                println!("  ! {miss}: fspec dev fails here; set fallback_container or name the package by hand");
+            }
+            None
+        }
+    };
+    let manager = match &image {
         Some(image) => {
-            println!("  container {image} {}", lock.image.get(image).map_or("(not pinned, run fspec update)", |s| s));
+            println!("  container {image} {}", pinned(image));
             libs::manager_of_image(image)
         }
         None => m.manager,
@@ -172,12 +192,12 @@ fn plan(project: &Project, m: &Machine) -> Result<()> {
 }
 
 /// `fspec update` in a project directory.
-pub fn update(only: &[String]) -> Result<()> {
+pub fn update(paths: &Paths, only: &[String]) -> Result<()> {
     let project = project(None)?;
     let (fetch, runner) = (LiveFetch::new(), LiveRunner);
     let cx = fspec_sources::Cx::new(&fetch, &runner).with_spec_dir(&project.dir);
     let old = Lock::load(&project.lock_path())?;
-    let u = fspec_dev::update(&project, only, &cx)?;
+    let u = fspec_dev::update(&project, only, &cx, paths)?;
     for line in &u.changes {
         println!("{line}");
     }

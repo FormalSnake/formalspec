@@ -30,6 +30,10 @@ pub struct Dev {
     /// own repos.
     #[serde(default)]
     pub container: Option<String>,
+    /// The image the shell runs in instead on a machine whose package manager has no package
+    /// for some `lib(...)` or `bin(...)`, or that has no package manager fspec knows.
+    #[serde(default)]
+    pub fallback_container: Option<String>,
     #[serde(default = "default_platforms")]
     pub platforms: Vec<String>,
 }

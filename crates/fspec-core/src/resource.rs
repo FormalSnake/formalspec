@@ -287,6 +287,17 @@ pub enum Source {
     Nix {
         attr: String,
     },
+    /// One file or archive at a fixed URL, pinned by its hash.
+    Url {
+        url: String,
+    },
+    /// CPython from python-build-standalone, at the build uv's download metadata names for the
+    /// version.
+    Python,
+    /// A PyPI distribution and its dependencies, installed into a virtualenv over `python`.
+    Pypi {
+        name: String,
+    },
 }
 
 fn opt(name: &Option<String>) -> String {
@@ -317,6 +328,9 @@ impl Source {
             Source::Moss(_) => "moss",
             Source::Git { .. } => "git",
             Source::Nix { .. } => "nix",
+            Source::Url { .. } => "url",
+            Source::Python => "python",
+            Source::Pypi { .. } => "pypi",
         }
     }
 }
@@ -325,7 +339,11 @@ impl fmt::Display for Source {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let kind = self.kind();
         match self {
-            Source::Aqua { name } | Source::Npm { name } | Source::Cargo { name } => write!(f, "{kind}:{name}"),
+            Source::Aqua { name } | Source::Npm { name } | Source::Cargo { name } | Source::Pypi { name } => {
+                write!(f, "{kind}:{name}")
+            }
+            Source::Url { url } => write!(f, "{kind}:{url}"),
+            Source::Python => write!(f, "{kind}"),
             Source::Github { repo, .. } => write!(f, "{kind}:{repo}"),
             Source::Flatpak { id, .. } => write!(f, "{kind}{}", opt(id)),
             Source::Brew { name, cask } => write!(f, "{kind}{}{}", if *cask { ":cask" } else { "" }, opt(name)),

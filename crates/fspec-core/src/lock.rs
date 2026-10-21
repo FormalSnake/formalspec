@@ -72,6 +72,10 @@ pub struct Artifact {
     /// file in the top two levels. `<command>=<path>` names the command differently.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bins: Vec<String>,
+    /// For pypi packages: every distribution to install, one `name==version --hash=sha256:...`
+    /// line each, as uv compiles them for all platforms.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requirements: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]

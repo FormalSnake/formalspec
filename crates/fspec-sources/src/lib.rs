@@ -9,6 +9,7 @@ mod git;
 mod github;
 mod hash;
 mod npm;
+mod python;
 mod service;
 pub mod update;
 
@@ -71,10 +72,20 @@ pub fn resolve(pkg: &Pkg, platforms: &[String], min_age: Option<i64>, cx: &Cx) -
         artifacts: Default::default(),
     };
     let ctx = || format!("resolving {} ({})", pkg.name, pkg.source);
-    let pinnable =
-        matches!(pkg.source, Source::Aqua { .. } | Source::Github { .. } | Source::Npm { .. } | Source::Cargo { .. });
+    let pinnable = matches!(
+        pkg.source,
+        Source::Aqua { .. }
+            | Source::Github { .. }
+            | Source::Npm { .. }
+            | Source::Cargo { .. }
+            | Source::Python
+            | Source::Pypi { .. }
+    );
     if version.is_some() && !pinnable {
-        return Err(anyhow!("{}: version = is supported for aqua, github, npm and cargo packages", ctx()));
+        return Err(anyhow!(
+            "{}: version = is supported for aqua, github, npm, cargo, python and pypi packages",
+            ctx()
+        ));
     }
     let result = match &pkg.source {
         Source::Aqua { name } => aqua::resolve(name, &pkg.name, version, platforms, cutoff, cx, &mut locked),
@@ -93,6 +104,9 @@ pub fn resolve(pkg: &Pkg, platforms: &[String], min_age: Option<i64>, cx: &Cx) -
         // moss installs from a repository stream, not from package files, and rolls back through
         // its own states, so its packages lock by name only.
         Source::Moss(_) => Ok(()),
+        Source::Python => python::resolve(version, platforms, cx, &mut locked),
+        Source::Url { url } => python::url(url, cx, &mut locked),
+        Source::Pypi { .. } => Err(anyhow!("pypi(...) packages belong in a dev.star, which fspec dev locks")),
     };
     result.map_err(|e| anyhow!("{}: {e:#}", ctx()))?;
     if !pkg.patches.is_empty() {

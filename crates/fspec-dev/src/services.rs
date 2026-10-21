@@ -252,7 +252,8 @@ mod tests {
             env: BTreeMap::new(),
         };
         let runner = fspec_core::runner::RecordingRunner::default();
-        let env: BTreeMap<String, String> = [("PATH".to_string(), "/usr/bin:/bin".to_string())].into();
+        // The test's own PATH: the nix build sandbox has no /usr/bin or /bin.
+        let env: BTreeMap<String, String> = [("PATH".to_string(), std::env::var("PATH").unwrap())].into();
         state.enter().unwrap();
         state.start(std::slice::from_ref(&svc), &Lock::default(), &env, &project.dir, &runner, None).unwrap();
         let pid = read_pid(&state.dir.join("sleeper.pid")).unwrap();

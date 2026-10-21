@@ -29,6 +29,12 @@ pub fn verify(body: &[u8], sri: &str) -> Result<()> {
 
 /// Unpack a downloaded artifact into `dest`, picking the format from its magic bytes. Anything
 /// that is not an archive is a single executable and lands as `dest/<name>`.
+pub fn is_archive(body: &[u8]) -> bool {
+    [&[0x1f, 0x8b][..], &[0xfd, b'7', b'z', b'X', b'Z', 0], &[0x28, 0xb5, 0x2f, 0xfd], b"PK\x03\x04"]
+        .iter()
+        .any(|magic| body.starts_with(magic))
+}
+
 pub fn unpack(body: &[u8], dest: &Path, name: &str) -> Result<()> {
     fs::create_dir_all(dest).with_context(|| format!("creating {}", dest.display()))?;
     if body.starts_with(&[0x1f, 0x8b]) {

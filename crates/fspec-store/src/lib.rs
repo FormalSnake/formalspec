@@ -169,6 +169,8 @@ impl Backend for StoreBackend {
                 | Source::Cargo { .. }
                 | Source::Git { .. }
                 | Source::Nix { .. }
+                | Source::Url { .. }
+                | Source::Python
         )
     }
 
@@ -271,7 +273,15 @@ fn unpack_into(cx: &Cx, p: &Pkg, origin: &Origin, dirname: &str, dest: &Path, sc
         Origin::Url { url, hash } => {
             let body = cx.fetch.get(url)?;
             archive::verify(&body, hash).with_context(|| format!("verifying {url}"))?;
-            archive::unpack(&body, dest, &p.name).with_context(|| format!("unpacking {url}"))?;
+            match &p.source {
+                // A file that is not an archive keeps its own name and is data, not a command.
+                Source::Url { .. } if !archive::is_archive(&body) => {
+                    let name = url.rsplit('/').next().filter(|n| !n.is_empty()).unwrap_or(&p.name);
+                    fs::create_dir_all(dest)?;
+                    fs::write(dest.join(name), &body)?;
+                }
+                _ => archive::unpack(&body, dest, &p.name).with_context(|| format!("unpacking {url}"))?,
+            }
             if let Source::Npm { name } = &p.source {
                 let tarball = scratch.join("dl").join(format!("{dirname}.tgz"));
                 fs::create_dir_all(tarball.parent().context("tarball has a parent")?)?;

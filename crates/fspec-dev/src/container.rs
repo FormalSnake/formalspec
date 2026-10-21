@@ -12,7 +12,7 @@ use fspec_core::dev::Dev;
 use fspec_core::runner::Cmd;
 use fspec_core::{Lock, Paths};
 
-use crate::activate::Machine;
+use crate::activate::{Farm, Machine};
 use crate::{Project, cache_dir, libs, short_hash, user_store};
 
 const PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
@@ -47,11 +47,11 @@ impl Run {
 pub(crate) fn prepare(
     project: &Project,
     dev: &Dev,
+    reference: &str,
     lock: &Lock,
-    farm: &Path,
+    farm: &Farm,
     m: &Machine,
 ) -> Result<(Run, BTreeMap<String, String>)> {
-    let reference = dev.container.as_deref().context("dev.star names no container")?;
     let pinned = lock
         .image
         .get(reference)
@@ -89,11 +89,12 @@ pub(crate) fn prepare(
     let home = cache_dir(&m.paths.home).join("homes").join(format!("{}-{}", project.id(), m.platform));
     fs::create_dir_all(&home)?;
     let mut env = BTreeMap::new();
-    env.insert("PATH".to_string(), format!("{}:{PATH}", farm.join("bin").display()));
+    env.insert("PATH".to_string(), format!("{}:{PATH}", farm.dir.join("bin").display()));
     env.insert("HOME".into(), home.display().to_string());
     if let Some(t) = m.base.get("TERM") {
         env.insert("TERM".into(), t.clone());
     }
+    env.extend(farm.pkg_env());
     env.extend(dev.env.clone());
     env.insert("FSPEC_DEV".into(), project.dir.display().to_string());
 
@@ -102,7 +103,7 @@ pub(crate) fn prepare(
     // SAFETY: getuid and getgid cannot fail.
     let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
     args.extend(["--user".into(), format!("{uid}:{gid}")]);
-    for (dir, rw) in mounts(project, farm, &home, m.paths) {
+    for (dir, rw) in mounts(project, &farm.dir, &home, m.paths) {
         args.extend(["-v".into(), format!("{0}:{0}{1}", dir.display(), if rw { "" } else { ":ro" })]);
     }
     args.extend(["-w".into(), cwd.display().to_string()]);

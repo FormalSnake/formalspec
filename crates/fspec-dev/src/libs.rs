@@ -77,10 +77,22 @@ impl Kind {
 
     fn what(self, name: &str) -> String {
         match self {
+            Kind::Lib if is_so(name) => format!("lib/{name}"),
             Kind::Lib => format!("{name}.pc"),
             Kind::Bin => format!("an executable `{name}`"),
         }
     }
+}
+
+/// `lib("gstreamer-1.0/libgstlibav.so")` names a shared object under the library directory
+/// instead of a pkg-config module: a plugin is loaded at runtime and ships no `.pc`.
+pub fn is_so(name: &str) -> bool {
+    name.ends_with(".so") || name.contains(".so.")
+}
+
+/// Where a distro keeps 64-bit libraries: Fedora and openSUSE in lib64, the rest in lib.
+fn libdir(manager: &str) -> &'static str {
+    if matches!(manager, "dnf" | "zypper") { "/usr/lib64" } else { "/usr/lib" }
 }
 
 /// One `lib(...)` or `bin(...)` and the managers it resolves for.
@@ -147,9 +159,18 @@ pub fn resolve(devs: &BTreeMap<String, Dev>, old: &Lock, r: &Resolver) -> Result
     for (manager, ws) in by_manager {
         let answers: Vec<Result<String, String>> = match manager {
             "dnf" => ws.iter().map(|w| Ok(capability(manager, w))).collect(),
-            "moss" => ws.iter().map(|w| Ok(capability(manager, w))).collect(),
+            "moss" => ws
+                .iter()
+                .map(|w| match w.kind {
+                    Kind::Lib if is_so(&w.native.name) => {
+                        Err("moss installs by provider and has no file lookup".into())
+                    }
+                    _ => Ok(capability(manager, w)),
+                })
+                .collect(),
             "zypper" => {
-                let (libs, bins): (Vec<&Want>, Vec<&Want>) = ws.iter().partition(|w| w.kind == Kind::Lib);
+                let (libs, bins): (Vec<&Want>, Vec<&Want>) =
+                    ws.iter().partition(|w| w.kind == Kind::Lib && !is_so(&w.native.name));
                 let mut a: BTreeMap<String, Result<String, String>> = BTreeMap::new();
                 for w in libs {
                     a.insert(id(w), Ok(capability(manager, w)));
@@ -212,6 +233,7 @@ fn id(w: &Want) -> String {
 fn capability(manager: &str, w: &Want) -> String {
     let n = &w.native.name;
     match (manager, w.kind) {
+        (_, Kind::Lib) if is_so(n) => format!("{}/{n}", libdir(manager)),
         (_, Kind::Lib) => format!("pkgconfig({n})"),
         ("moss", Kind::Bin) => format!("binary({n})"),
         (_, Kind::Bin) => format!("/usr/bin/{n}"),
@@ -244,7 +266,14 @@ fn setup(manager: &str) -> &'static str {
 fn query(manager: &str, w: &Want) -> String {
     let n = &w.native.name;
     let e = regex_escape(n);
+    let base = n.rsplit('/').next().unwrap_or(n);
     match (manager, w.kind) {
+        (_, Kind::Lib) if is_so(n) => match manager {
+            "apt" => format!("apt-file search -x '/{e}$'"),
+            "pacman" => format!("pacman -F --machinereadable '{base}'"),
+            "xbps" => format!("xlocate '/usr/lib/{n}'"),
+            _ => format!("zypper -n -q se --file-list --match-exact '/usr/lib64/{n}'"),
+        },
         ("apt", Kind::Lib) => format!("apt-file search -x '/pkgconfig/{e}\\.pc$'"),
         ("apt", Kind::Bin) => format!("apt-file search -x '^/(usr/)?s?bin/{e}$'"),
         ("pacman", Kind::Lib) => format!("pacman -F --machinereadable '{n}.pc'"),
@@ -299,6 +328,14 @@ fn search(r: &Resolver, manager: &str, ws: &[&Want]) -> Vec<Result<String, Strin
 fn candidates(manager: &str, w: &Want, lines: &[&str]) -> Vec<String> {
     let n = &w.native.name;
     let file_ok = |path: &str| match w.kind {
+        // A shared object in the library directory itself, not a multilib or sysroot copy.
+        Kind::Lib if is_so(n) => {
+            let p = path.trim_start_matches('/');
+            let Some(dir) = p.strip_suffix(&format!("/{n}")) else { return false };
+            let dir = dir.strip_prefix("usr/").unwrap_or(dir);
+            matches!(dir, "lib" | "lib64")
+                || dir.strip_prefix("lib/").is_some_and(|t| t.ends_with("-linux-gnu") && !t.contains('/'))
+        }
         // Only pkg-config's own search directories: not 32-bit multilib copies, and not a
         // toolchain's private sysroot (emscripten ships an egl.pc of its own).
         Kind::Lib => {
@@ -386,6 +423,7 @@ fn brew(fetch: &dyn Fetch, ws: &[&Want]) -> Vec<Result<String, String>> {
                         .collect();
                     pick("brew", w, &found)
                 }
+                Kind::Lib if is_so(n) => Err("brew is looked up by pkg-config module or executable, not by shared object".into()),
                 Kind::Lib => {
                     let guesses = brew_guesses(n);
                     let mut found = Vec::new();
@@ -465,7 +503,7 @@ pub fn locked_for<'a>(dev: &'a Dev, lock: &'a Lock, manager: &str) -> Vec<(Strin
                 Some(l) => match (l.provides.get(manager), l.miss.get(manager)) {
                     (Some(p), _) => Ok(p.clone()),
                     (None, Some(why)) => Err(format!(
-                        "{label} has no {manager} package: {why}; name it with {}(\"{}\", {manager} = \"...\")",
+                        "{label} has no {manager} package: {why}; set fallback_container, or name it with {}(\"{}\", {manager} = \"...\")",
                         kind.key(),
                         n.name
                     )),
@@ -523,15 +561,25 @@ pub fn brew_prefix() -> PathBuf {
 /// Whether the dependency is on this Linux system: the module's `.pc` in a pkg-config
 /// directory, or the executable in a system bin directory.
 pub fn present_on_linux(root: &Path, kind_lib: bool, name: &str) -> bool {
+    let multiarch = |base: &str| -> Vec<PathBuf> {
+        let mut dirs = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(root.join(base)) {
+            dirs.extend(entries.flatten().map(|e| e.path()).filter(|p| p.to_string_lossy().ends_with("-linux-gnu")));
+        }
+        dirs
+    };
+    if kind_lib && is_so(name) {
+        let mut dirs = vec![root.join("usr/lib"), root.join("usr/lib64")];
+        dirs.extend(multiarch("usr/lib"));
+        return dirs.iter().any(|d| d.join(name).is_file());
+    }
     if kind_lib {
         let mut dirs: Vec<PathBuf> =
             ["usr/lib/pkgconfig", "usr/lib64/pkgconfig", "usr/share/pkgconfig", "usr/local/lib/pkgconfig"]
                 .iter()
                 .map(|d| root.join(d))
                 .collect();
-        if let Ok(entries) = std::fs::read_dir(root.join("usr/lib")) {
-            dirs.extend(entries.flatten().map(|e| e.path().join("pkgconfig")));
-        }
+        dirs.extend(multiarch("usr/lib").into_iter().map(|d| d.join("pkgconfig")));
         dirs.iter().any(|d| d.join(format!("{name}.pc")).is_file())
     } else {
         ["usr/bin", "bin", "usr/sbin", "sbin", "usr/local/bin"].iter().any(|d| root.join(d).join(name).is_file())
@@ -598,6 +646,25 @@ mod tests {
         ];
         assert_eq!(candidates("pacman", &egl, &lines), ["libglvnd"]);
         assert!(pick("apt", &ninja, &[]).unwrap_err().contains("nothing shipping"));
+    }
+
+    #[test]
+    fn shared_objects_resolve_by_their_path_in_the_library_directory() {
+        let av = want(Kind::Lib, "gstreamer-1.0/libgstlibav.so");
+        assert_eq!(capability("dnf", &av), "/usr/lib64/gstreamer-1.0/libgstlibav.so");
+        let apt = [
+            "gstreamer1.0-libav: /usr/lib/x86_64-linux-gnu/gstreamer-1.0/libgstlibav.so",
+            "x: /usr/lib/x86_64-linux-gnu/gstreamer-1.0/sub/gstreamer-1.0/libgstlibav.so",
+        ];
+        assert_eq!(candidates("apt", &av, &apt), ["gstreamer1.0-libav"]);
+        let pacman = ["extra\0gst-libav\x001.26\0usr/lib/gstreamer-1.0/libgstlibav.so"];
+        assert_eq!(candidates("pacman", &av, &pacman), ["gst-libav"]);
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("usr/lib/x86_64-linux-gnu/gstreamer-1.0");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("libgstlibav.so"), "").unwrap();
+        assert!(present_on_linux(root.path(), true, "gstreamer-1.0/libgstlibav.so"));
+        assert!(!present_on_linux(root.path(), true, "gstreamer-1.0/libgstisomp4.so"));
     }
 
     #[test]

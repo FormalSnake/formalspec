@@ -290,7 +290,7 @@ fn main() -> Result<()> {
     let spec_dir = spec_path.parent().context("spec has no parent directory")?.to_path_buf();
     match &cli.command {
         Command::Plan { .. } | Command::Update { .. } if dev::in_project(&cli.spec, &spec_path) => match &cli.command {
-            Command::Update { pkgs, .. } => dev::update(pkgs),
+            Command::Update { pkgs, .. } => dev::update(&paths, pkgs),
             _ => dev::plan_here(&paths),
         },
         Command::Plan { host, json, all, dirty, local } => {

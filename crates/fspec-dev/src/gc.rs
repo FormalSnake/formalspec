@@ -21,9 +21,15 @@ pub fn run(home: &Path, cutoff: SystemTime) -> Result<Vec<PathBuf>> {
         let project = fs::read_to_string(farm.join("project")).unwrap_or_default();
         let recent = fs::metadata(farm.join("project")).and_then(|m| m.modified()).is_ok_and(|t| t > cutoff);
         if recent && Path::new(project.trim()).join(FILE).is_file() {
-            for link in fs::read_dir(farm.join("bin")).into_iter().flatten().flatten() {
-                if let Ok(target) = fs::read_link(link.path())
-                    && let Ok(rest) = target.strip_prefix(&store)
+            // Packages without commands (fonts) are only named in `trees`.
+            let trees = fs::read_to_string(farm.join("trees")).unwrap_or_default();
+            let links = fs::read_dir(farm.join("bin"))
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter_map(|l| fs::read_link(l.path()).ok());
+            for target in links.chain(trees.lines().map(PathBuf::from)) {
+                if let Ok(rest) = target.strip_prefix(&store)
                     && let Some(top) = rest.components().next()
                 {
                     used.insert(top.as_os_str().to_owned());

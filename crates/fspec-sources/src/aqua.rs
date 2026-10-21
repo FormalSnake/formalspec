@@ -284,16 +284,17 @@ fn newest_tag(repo: &str, prefix: Option<&str>, cx: &Cx) -> Result<String> {
 /// constraint holds, laid over the base.
 fn effective(entry: &Entry, tag: &str) -> Result<Def> {
     let base = &entry.def;
+    let semver = base.version_prefix.as_deref().and_then(|p| tag.strip_prefix(p)).unwrap_or(tag);
     let use_base = match base.version_constraint.as_deref() {
         None | Some("") => entry.version_overrides.is_empty(),
-        Some(c) => eval_constraint(c, tag).with_context(|| format!("version_constraint `{c}`"))?,
+        Some(c) => eval_constraint(c, tag, semver).with_context(|| format!("version_constraint `{c}`"))?,
     };
     if use_base {
         return Ok(base.clone());
     }
     for o in &entry.version_overrides {
         let c = o.version_constraint.as_deref().unwrap_or("true");
-        if eval_constraint(c, tag).with_context(|| format!("version_constraint `{c}`"))? {
+        if eval_constraint(c, tag, semver).with_context(|| format!("version_constraint `{c}`"))? {
             return Ok(layer(base, o));
         }
     }
@@ -533,7 +534,8 @@ fn call(f: &str, a: &[String]) -> Result<String> {
 }
 
 // Version constraints: `true`, `false`, `semver("<= 1.2, > 0.5")`, `Version == "v1"`,
-// `Version != "v1"`, `Version startsWith "v1"`, `Version in ["v1", "v2"]`, with `!`, `&&`, `||` and parentheses.
+// `Version != "v1"`, `Version startsWith "v1"`, `Version in ["v1", "v2"]`, the same on `SemVer`
+// (the version without its `version_prefix`), with `or` and `and` as words too, and `!`, `&&`, `||` and parentheses.
 
 #[derive(Debug, Clone, PartialEq)]
 enum Tok {
@@ -576,10 +578,11 @@ struct Parser<'a> {
     toks: Vec<Tok>,
     at: usize,
     version: &'a str,
+    semver: &'a str,
 }
 
-pub fn eval_constraint(expr: &str, version: &str) -> Result<bool> {
-    let mut p = Parser { toks: lex(expr)?, at: 0, version };
+pub fn eval_constraint(expr: &str, version: &str, semver: &str) -> Result<bool> {
+    let mut p = Parser { toks: lex(expr)?, at: 0, version, semver };
     let v = p.or()?;
     if p.at != p.toks.len() {
         bail!("trailing input");
@@ -593,7 +596,17 @@ impl Parser<'_> {
     }
 
     fn eat(&mut self, op: &str) -> bool {
-        if matches!(self.peek(), Some(Tok::Op(o)) if *o == op) {
+        let word = match op {
+            "||" => Some("or"),
+            "&&" => Some("and"),
+            _ => None,
+        };
+        let hit = match self.peek() {
+            Some(Tok::Op(o)) => *o == op,
+            Some(Tok::Ident(w)) => Some(w.as_str()) == word,
+            _ => false,
+        };
+        if hit {
             self.at += 1;
             true
         } else {
@@ -648,22 +661,23 @@ impl Parser<'_> {
                 if !self.eat(")") {
                     bail!("missing `)`");
                 }
-                semver_matches(&c, self.version)
+                semver_matches(&c, self.semver)
             }
-            "Version" => {
+            "Version" | "SemVer" => {
+                let subject = if id == "Version" { self.version } else { self.semver };
                 let op = self.peek().cloned();
                 self.at += 1;
                 if op == Some(Tok::Ident("in".into())) {
-                    return self.list().map(|l| l.iter().any(|v| v == self.version));
+                    return self.list().map(|l| l.iter().any(|v| v == subject));
                 }
                 let Some(Tok::Str(rhs)) = self.peek().cloned() else { bail!("expected a string after Version") };
                 self.at += 1;
                 match op {
-                    Some(Tok::Op("==")) => Ok(self.version == rhs),
-                    Some(Tok::Op("!=")) => Ok(self.version != rhs),
-                    Some(Tok::Ident(w)) if w == "startsWith" => Ok(self.version.starts_with(&rhs)),
-                    Some(Tok::Ident(w)) if w == "endsWith" => Ok(self.version.ends_with(&rhs)),
-                    Some(Tok::Ident(w)) if w == "contains" => Ok(self.version.contains(&rhs)),
+                    Some(Tok::Op("==")) => Ok(subject == rhs),
+                    Some(Tok::Op("!=")) => Ok(subject != rhs),
+                    Some(Tok::Ident(w)) if w == "startsWith" => Ok(subject.starts_with(&rhs)),
+                    Some(Tok::Ident(w)) if w == "endsWith" => Ok(subject.ends_with(&rhs)),
+                    Some(Tok::Ident(w)) if w == "contains" => Ok(subject.contains(&rhs)),
                     _ => bail!("unsupported operator after Version"),
                 }
             }
@@ -774,12 +788,16 @@ mod tests {
 
     #[test]
     fn constraints_and_pipelines() {
-        assert!(eval_constraint(r#"semver(">= 1.0, < 2")"#, "v1.5.0").unwrap());
-        assert!(!eval_constraint(r#"semver(">= 1.0, < 2")"#, "2.0.0").unwrap());
-        assert!(eval_constraint(r#"Version == "v1" || Version startsWith "v2""#, "v2.3").unwrap());
-        assert!(eval_constraint(r#"!(Version == "v1") && true"#, "v2").unwrap());
-        assert!(eval_constraint(r#"Version in ["v0.5.1", "v0.6.0"]"#, "v0.6.0").unwrap());
-        assert!(!eval_constraint(r#"Version in ["v0.5.1"] && true"#, "v0.6.0").unwrap());
+        assert!(eval_constraint(r#"semver(">= 1.0, < 2")"#, "v1.5.0", "v1.5.0").unwrap());
+        assert!(!eval_constraint(r#"semver(">= 1.0, < 2")"#, "2.0.0", "2.0.0").unwrap());
+        assert!(eval_constraint(r#"Version == "v1" || Version startsWith "v2""#, "v2.3", "v2.3").unwrap());
+        assert!(eval_constraint(r#"!(Version == "v1") && true"#, "v2", "v2").unwrap());
+        assert!(eval_constraint(r#"Version in ["v0.5.1", "v0.6.0"]"#, "v0.6.0", "v0.6.0").unwrap());
+        assert!(!eval_constraint(r#"Version in ["v0.5.1"] && true"#, "v0.6.0", "v0.6.0").unwrap());
+        let nextest = r#"SemVer in ["0.9.65", "0.9.69"] or semver("> 0.9.59, <= 0.9.61-rc.1")"#;
+        assert!(eval_constraint(nextest, "cargo-nextest-0.9.60", "0.9.60").unwrap());
+        assert!(!eval_constraint(nextest, "cargo-nextest-0.9.100", "0.9.100").unwrap());
+        assert!(eval_constraint(r#"true and not_a_word"#, "v1", "1").is_err());
         let v = Vars {
             version: "v1.2.3".into(),
             semver: "1.2.3".into(),

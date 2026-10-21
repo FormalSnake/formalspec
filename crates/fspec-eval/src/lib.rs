@@ -310,7 +310,24 @@ fn untag(what: &str, field: &str, kind: &str, v: &mut Json) -> anyhow::Result<()
 fn pkg_<'v>(args: UnpackTuple<Value<'v>>, kwargs: Value<'v>) -> anyhow::Result<Resource_> {
     let mut map = fields("pkg", &["name"], &args.items, kwargs)?;
     let name = map.get("name").and_then(Json::as_str).context("pkg() needs a name")?.to_string();
-    map.entry("source").or_insert_with(|| serde_json::to_value(Source::Aqua { name }).unwrap());
+    // The aqua registry has no CPython, so python comes from python-build-standalone.
+    let default = if name == "python" { Source::Python } else { Source::Aqua { name } };
+    map.entry("source").or_insert_with(|| serde_json::to_value(default).unwrap());
+    pkg_from(map)
+}
+
+/// `pypi("yt-dlp")`: a pkg whose source is the PyPI distribution of the same name.
+fn pypi_<'v>(args: UnpackTuple<Value<'v>>, kwargs: Value<'v>) -> anyhow::Result<Resource_> {
+    let mut map = fields("pypi", &["name"], &args.items, kwargs)?;
+    let name = map.get("name").and_then(Json::as_str).context("pypi() needs a name")?.to_string();
+    if map.contains_key("source") {
+        bail!("pypi() takes no source");
+    }
+    map.insert("source".into(), serde_json::to_value(Source::Pypi { name }).unwrap());
+    pkg_from(map)
+}
+
+fn pkg_from(mut map: serde_json::Map<String, Json>) -> anyhow::Result<Resource_> {
     for (field, kind) in [("files", "file"), ("services", "service"), ("timers", "timer")] {
         if let Some(v) = map.get_mut(field) {
             untag("pkg", field, kind, v)?;
@@ -667,6 +684,20 @@ fn builtins(builder: &mut GlobalsBuilder) {
         #[starlark(kwargs)] kwargs: Value<'v>,
     ) -> anyhow::Result<Resource_> {
         make::<Source>("git", &["url", "rev"], args, kwargs)
+    }
+
+    fn pypi<'v>(
+        #[starlark(args)] args: UnpackTuple<Value<'v>>,
+        #[starlark(kwargs)] kwargs: Value<'v>,
+    ) -> anyhow::Result<Resource_> {
+        pypi_(args, kwargs)
+    }
+
+    fn url<'v>(
+        #[starlark(args)] args: UnpackTuple<Value<'v>>,
+        #[starlark(kwargs)] kwargs: Value<'v>,
+    ) -> anyhow::Result<Resource_> {
+        make::<Source>("url", &["url"], args, kwargs)
     }
 
     fn nix<'v>(
