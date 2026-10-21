@@ -111,8 +111,8 @@ fn stages(plan: &Plan, device: &str, distro: &str) -> (Vec<String>, Vec<usize>) 
     (titles, of_step)
 }
 
-/// Execute `plan`, reporting each stage and every output line on `tx` and appending all of it to
-/// `log`. Cleanup runs whether or not the steps succeeded, as [`Plan::execute`] does.
+/// Execute `plan`, reporting each stage, every output line and a failure on `tx` and appending all
+/// of it to `log`. Cleanup runs whether or not the steps succeeded, as [`Plan::execute`] does.
 pub fn execute(plan: &Plan, device: &str, distro: &str, log: &Path, tx: &Sender<Progress>) -> Result<()> {
     let (titles, of_step) = stages(plan, device, distro);
     let runner = Streaming { tx: tx.clone(), log: Mutex::new(File::create(log)?) };
@@ -126,11 +126,15 @@ pub fn execute(plan: &Plan, device: &str, distro: &str, log: &Path, tx: &Sender<
         }
         let one = Plan { steps: vec![step.clone()], cleanup: Vec::new() };
         if let Err(e) = one.execute(&runner) {
-            result = Err(e.context(titles[stage].clone()));
+            let error = format!("{e:#}");
+            let _ = tx.send(Progress::Failed { stage: titles[stage].clone(), error, log: log.to_path_buf() });
+            result = Err(e);
             break;
         }
     }
-    let _ = tx.send(Progress::Stage { index: total - 1, total, title: titles[total - 1].clone() });
+    if result.is_ok() {
+        let _ = tx.send(Progress::Stage { index: total - 1, total, title: titles[total - 1].clone() });
+    }
     for c in &plan.cleanup {
         let _ = runner.run(c);
     }

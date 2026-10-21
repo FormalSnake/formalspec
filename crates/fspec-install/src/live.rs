@@ -1,15 +1,19 @@
-//! What the live backend reads from the machine the installer booted on.
+//! The backend on the installer ISO, reading and changing the machine it booted on.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::Sender;
 
 use anyhow::{Context, Result};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
+use fspec_core::Paths;
 use fspec_core::resource::System;
-use fspec_core::runner::{Cmd, Runner};
+use fspec_core::runner::{Cmd, LiveRunner, Runner};
 use serde_json::Value;
 
-use crate::model::{DiskInfo, Firmware, GitAuth, HostSummary};
+use crate::backend::Backend;
+use crate::model::{Choices, DiskInfo, Draft, Firmware, GitAuth, HostSummary, Progress, SystemChoice};
+use crate::{install, spec};
 
 pub const LSBLK: [&str; 6] =
     ["-J", "-b", "-p", "-o", "NAME,TYPE,SIZE,MODEL,TRAN,RM,FSTYPE,LABEL,PARTLABEL,MOUNTPOINTS", "-e7"];
@@ -171,6 +175,123 @@ fn summary(h: &fspec_core::resource::Host) -> HostSummary {
         distro,
         users: h.users.iter().map(|u| u.name.clone()).collect(),
         unsupported,
+    }
+}
+
+/// The backend on the installer ISO.
+pub struct Live {
+    paths: Paths,
+}
+
+impl Live {
+    pub fn new() -> Live {
+        Live { paths: Paths::new("/".into(), "/root".into()) }
+    }
+
+    fn prepare(&self, c: &Choices) -> Result<(PathBuf, String)> {
+        Ok(match &c.system {
+            SystemChoice::Fresh { .. } => {
+                let dir = PathBuf::from(WORK).join("spec");
+                if dir.exists() {
+                    std::fs::remove_dir_all(&dir)?;
+                }
+                std::fs::create_dir_all(&dir)?;
+                spec::write_repo(&dir, c)?;
+                (dir, c.account.hostname.clone())
+            }
+            SystemChoice::Restore { checkout, host, .. } => (checkout.clone(), host.clone()),
+        })
+    }
+
+    fn plan(&self, c: &Choices, ids: &fspec_switch::Ids) -> Result<(fspec_switch::Plan, String)> {
+        let (spec_dir, host) = self.prepare(c)?;
+        let distro = fspec_eval::evaluate(&spec_dir.join("spec.star"))?.host(&host)?.system.as_ref().map(|s| match s {
+            System::Image(i) => i.distro(),
+            System::Distro(d) => d.distro.clone(),
+        });
+        let fedora = match distro.as_deref() {
+            Some("fedora") => {
+                let json = LiveRunner.check(&Cmd::new("curl").args(["-fsSL", FEDORA_RELEASES]))?.stdout;
+                Some(install::fedora_release(&json).context("reading Fedora's release list")?)
+            }
+            _ => None,
+        };
+        let exe = std::env::current_exe()?;
+        let fspec = exe.with_file_name("fspec");
+        let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
+        let setup = install::Setup {
+            spec_dir: &spec_dir,
+            host: &host,
+            fspec: &fspec,
+            efi: Path::new("/sys/firmware/efi").is_dir(),
+            cmdline: &cmdline,
+            fedora_release: fedora.as_deref(),
+            ids,
+        };
+        Ok((install::plan(&self.paths, c, &setup)?, distro.unwrap_or_default()))
+    }
+}
+
+impl Default for Live {
+    fn default() -> Live {
+        Live::new()
+    }
+}
+
+/// Where the live session keeps the spec repo it writes and clones.
+const WORK: &str = "/run/fspec-install";
+const FEDORA_RELEASES: &str = "https://fedoraproject.org/releases.json";
+
+impl Backend for Live {
+    fn disks(&self) -> Result<Vec<DiskInfo>> {
+        disks(&LiveRunner)
+    }
+
+    fn firmware(&self) -> Firmware {
+        firmware(Path::new("/sys"))
+    }
+
+    fn locales(&self) -> Vec<(String, String)> {
+        locales(&LiveRunner)
+    }
+
+    fn keymaps(&self) -> Vec<String> {
+        keymaps(&std::fs::read_to_string("/usr/share/X11/xkb/rules/base.lst").unwrap_or_default())
+    }
+
+    fn timezones(&self) -> Vec<String> {
+        timezones(&std::fs::read_to_string("/usr/share/zoneinfo/zone1970.tab").unwrap_or_default())
+    }
+
+    fn set_keymap(&self, keymap: &str) -> Result<()> {
+        LiveRunner.check(&Cmd::new("loadkeys").arg(keymap)).map(drop)
+    }
+
+    fn clone_spec(&self, url: &str, auth: &GitAuth, into: &Path) -> Result<Vec<HostSummary>> {
+        if into.exists() {
+            std::fs::remove_dir_all(into)?;
+        }
+        clone_spec(&LiveRunner, url, auth, into)
+    }
+
+    fn preview(&self, draft: &Draft) -> String {
+        spec::preview(draft)
+    }
+
+    fn install(&self, c: &Choices, tx: Sender<Progress>) {
+        let log = install::log_path();
+        let planned = fspec_switch::new_ids().and_then(|ids| self.plan(c, &ids));
+        let (plan, distro) = match planned {
+            Ok(p) => p,
+            Err(e) => {
+                let stage = "Preparing the install".to_string();
+                let _ = tx.send(Progress::Failed { stage, error: format!("{e:#}"), log });
+                return;
+            }
+        };
+        if install::execute(&plan, &c.disk.device, &distro, &log, &tx).is_ok() {
+            let _ = tx.send(Progress::Done);
+        }
     }
 }
 
