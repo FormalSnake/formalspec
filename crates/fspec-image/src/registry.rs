@@ -22,16 +22,47 @@ pub fn repo(registry: &str, host: &str) -> Result<String> {
 
 /// The `sha256:…` digest `tag` points at in an anonymous-pull ghcr repository (`ghcr.io/owner/name`).
 pub fn resolve_digest(fetch: &dyn Fetch, repository: &str, tag: &str) -> Result<String> {
-    let Some(path) = repository.strip_prefix("ghcr.io/") else {
+    if !repository.starts_with("ghcr.io/") {
         bail!("{repository}: only ghcr.io registries are supported");
+    }
+    digest_of(fetch, repository, tag)
+        .with_context(|| format!("resolving {repository}:{tag} (the ghcr package must be public for anonymous pulls)"))
+}
+
+/// `debian:13`, `postgres:17`, `ghcr.io/o/n:tag` pinned as `<registry>/<repo>@sha256:…`, for
+/// a public image on Docker Hub or ghcr.io.
+pub fn pin_image(fetch: &dyn Fetch, reference: &str) -> Result<String> {
+    let (name, tag) = match reference.rsplit_once(':') {
+        Some((n, t)) if !t.contains('/') => (n, t),
+        _ => (reference, "latest"),
     };
-    let hint = || format!("resolving {repository}:{tag} (the ghcr package must be public for anonymous pulls)");
-    let token_url = format!("https://ghcr.io/token?scope=repository:{path}:pull");
-    let token = fetch.get_json(&token_url).with_context(hint)?;
-    let token = token["token"].as_str().with_context(|| format!("{token_url} returned no token")).with_context(hint)?;
-    let url = format!("https://ghcr.io/v2/{path}/manifests/{tag}");
+    let first = name.split('/').next().unwrap_or_default();
+    let repository = if first.contains('.') || first.contains(':') {
+        name.to_string()
+    } else if name.contains('/') {
+        format!("docker.io/{name}")
+    } else {
+        format!("docker.io/library/{name}")
+    };
+    let digest = digest_of(fetch, &repository, tag).with_context(|| format!("pinning the image {reference}"))?;
+    Ok(format!("{repository}@{digest}"))
+}
+
+fn digest_of(fetch: &dyn Fetch, repository: &str, tag: &str) -> Result<String> {
+    let (host, path) = repository.split_once('/').context("an image repository is <registry>/<name>")?;
+    let (token_url, api) = match host {
+        "ghcr.io" => (format!("https://ghcr.io/token?scope=repository:{path}:pull"), "ghcr.io"),
+        "docker.io" => (
+            format!("https://auth.docker.io/token?service=registry.docker.io&scope=repository:{path}:pull"),
+            "registry-1.docker.io",
+        ),
+        other => bail!("{repository}: images from {other} are not supported, only docker.io and ghcr.io"),
+    };
+    let token = fetch.get_json(&token_url)?;
+    let token = token["token"].as_str().with_context(|| format!("{token_url} returned no token"))?;
+    let url = format!("https://{api}/v2/{path}/manifests/{tag}");
     let auth = format!("Bearer {token}");
-    let resp = fetch.request(&url, &[("Authorization", &auth), ("Accept", MANIFEST_ACCEPT)]).with_context(hint)?;
+    let resp = fetch.request(&url, &[("Authorization", &auth), ("Accept", MANIFEST_ACCEPT)])?;
     let digest = match resp.header("docker-content-digest") {
         Some(d) => d.trim().to_string(),
         None => format!("sha256:{}", hex(&Sha256::digest(&resp.body))),
@@ -59,7 +90,8 @@ pub struct ImageUpdate {
 /// Pin every image host's pushed tag in `[system.<host>]`, and drop entries for hosts that no
 /// longer declare an image. Package entries pass through untouched.
 pub fn update_images(hosts: &[Host], old: &Lock, registry: &str, fetch: &dyn Fetch) -> Result<ImageUpdate> {
-    let mut lock = Lock { pkg: old.pkg.clone(), system: Default::default() };
+    let mut lock =
+        Lock { pkg: old.pkg.clone(), system: Default::default(), native: old.native.clone(), image: old.image.clone() };
     let (mut changes, mut errors) = (Vec::new(), Vec::new());
     for host in hosts {
         let before = old.system.get(&host.name);
@@ -119,6 +151,19 @@ mod tests {
             Some(d) => f.with_headers(MANIFEST_URL, &[("docker-content-digest", d)]),
             None => f,
         }
+    }
+
+    #[test]
+    fn docker_hub_images_pin_by_digest() {
+        let token = "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/debian:pull";
+        let manifest = "https://registry-1.docker.io/v2/library/debian/manifests/13";
+        let f = MapFetch::default()
+            .with(token, r#"{"token":"tok"}"#)
+            .with(manifest, "{}")
+            .with_headers(manifest, &[("docker-content-digest", DIGEST)]);
+        assert_eq!(pin_image(&f, "debian:13").unwrap(), format!("docker.io/library/debian@{DIGEST}"));
+        let err = pin_image(&f, "quay.io/x/y:1").unwrap_err();
+        assert!(format!("{err:#}").contains("only docker.io and ghcr.io"), "{err:#}");
     }
 
     fn image_host(name: &str) -> Host {

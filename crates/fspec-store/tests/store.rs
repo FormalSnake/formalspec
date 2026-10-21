@@ -10,7 +10,7 @@ use fspec_core::fetch::MapFetch;
 use fspec_core::lock::{Artifact, LockedPkg};
 use fspec_core::runner::{Cmd, Output, RecordingRunner, Runner};
 use fspec_core::{Backend, Cx, Desired, Facts, Lock, Paths, Plan, Scope, State};
-use fspec_store::{StoreBackend, lock_from_state, pin_dirs, sri_sha256};
+use fspec_store::{StoreBackend, lock_from_state, sri_sha256};
 use serde_json::json;
 
 const PLATFORM: &str = "aarch64-darwin";
@@ -342,26 +342,6 @@ fn nix_builds_through_the_runner_and_links_its_bin() {
     w.apply(&[pkg("hello", json!({"kind": "nix", "attr": "hello"}), "pinned")]).unwrap();
     assert_eq!(w.run("hello"), "nix hello");
     assert_eq!(fs::read_link(w.root().join("current/bin/hello")).unwrap(), out.join("bin/hello"));
-}
-
-#[test]
-fn project_pins_put_the_pinned_version_first() {
-    let mut w = World::new();
-    let want = [aqua("hello")];
-    w.add_hello("1.0.0");
-    w.apply(&want).unwrap();
-    w.add_hello("2.0.0");
-    w.apply(&want).unwrap();
-
-    let project = w.paths.root.join("work/proj");
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join(".fspec.toml"), "[tools]\nhello = \"1.0.0\"\nmissing = \"3.0.0\"\n").unwrap();
-    let dirs = pin_dirs(&w.paths, &project.join("src")).unwrap();
-    assert_eq!(dirs.len(), 1);
-    let out = std::process::Command::new(dirs[0].join("hello")).output().unwrap();
-    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "1.0.0");
-
-    assert!(pin_dirs(&w.paths, &w.paths.root.join("elsewhere")).unwrap().is_empty());
 }
 
 fn with_data(d: Desired, data: &[&str]) -> Desired {

@@ -29,12 +29,15 @@ struct Dist {
     integrity: Option<String>,
 }
 
-pub fn resolve(name: &str, cutoff: Option<i64>, cx: &Cx, out: &mut LockedPkg) -> Result<()> {
+pub fn resolve(name: &str, pinned: Option<&str>, cutoff: Option<i64>, cx: &Cx, out: &mut LockedPkg) -> Result<()> {
     let url = format!("https://registry.npmjs.org/{name}");
     let doc: Packument = serde_json::from_value(cx.fetch.get_json(&url)?).with_context(|| format!("parsing {url}"))?;
-    let version = match cutoff {
-        None => doc.dist_tags.get("latest").cloned().ok_or_else(|| anyhow!("{name} has no `latest` dist-tag"))?,
-        Some(c) => doc
+    let version = match (pinned, cutoff) {
+        (Some(v), _) => v.to_string(),
+        (None, None) => {
+            doc.dist_tags.get("latest").cloned().ok_or_else(|| anyhow!("{name} has no `latest` dist-tag"))?
+        }
+        (None, Some(c)) => doc
             .versions
             .keys()
             .filter(|v| !v.contains('-'))

@@ -159,3 +159,45 @@ fn glob_works_inside_loaded_modules() {
     let Some(Resource::Pkg(p)) = parsed.host("m").unwrap().resources.first() else { panic!("no pkg") };
     assert_eq!(p.patches, ["p/one.patch"]);
 }
+
+fn dev_str(text: &str, platform: &str) -> anyhow::Result<fspec_core::dev::Dev> {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("dev.star"), text).unwrap();
+    super::evaluate_dev(&dir.path().join("dev.star"), platform)
+}
+
+#[test]
+fn dev_star_declares_a_project_environment_per_platform() {
+    let text = r#"
+dev(
+    packages = [pkg("just", version = "1.40.0"), pkg("bun", source = github("oven-sh/bun"))],
+    libs = [lib("openssl"), lib("opus", apt = "libopus-dev")] + ([lib("dbus-1")] if platform.is_linux else []),
+    bins = [bin("pkg-config")],
+    env = {"RUST_BACKTRACE": "1"},
+    services = [service("postgres", version = "17")],
+    shell_hook = "export A=1",
+)
+"#;
+    let linux = dev_str(text, "x86_64-linux").unwrap();
+    assert_eq!(linux.packages[0].version.as_deref(), Some("1.40.0"));
+    assert_eq!(linux.packages[1].source, Source::Github { repo: "oven-sh/bun".into(), asset: None });
+    assert_eq!(linux.libs.iter().map(|l| l.name.as_str()).collect::<Vec<_>>(), ["openssl", "opus", "dbus-1"]);
+    assert_eq!(linux.libs[1].overrides.get("apt").map(String::as_str), Some("libopus-dev"));
+    assert_eq!(linux.bins[0].name, "pkg-config");
+    assert_eq!(linux.services[0].image_ref().as_deref(), Some("postgres:17"));
+    assert_eq!(linux.platforms.len(), 4);
+    let mac = dev_str(text, "aarch64-darwin").unwrap();
+    assert_eq!(mac.libs.len(), 2);
+}
+
+#[test]
+fn dev_star_must_call_dev_once_and_dev_stays_out_of_specs() {
+    assert!(dev_str("x = 1", "x86_64-linux").unwrap_err().to_string().contains("must call dev(...)"));
+    assert!(dev_str("dev()\ndev()", "x86_64-linux").unwrap_err().to_string().contains("more than once"));
+    let err = eval_str("dev()\nhosts = []", &[]).unwrap_err();
+    assert!(format!("{err:#}").contains("belongs in a project's dev.star"), "{err:#}");
+    let err = dev_str("dev(libs = [lib(\"x\", ubuntu = \"y\")])", "x86_64-linux").unwrap_err();
+    assert!(format!("{err:#}").contains("unknown field `ubuntu`"), "{err:#}");
+    let err = dev_str("dev(services = [service(\"pg\", restart = \"always\")])", "x86_64-linux").unwrap_err();
+    assert!(format!("{err:#}").contains("restart"), "{err:#}");
+}

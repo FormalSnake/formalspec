@@ -89,6 +89,8 @@ mod tests {
         let pkg = Resource::Pkg(Pkg {
             name: "ripgrep".into(),
             source: Source::Aqua { name: "ripgrep".into() },
+            version: None,
+            links: Default::default(),
             mode: Default::default(),
             channel: Default::default(),
             patches: vec![],

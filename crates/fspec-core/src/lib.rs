@@ -1,5 +1,6 @@
 pub mod apply;
 pub mod attribute;
+pub mod dev;
 pub mod facts;
 pub mod fetch;
 pub mod journal;

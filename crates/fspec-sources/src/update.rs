@@ -60,7 +60,8 @@ pub fn update(hosts: &[Host], old: &Lock, only: &[String], cx: &Cx) -> Result<Up
         }
     }
 
-    let mut lock = Lock { pkg: vec![], system: old.system.clone() };
+    let mut lock =
+        Lock { pkg: vec![], system: old.system.clone(), native: old.native.clone(), image: old.image.clone() };
     let mut changes = Vec::new();
     for gone in old.pkg.iter().filter(|p| !decls.contains_key(&p.name)) {
         changes.push(format!("- {} {}", gone.name, label(gone)));

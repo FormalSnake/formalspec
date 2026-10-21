@@ -267,8 +267,8 @@ active one. On macOS the root is `/opt/fspec` too.
 This gives FormalSpec three things Nix users expect:
 
 - Switching is a single `rename(2)` of `current`, so it is atomic.
-- Two versions of a tool can coexist; a project picks one with a
-  `.fspec.toml` and a shell hook.
+- Two versions of a tool can coexist; a project picks one in its `dev.star`
+  (see [Project environments](#project-environments)).
 - `fspec rollback` repoints `current` at the previous generation.
 
 Users put `/opt/fspec/current/bin` on PATH; nothing else exposes store tools.
@@ -301,21 +301,126 @@ unpacked and its `bin` linked; one with dependencies is installed with
 to the lock's `rev` when set) and links the result's `bin/`; nothing is hashed or
 copied.
 
-`.fspec.toml` in a project pins versions:
-
-```toml
-[tools]
-ripgrep = "14.1.0"
-```
-
-`eval "$(fspec shell-hook zsh)"` (also `bash`, and `fspec shell-hook fish | source`)
-installs a hook that runs `fspec env --dir $PWD` on directory change and puts
-the bins of each pinned version that is in the store first on PATH. The hook
-shells out to a hidden `fspec env`, which links them under
-`~/.cache/fspec/pins/`.
-
 Distro packages and Flatpaks live where their package manager puts them; the
 state file still records them, so rollback reinstalls the previous set.
+
+## Project environments
+
+A `dev.star` at a repo root is FormalSpec's version of a flake devShell: the
+tools, system libraries, environment and services a project needs, locked so
+that everyone who clones the repo gets the same versions.
+
+```python
+dev(
+    packages = [pkg("bun", version = "1.3.1"), pkg("just")],
+    libs = [lib("openssl"), lib("gtk4")],
+    bins = [bin("cmake")],
+    env = {"RUST_LOG": "info"},
+    services = [service("postgres", version = "17")],
+    shell_hook = "export DATABASE_URL=postgres://localhost/app",
+    container = None,
+)
+```
+
+`dev.star` is evaluated once per platform with a `platform` global (`name`,
+`os`, `arch`, `is_darwin`, `is_linux`), so a file branches the way a flake does
+on `stdenv.isLinux`. `platforms = [...]` narrows the four defaults.
+
+**Packages** are ordinary `pkg(...)` resources from FormalSpec's own sources.
+`version =` pins an exact upstream version instead of the newest release, and
+`links = {"cargo": "rustup"}` adds a command that runs another one under a new
+name (rustup's proxies act on the name they run as).
+
+**Locking.** `fspec update` in a directory with a `dev.star` and no `spec.star`
+writes `fspec.lock` next to it: every package's artifacts for every platform,
+the digest of the container and of each service image, and the package that
+provides each `lib()` and `bin()` on each package manager. Activation reads the
+lock and never resolves anything.
+
+**Activation** puts the project's packages on PATH and sets its environment;
+nothing is installed globally. Each package is the same side-by-side store
+directory a host uses: `/opt/fspec/store/<dirname>` when the host already has
+it, else unpacked into the user's store at `~/.local/share/fspec/store`. The
+commands are linked from `~/.cache/fspec/dev/farms/<hash>/bin`, put first on
+PATH, then `env` is set and `shell_hook` runs in `sh`; the variables it exports
+are what the shell gets.
+
+- `fspec dev` opens `$SHELL` in the environment; `fspec dev -- cargo build`
+  runs one command.
+- `use fspec` in an `.envrc` mirrors `use flake`. `fspec dev direnv` prints
+  the direnv library that defines it, for `~/.config/direnv/lib/fspec.sh`; it
+  evaluates `fspec dev export`, the bash that turns the calling environment
+  into the project's, and reloads when `dev.star` or `fspec.lock` changes.
+- `fspec dev plan` shows what the environment holds and every dependency the
+  lock has no package for.
+
+### Native libraries and tools
+
+`lib("gtk4")` is the pkg-config module `gtk4`, and `bin("cmake")` an
+executable. FormalSpec keeps no table of package names: at `fspec update` it
+asks each package manager what provides the file, and writes the answer into
+the lock.
+
+| Manager | `lib("gtk4")` | `bin("cmake")` |
+| --- | --- | --- |
+| dnf | installs `pkgconfig(gtk4)` | installs `/usr/bin/cmake` |
+| zypper | installs `pkgconfig(gtk4)` | `zypper se --file-list` |
+| moss | installs `pkgconfig(gtk4)` | installs `binary(cmake)` |
+| apt | `apt-file search` for `gtk4.pc` | `apt-file search` for `bin/cmake` |
+| pacman | `pacman -F gtk4.pc` | `pacman -F cmake` |
+| xbps | `xlocate` | `xlocate` |
+| brew | the formula whose bottle ships `lib/pkgconfig/gtk4.pc` | the formula listing `cmake` in `executables` |
+
+dnf, zypper and moss resolve capabilities themselves, so the lock holds the
+capability. The file-index lookups run in a container of that distro (debian,
+archlinux, void, tumbleweed), so `fspec update` needs docker or podman for
+them. brew's API lists no files, so a pkg-config module is matched to formulae
+named after it (`dbus-1` checks `dbus`) and confirmed against the bottle's
+contents. When several packages ship the file, the one with the same name (for
+a bin) or the only `-dev`/`-devel` one (for a lib) wins; otherwise it is a
+miss. A miss is recorded in the lock with its reason, `fspec update` and
+`fspec dev plan` print it, and `lib("x", apt = "libx-dev")` names the package
+by hand for the lookups that cannot resolve it.
+
+Activation installs nothing system-wide. It checks that each module's `.pc` or
+each executable is present (on macOS, that `$(brew --prefix)/opt/<formula>`
+exists, whose `lib/pkgconfig`, `lib`, `include` and `bin` go on
+`PKG_CONFIG_PATH`, `LIBRARY_PATH`, `CPATH` and PATH) and fails with the install
+command built from the locked names when something is missing. A system with
+no supported package manager (NixOS) cannot satisfy `lib()` and `bin()` this
+way and is told to use a container.
+
+`container = "debian:13"` is the reproducible option: the shell runs in the
+pinned image plus one derived layer that installs the locked packages from that
+distro's repositories, tagged by a hash of its Containerfile. The project, a
+per-project home and the store are mounted at the paths they have outside, with
+the host network and the caller's uid. On macOS the container runs the
+`<arch>-linux` evaluation of `dev.star`.
+
+This is weaker than Nix. A Nix devShell pins every library to an exact store
+path built from a hashed recipe, so two machines get bit-identical inputs.
+FormalSpec pins its own packages that way, but `lib()` and `bin()` pin only a
+package name: the version is whatever the distro, or brew, ships that day, and
+two developers on Fedora and Arch build against different gtk4 releases. The
+container narrows this to one distro and one base digest, yet its `apt-get
+install` still takes the repository's current versions when the layer is
+built. Making it exact would mean either a package set FormalSpec builds itself
+(which is Nix) or snapshot mirrors for every distro, and both are out of scope.
+
+### Services
+
+`service("postgres", version = "17")` without `exec` runs the image
+`postgres:17`, pinned by digest in the lock, detached with each exposed port
+published on 127.0.0.1 and a named volume per declared volume, so data
+survives restarts. With `exec = "..."` it is a process started from the
+project's environment in its own process group, logging under
+`~/.cache/fspec/dev/run/<project>/logs`. Services start when the first
+`fspec dev` shell of the project opens and stop when the last one exits;
+`fspec dev up` starts them and keeps them running until `fspec dev down`. A
+direnv shell does not start services, since direnv has no exit hook.
+
+`fspec gc` also drops link farms whose project is gone or that were not used
+within the cutoff, then the user-store packages no remaining farm links into.
 
 ## Apply is a transaction
 
@@ -939,7 +1044,10 @@ distro, so the `system` block is where those names live.
 | `fspec plan [--all] [--dirty]` | Diff config against state, per host; `--all` asks each remote host over ssh |
 | `fspec apply [--host h] [--all] [--dirty]` | Converge, over ssh for remote hosts |
 | `fspec rollback [gen]` | Previous generation, data included |
-| `fspec shell-hook <fish\|zsh\|bash>` | Shell code that applies `.fspec.toml` pins |
+| `fspec dev [-- cmd]` | A shell, or one command, in the nearest `dev.star`'s environment |
+| `fspec dev export` / `direnv` | The environment as bash for direnv, and the `use fspec` library |
+| `fspec dev up` / `down` | Start or stop the project's services |
+| `fspec dev plan` | What the project environment holds and what the lock could not resolve |
 | `fspec gc --older-than 14d` | Drop old generations, store paths and trash |
 | `fspec adopt <path>` | Pull an app's edit of a managed file into the repo |
 | `fspec orphans` | Unattributed app data |
@@ -1005,7 +1113,8 @@ A cargo workspace under `crates/`:
 | `fspec-core` | Resource types, host facts, `Paths`, the state file, the lock, the plan diff, the apply engine, the journal, the `Runner` and `Fetch` seams |
 | `fspec-eval` | Starlark builtins and evaluation into `Host` values |
 | `fspec-files` | The `file` and `secret` backend: the four modes, format writers, the three-way patch merge, `adopt`, `watch` |
-| `fspec-store` | The store backend: hash check, unpack, generations, `current`, npm and nix packages, project pins, `gc` |
+| `fspec-store` | The store backend: hash check, unpack, generations, `current`, npm and nix packages, project unpacks, `gc` |
+| `fspec-dev` | `dev.star` projects: locking, `lib()`/`bin()` resolution, activation, containers, services |
 | `fspec-image` | Containerfile and workflow generation, ghcr digest resolution, the bootc `image` backend |
 | `fspec-sources` | Resolvers (aqua, github, npm, cargo, flatpak, brew, git, nix, dnf, pacman, apt, xbps) and `fspec update` |
 | `fspec-pkgmgr` | Flatpak, Homebrew and the distro package backends (dnf, pacman, apt, xbps), and the base packages of a classic distro |

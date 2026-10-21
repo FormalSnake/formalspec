@@ -1,4 +1,4 @@
-//! Evaluates `spec.star` into hosts. Builtins return opaque `resource` values carrying their JSON
+//! Evaluates `spec.star` into hosts, and a project's `dev.star` into its environment. Builtins return opaque `resource` values carrying their JSON
 //! form, validated against the `fspec-core` types as soon as they are constructed, so a typo
 //! fails at the line that made it.
 
@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 use allocative::Allocative;
 use anyhow::{Context, anyhow, bail};
+use fspec_core::dev::Dev;
 use fspec_core::facts::Facts;
 use fspec_core::resource::{Host, Resource, Source, System};
 use serde::de::DeserializeOwned;
@@ -44,8 +45,12 @@ impl Spec {
 pub fn evaluate(spec_path: &Path) -> anyhow::Result<Spec> {
     let root = spec_path.parent().map(Path::to_path_buf).unwrap_or_default();
     let globals = globals();
-    let loader =
-        Loader { root: SpecRoot(root), globals: &globals, cache: RefCell::default(), loading: RefCell::default() };
+    let loader = Loader {
+        root: SpecRoot { dir: root, dev: None },
+        globals: &globals,
+        cache: RefCell::default(),
+        loading: RefCell::default(),
+    };
     let text = std::fs::read_to_string(spec_path).with_context(|| format!("reading {}", spec_path.display()))?;
     let ast = AstModule::parse(&spec_path.display().to_string(), text, &dialect()).map_err(|e| e.into_anyhow())?;
 
@@ -73,6 +78,35 @@ pub fn evaluate(spec_path: &Path) -> anyhow::Result<Spec> {
     })
 }
 
+/// Evaluate a project's `dev.star` as seen from `platform` (`aarch64-darwin`), which the file
+/// reads as the global `platform`. The file calls `dev(...)` exactly once.
+pub fn evaluate_dev(path: &Path, platform: &str) -> anyhow::Result<Dev> {
+    let root = path.parent().map(Path::to_path_buf).unwrap_or_default();
+    let (arch, os) = match platform.split_once('-') {
+        Some((arch @ ("x86_64" | "aarch64"), os @ ("linux" | "darwin"))) => (arch, os),
+        _ => bail!("platform `{platform}` is not one of {}", fspec_core::dev::PLATFORMS.join(", ")),
+    };
+    let globals = globals();
+    let loader = Loader {
+        root: SpecRoot { dir: root, dev: Some(RefCell::default()) },
+        globals: &globals,
+        cache: RefCell::default(),
+        loading: RefCell::default(),
+    };
+    let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let ast = AstModule::parse(&path.display().to_string(), text, &dialect()).map_err(|e| e.into_anyhow())?;
+    Module::with_temp_heap(|module| {
+        module.set("platform", platform_struct(module.heap(), platform, os, arch));
+        let mut eval = Evaluator::new(&module);
+        eval.set_loader(&loader);
+        eval.extra = Some(&loader.root);
+        eval.eval_module(ast, &globals).map_err(|e| e.into_anyhow())?;
+        anyhow::Ok(())
+    })?;
+    let declared = loader.root.dev.and_then(RefCell::into_inner);
+    declared.with_context(|| format!("{} must call dev(...)", path.display()))
+}
+
 fn dialect() -> Dialect {
     Dialect::Extended
 }
@@ -83,9 +117,13 @@ fn globals() -> Globals {
         .build()
 }
 
-/// The spec's directory, which `glob` reads and `load` resolves against.
+/// The spec's directory, which `glob` reads and `load` resolves against. For a `dev.star`,
+/// `dev` receives what its `dev(...)` call declared.
 #[derive(ProvidesStaticType)]
-struct SpecRoot(PathBuf);
+struct SpecRoot {
+    dir: PathBuf,
+    dev: Option<RefCell<Option<Dev>>>,
+}
 
 struct Loader<'a> {
     root: SpecRoot,
@@ -107,7 +145,7 @@ impl FileLoader for Loader<'_> {
         if self.loading.borrow().iter().any(|p| p == path) {
             return Err(other(anyhow!("load cycle: {} -> {path}", self.loading.borrow().join(" -> "))));
         }
-        let file = self.root.0.join(rel);
+        let file = self.root.dir.join(rel);
         let text = std::fs::read_to_string(&file).with_context(|| format!("load(\"{path}\")")).map_err(other)?;
         let ast = AstModule::parse(path, text, &dialect())?;
         self.loading.borrow_mut().push(path.into());
@@ -222,6 +260,36 @@ fn make<'v, T: DeserializeOwned + Serialize>(
     Ok(Resource_ { kind: kind.into(), data: validated::<T>(kind, map)? })
 }
 
+/// Like [`make`] for a type without a `kind` tag: the tag is added after validation, for
+/// [`untag`] to check.
+fn make_untagged<'v, T: DeserializeOwned + Serialize>(
+    kind: &str,
+    names: &[&str],
+    args: UnpackTuple<Value<'v>>,
+    kwargs: Value<'v>,
+) -> anyhow::Result<Resource_> {
+    let mut data = validated::<T>(kind, fields(kind, names, &args.items, kwargs)?)?;
+    if let Some(obj) = data.as_object_mut() {
+        obj.insert("kind".into(), kind.into());
+    }
+    Ok(Resource_ { kind: kind.into(), data })
+}
+
+/// `lib(...)` and `bin(...)`: a name plus a package name per manager the lookup cannot resolve.
+fn native_<'v>(kind: &str, args: UnpackTuple<Value<'v>>, kwargs: Value<'v>) -> anyhow::Result<Resource_> {
+    let map = fields(kind, &["name"], &args.items, kwargs)?;
+    for (k, v) in &map {
+        let known = k == "name" || fspec_core::dev::MANAGERS.contains(&k.as_str());
+        if !known {
+            bail!("{kind}(): unknown field `{k}`, expected `name` or one of {}", fspec_core::dev::MANAGERS.join(", "));
+        }
+        if !v.is_string() {
+            bail!("{kind}({k} = ...) must be a string");
+        }
+    }
+    make_untagged::<fspec_core::dev::Native>(kind, &["name"], args, kwargs)
+}
+
 /// A struct-typed field (pkg files, host users) holds `kind`-tagged JSON; check and drop the tag.
 fn untag(what: &str, field: &str, kind: &str, v: &mut Json) -> anyhow::Result<()> {
     let items: Vec<&mut Json> = match v {
@@ -303,15 +371,19 @@ fn host_<'v>(
     Ok(Resource_ { kind: "host".into(), data })
 }
 
-fn facts_struct<'v>(heap: Heap<'v>, f: &Facts) -> Value<'v> {
-    let is_darwin = f.os == fspec_core::facts::Os::Darwin;
-    let platform = heap.alloc(AllocStruct([
-        ("name", heap.alloc(f.platform())),
-        ("os", heap.alloc(f.os.to_string())),
-        ("arch", heap.alloc(f.arch.as_str())),
+fn platform_struct<'v>(heap: Heap<'v>, name: &str, os: &str, arch: &str) -> Value<'v> {
+    let is_darwin = os == "darwin";
+    heap.alloc(AllocStruct([
+        ("name", heap.alloc(name)),
+        ("os", heap.alloc(os)),
+        ("arch", heap.alloc(arch)),
         ("is_darwin", Value::new_bool(is_darwin)),
         ("is_linux", Value::new_bool(!is_darwin)),
-    ]));
+    ]))
+}
+
+fn facts_struct<'v>(heap: Heap<'v>, f: &Facts) -> Value<'v> {
+    let platform = platform_struct(heap, &f.platform(), &f.os.to_string(), &f.arch);
     heap.alloc(AllocStruct([
         ("name", heap.alloc(f.name.as_str())),
         ("platform", platform),
@@ -383,7 +455,41 @@ fn glob_(root: &Path, pattern: &str) -> anyhow::Result<Vec<String>> {
 fn builtins(builder: &mut GlobalsBuilder) {
     fn glob<'v>(pattern: &str, eval: &mut Evaluator<'v, '_, '_>) -> anyhow::Result<Vec<String>> {
         let root = eval.extra.and_then(|e| e.downcast_ref::<SpecRoot>()).context("glob needs a spec directory")?;
-        glob_(&root.0, pattern)
+        glob_(&root.dir, pattern)
+    }
+
+    fn dev<'v>(
+        #[starlark(kwargs)] kwargs: Value<'v>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<starlark::values::none::NoneType> {
+        let root = eval.extra.and_then(|e| e.downcast_ref::<SpecRoot>()).context("dev() needs a file")?;
+        let slot = root.dev.as_ref().context("dev() belongs in a project's dev.star, not in spec.star")?;
+        let mut map = fields("dev", &[], &[], kwargs)?;
+        for (field, kind) in [("packages", "pkg"), ("libs", "lib"), ("bins", "bin"), ("services", "service")] {
+            if let Some(v) = map.get_mut(field) {
+                untag("dev", field, kind, v)?;
+            }
+        }
+        let declared: Dev = serde_json::from_value(Json::Object(map)).map_err(|e| anyhow!("dev(): {e}"))?;
+        if slot.borrow().is_some() {
+            bail!("dev() is called more than once");
+        }
+        *slot.borrow_mut() = Some(declared);
+        Ok(starlark::values::none::NoneType)
+    }
+
+    fn lib<'v>(
+        #[starlark(args)] args: UnpackTuple<Value<'v>>,
+        #[starlark(kwargs)] kwargs: Value<'v>,
+    ) -> anyhow::Result<Resource_> {
+        native_("lib", args, kwargs)
+    }
+
+    fn bin<'v>(
+        #[starlark(args)] args: UnpackTuple<Value<'v>>,
+        #[starlark(kwargs)] kwargs: Value<'v>,
+    ) -> anyhow::Result<Resource_> {
+        native_("bin", args, kwargs)
     }
 
     fn host<'v>(
@@ -411,7 +517,12 @@ fn builtins(builder: &mut GlobalsBuilder) {
     fn service<'v>(
         #[starlark(args)] args: UnpackTuple<Value<'v>>,
         #[starlark(kwargs)] kwargs: Value<'v>,
+        eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Resource_> {
+        let in_dev = eval.extra.and_then(|e| e.downcast_ref::<SpecRoot>()).is_some_and(|r| r.dev.is_some());
+        if in_dev {
+            return make_untagged::<fspec_core::dev::DevService>("service", &["name"], args, kwargs);
+        }
         make::<Resource>("service", &["name"], args, kwargs)
     }
 

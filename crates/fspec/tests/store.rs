@@ -153,24 +153,48 @@ fn apply_update_and_rollback_move_current() {
 }
 
 #[test]
-fn shell_hook_and_pins() {
+fn dev_shells_reuse_the_system_store_and_run_the_hook() {
     let p = Project::new();
     p.lock("1.0.0");
     p.ok(&["apply"]);
-    p.lock("2.0.0");
-    p.ok(&["apply"]);
+    let platform = fspec_core::facts::Facts::probe_local().0;
+    let proj = p.work().join("proj");
+    fs::create_dir_all(&proj).unwrap();
+    fs::write(
+        proj.join("dev.star"),
+        format!(
+            "dev(packages = [pkg(\"hello\")], platforms = [\"{platform}\"], env = {{\"GREETING\": \"hi\"}},\n    \
+             shell_hook = 'export HOOKED=\"$GREETING-hooked\"')\n"
+        ),
+    )
+    .unwrap();
+    let hello = p.work().join("fixtures/hello-1.0.0.tar.gz");
+    let mut entry = locked("hello", "aqua:hello", "1.0.0", &hello);
+    let artifact = entry.artifacts.remove("aarch64-darwin").unwrap();
+    entry.artifacts.insert(platform, artifact);
+    let mut lock = Lock::default();
+    lock.upsert(entry);
+    lock.save(&proj.join("fspec.lock")).unwrap();
 
-    let project = p.work().join("proj");
-    fs::create_dir_all(&project).unwrap();
-    fs::write(project.join(".fspec.toml"), "[tools]\nhello = \"1.0.0\"\n").unwrap();
-    let dirs = p.ok(&["env", "--dir", project.to_str().unwrap()]);
-    let bin = PathBuf::from(dirs.lines().next().unwrap());
-    let out = Command::new(bin.join("hello")).output().unwrap();
-    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "hello 1.0.0");
-
-    for shell in ["fish", "zsh", "bash"] {
-        assert!(p.ok(&["shell-hook", shell]).contains("fspec env --dir"));
-    }
+    let dev = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_fspec"))
+            .args(["--root", p.root().to_str().unwrap(), "--home", p.root().join("home/u").to_str().unwrap()])
+            .args(["dev", "--dir", proj.to_str().unwrap()])
+            .args(args)
+            .env("XDG_DATA_HOME", p.work().join("data"))
+            .env("XDG_CACHE_HOME", p.work().join("cache"))
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    assert_eq!(dev(&["--", "sh", "-c", "hello; echo $HOOKED"]), "hello 1.0.0\nhi-hooked\n");
+    // The system store already holds hello 1.0.0, so nothing was unpacked for the project.
+    assert!(!p.work().join("data/fspec/store").exists());
+    let export = dev(&["export"]);
+    assert!(export.contains("export HOOKED='hi-hooked'"), "{export}");
+    assert!(export.contains("export PATH='") && export.contains("/farms/"), "{export}");
+    assert!(dev(&["direnv"]).contains("use_fspec()"));
 }
 
 fn spec(greet: &str) -> String {

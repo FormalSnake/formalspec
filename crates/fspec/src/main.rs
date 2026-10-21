@@ -1,4 +1,5 @@
 mod backends;
+mod dev;
 
 use std::path::{Path, PathBuf};
 
@@ -184,13 +185,15 @@ enum Command {
         #[arg(long)]
         scope: Option<ScopeArg>,
     },
-    /// Print shell code that puts `.fspec.toml` pinned tools on PATH. Run it from the shell's rc file.
-    ShellHook { shell: ShellArg },
-    /// Print the bin directories pinned for a directory, one per line. Called by the shell hook.
-    #[command(hide = true)]
-    Env {
-        #[arg(long)]
-        dir: PathBuf,
+    /// Open a shell in the project environment of the nearest dev.star, or run `-- <command>` in it.
+    Dev {
+        /// The project directory, default the current one.
+        #[arg(long, global = true)]
+        dir: Option<PathBuf>,
+        #[command(subcommand)]
+        cmd: Option<dev::DevCommand>,
+        #[arg(last = true)]
+        args: Vec<String>,
     },
 }
 
@@ -264,13 +267,6 @@ enum LayoutArg {
 }
 
 #[derive(Clone, Copy, ValueEnum)]
-enum ShellArg {
-    Fish,
-    Zsh,
-    Bash,
-}
-
-#[derive(Clone, Copy, ValueEnum)]
 enum ScopeArg {
     System,
     User,
@@ -293,6 +289,10 @@ fn main() -> Result<()> {
     let spec_path = std::path::absolute(&cli.spec)?;
     let spec_dir = spec_path.parent().context("spec has no parent directory")?.to_path_buf();
     match &cli.command {
+        Command::Plan { .. } | Command::Update { .. } if dev::in_project(&cli.spec, &spec_path) => match &cli.command {
+            Command::Update { pkgs, .. } => dev::update(pkgs),
+            _ => dev::plan_here(&paths),
+        },
         Command::Plan { host, json, all, dirty, local } => {
             let spec = fspec_eval::evaluate(&spec_path)?;
             if *all {
@@ -555,24 +555,15 @@ fn main() -> Result<()> {
                     println!("removed {line}");
                 }
                 println!("{scope:?}: freed {}", fspec_store::gc::human(report.freed));
+                if scope == Scope::User && is_live(&paths) {
+                    for path in fspec_dev::gc::run(&paths.home, cutoff)? {
+                        println!("removed {}", paths.to_spec(&path));
+                    }
+                }
             }
             Ok(())
         }
-        Command::ShellHook { shell } => {
-            let shell = match shell {
-                ShellArg::Fish => fspec_store::Shell::Fish,
-                ShellArg::Zsh => fspec_store::Shell::Zsh,
-                ShellArg::Bash => fspec_store::Shell::Bash,
-            };
-            print!("{}", fspec_store::shell_hook(shell));
-            Ok(())
-        }
-        Command::Env { dir } => {
-            for bin in fspec_store::pin_dirs(&paths, dir)? {
-                println!("{}", bin.display());
-            }
-            Ok(())
-        }
+        Command::Dev { dir, cmd, args } => dev::run(&paths, dir.as_deref(), cmd.as_ref(), args),
     }
 }
 

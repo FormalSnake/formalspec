@@ -1141,6 +1141,7 @@ dependencies = [
  "clap",
  "fspec-build",
  "fspec-core",
+ "fspec-dev",
  "fspec-eval",
  "fspec-files",
  "fspec-image",
@@ -1150,6 +1151,7 @@ dependencies = [
  "fspec-sources",
  "fspec-store",
  "fspec-switch",
+ "libc",
  "serde_json",
  "tempfile",
 ]
@@ -1178,6 +1180,24 @@ dependencies = [
  "tempfile",
  "toml 1.1.8+spec-1.1.0",
  "ureq",
+]
+
+[[package]]
+name = "fspec-dev"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "flate2",
+ "fspec-core",
+ "fspec-eval",
+ "fspec-image",
+ "fspec-sources",
+ "fspec-store",
+ "libc",
+ "serde_json",
+ "sha2 0.11.1",
+ "tar",
+ "tempfile",
 ]
 
 [[package]]

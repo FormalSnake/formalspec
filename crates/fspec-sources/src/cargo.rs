@@ -27,12 +27,25 @@ struct Version {
     yanked: bool,
 }
 
-pub fn resolve(name: &str, platforms: &[String], cutoff: Option<i64>, cx: &Cx, out: &mut LockedPkg) -> Result<()> {
+pub fn resolve(
+    name: &str,
+    pinned: Option<&str>,
+    platforms: &[String],
+    cutoff: Option<i64>,
+    cx: &Cx,
+    out: &mut LockedPkg,
+) -> Result<()> {
     let url = format!("https://crates.io/api/v1/crates/{name}");
     let doc: Crate = serde_json::from_value(cx.fetch.get_json(&url)?).with_context(|| format!("parsing {url}"))?;
-    let version = match cutoff {
-        None => doc.info.max_version.clone(),
-        Some(c) => doc
+    let version = match (pinned, cutoff) {
+        (Some(v), _) => {
+            if !doc.versions.iter().any(|x| x.num == v && !x.yanked) {
+                bail!("{name} has no published version {v}");
+            }
+            v.to_string()
+        }
+        (None, None) => doc.info.max_version.clone(),
+        (None, Some(c)) => doc
             .versions
             .iter()
             .filter(|v| !v.yanked && !v.num.contains('-'))

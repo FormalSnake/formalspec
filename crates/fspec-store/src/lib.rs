@@ -3,12 +3,12 @@
 //! symlinks into the store and switches `current` to it.
 
 mod archive;
+mod dev;
 pub mod gc;
 mod generation;
 mod npm;
 mod oci;
 mod patch;
-mod pins;
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -28,7 +28,7 @@ use serde_json::{Map, Value};
 use generation::{Generation, link_target, undo_create};
 
 pub use archive::sri_sha256;
-pub use pins::{Shell, pin_dirs, shell_hook};
+pub use dev::{Unpacked, unpack_for_project};
 
 pub struct StoreBackend;
 
@@ -222,30 +222,7 @@ impl Backend for StoreBackend {
                     if root.join("store").join(&dirname).exists() {
                         continue;
                     }
-                    let dest = staging.join("store").join(&dirname);
-                    match origin {
-                        Origin::Oci { reference } => {
-                            let body = oci::pull(cx.runner, reference, &staging.join("oci").join(&dirname))
-                                .with_context(|| format!("pulling {reference}"))?;
-                            archive::unpack(&body, &dest, &p.name).with_context(|| format!("unpacking {reference}"))?;
-                        }
-                        Origin::Url { url, hash } => {
-                            let body = cx.fetch.get(url)?;
-                            archive::verify(&body, hash).with_context(|| format!("verifying {url}"))?;
-                            archive::unpack(&body, &dest, &p.name).with_context(|| format!("unpacking {url}"))?;
-                            if let Source::Npm { name } = &p.source {
-                                let tarball = staging.join("dl").join(format!("{dirname}.tgz"));
-                                fs::create_dir_all(tarball.parent().context("tarball has a parent")?)?;
-                                fs::write(&tarball, &body)?;
-                                npm::finish(cx.runner, &dest, &tarball, name)?;
-                            }
-                            if !p.patches.is_empty() {
-                                let tree = patch_root(&dest, &p.source);
-                                patch::apply_all(&tree, cx.spec_dir, &p.patches)
-                                    .with_context(|| format!("patching {}", p.name))?;
-                            }
-                        }
-                    }
+                    unpack_into(cx, p, &origin, &dirname, &staging.join("store").join(&dirname), staging)?;
                 }
             }
         }
@@ -280,6 +257,34 @@ impl Backend for StoreBackend {
         generation.switch(journal)?;
         Ok(records)
     }
+}
+
+/// Download (or pull) a package's locked artifact, verify it and unpack it into `dest`, patched
+/// and, for npm, installed. `scratch` holds downloads on the way.
+fn unpack_into(cx: &Cx, p: &Pkg, origin: &Origin, dirname: &str, dest: &Path, scratch: &Path) -> Result<()> {
+    match origin {
+        Origin::Oci { reference } => {
+            let body = oci::pull(cx.runner, reference, &scratch.join("oci").join(dirname))
+                .with_context(|| format!("pulling {reference}"))?;
+            archive::unpack(&body, dest, &p.name).with_context(|| format!("unpacking {reference}"))?;
+        }
+        Origin::Url { url, hash } => {
+            let body = cx.fetch.get(url)?;
+            archive::verify(&body, hash).with_context(|| format!("verifying {url}"))?;
+            archive::unpack(&body, dest, &p.name).with_context(|| format!("unpacking {url}"))?;
+            if let Source::Npm { name } = &p.source {
+                let tarball = scratch.join("dl").join(format!("{dirname}.tgz"));
+                fs::create_dir_all(tarball.parent().context("tarball has a parent")?)?;
+                fs::write(&tarball, &body)?;
+                npm::finish(cx.runner, dest, &tarball, name)?;
+            }
+            if !p.patches.is_empty() {
+                let tree = patch_root(dest, &p.source);
+                patch::apply_all(&tree, cx.spec_dir, &p.patches).with_context(|| format!("patching {}", p.name))?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Where patch paths are relative to: the package directory inside an npm install or the single
@@ -336,19 +341,32 @@ fn install(cx: &Cx, p: &Pkg, staging: &Path, journal: &mut Journal) -> Result<In
 }
 
 fn bins_of(p: &Pkg, artifact: &Artifact, dir: &Path) -> Result<BTreeMap<String, String>> {
-    if let Source::Npm { name } = &p.source {
-        return npm::bins(dir, name);
-    }
-    if artifact.bins.is_empty() {
-        return Ok(discover(dir));
-    }
-    let mut bins = BTreeMap::new();
-    for rel in &artifact.bins {
-        if !dir.join(rel).is_file() {
-            bail!("bin `{rel}` from fspec.lock is not in the artifact");
+    let mut bins = if let Source::Npm { name } = &p.source {
+        npm::bins(dir, name)?
+    } else if artifact.bins.is_empty() {
+        discover(dir)
+    } else {
+        let mut bins = BTreeMap::new();
+        for entry in &artifact.bins {
+            let (name, rel) = match entry.split_once('=') {
+                Some((name, rel)) => (name, rel),
+                None => (entry.rsplit('/').next().unwrap_or(entry), entry.as_str()),
+            };
+            if !dir.join(rel).is_file() {
+                bail!("bin `{rel}` from fspec.lock is not in the artifact");
+            }
+            bins.insert(name.to_string(), rel.to_string());
         }
-        let name = rel.rsplit('/').next().unwrap_or(rel);
-        bins.insert(name.to_string(), rel.clone());
+        bins
+    };
+    for (name, target) in &p.links {
+        let rel = bins.get(target).cloned().with_context(|| {
+            format!(
+                "links: `{target}` is not one of its executables ({})",
+                bins.keys().cloned().collect::<Vec<_>>().join(", ")
+            )
+        })?;
+        bins.insert(name.clone(), rel);
     }
     Ok(bins)
 }

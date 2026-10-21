@@ -90,12 +90,16 @@ pub fn pick_release_tagged(repo: &str, version: &str, cx: &Cx) -> Result<Release
 pub fn resolve(
     repo: &str,
     glob: Option<&str>,
+    version: Option<&str>,
     platforms: &[String],
     cutoff: Option<i64>,
     cx: &Cx,
     out: &mut LockedPkg,
 ) -> Result<()> {
-    let release = pick_release(repo, cutoff, None, cx)?;
+    let release = match version {
+        Some(v) => pick_release_tagged(repo, v, cx)?,
+        None => pick_release(repo, cutoff, None, cx)?,
+    };
     out.version = Some(trim_v(&release.tag_name).to_string());
     for p in platforms {
         let asset = match_asset(&release.assets, glob, Platform::parse(p)?)

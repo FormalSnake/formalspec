@@ -156,6 +156,8 @@ mod tests {
         Resource::Pkg(Pkg {
             name: name.into(),
             source,
+            version: None,
+            links: Default::default(),
             mode: Default::default(),
             channel: Default::default(),
             patches: vec![],

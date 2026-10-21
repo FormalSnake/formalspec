@@ -12,7 +12,7 @@ mod testutil;
 pub use backend::ImageBackend;
 pub use ci::{WORKFLOW_PATH, default_registry, workflow};
 pub use containerfile::containerfile;
-pub use registry::{ImageUpdate, repo, resolve_digest, update_images};
+pub use registry::{ImageUpdate, pin_image, repo, resolve_digest, update_images};
 
 /// Tag CI pushes and `fspec update --images` resolves.
 pub const TAG: &str = "latest";

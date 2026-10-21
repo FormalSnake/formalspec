@@ -191,6 +191,9 @@ impl TryFrom<String> for Key {
 pub struct Pkg {
     pub name: String,
     pub source: Source,
+    /// An exact upstream version for `fspec update` to lock instead of the newest release.
+    #[serde(default)]
+    pub version: Option<String>,
     #[serde(default)]
     pub mode: PkgMode,
     #[serde(default)]
@@ -207,6 +210,10 @@ pub struct Pkg {
     /// executable the recipe produced.
     #[serde(default)]
     pub bins: Vec<String>,
+    /// More command names for one of the package's executables, for tools that act on the name
+    /// they run as: `{"cargo": "rustup"}` links `cargo` to rustup's proxy.
+    #[serde(default)]
+    pub links: BTreeMap<String, String>,
     /// App data paths removed with the package.
     #[serde(default)]
     pub data: Vec<String>,

@@ -1,5 +1,5 @@
 //! The aqua registry: package definitions as YAML with Go-style asset templates and an
-//! expression language for version constraints. Only `github_release` packages are resolved.
+//! expression language for version constraints. `github_release` and `http` packages are resolved.
 
 use std::collections::BTreeMap;
 
@@ -8,7 +8,7 @@ use fspec_core::lock::{Artifact, LockedPkg};
 use serde::Deserialize;
 
 use crate::Cx;
-use crate::github::{Platform, pick_release, trim_v};
+use crate::github::{Platform, pick_release, pick_release_tagged, trim_v};
 use crate::hash::hash_of;
 
 const REGISTRY: &str = "https://raw.githubusercontent.com/aquaproj/aqua-registry/main/registry.yaml";
@@ -50,6 +50,12 @@ struct Def {
     version_prefix: Option<String>,
     #[serde(default)]
     asset: Option<String>,
+    /// For `http` packages: the download URL template.
+    #[serde(default)]
+    url: Option<String>,
+    /// `github_tag` takes versions from the repository's tags instead of its releases.
+    #[serde(default)]
+    version_source: Option<String>,
     #[serde(default)]
     format: Option<String>,
     #[serde(default)]
@@ -78,6 +84,8 @@ struct Override {
     goarch: Option<String>,
     #[serde(default)]
     asset: Option<String>,
+    #[serde(default)]
+    url: Option<String>,
     #[serde(default)]
     format: Option<String>,
     #[serde(default, deserialize_with = "replacements")]
@@ -115,6 +123,12 @@ struct FileSpec {
     name: String,
     #[serde(default)]
     src: Option<String>,
+}
+
+/// A lock bin entry: the path inside the artifact, prefixed with `<command>=` when the command
+/// is named differently (aqua's `link`, which tools that act on `$0` rely on).
+fn bin_entry(name: &str, path: &str) -> String {
+    if path.rsplit('/').next() == Some(name) { path.to_string() } else { format!("{name}={path}") }
 }
 
 impl Entry {
@@ -155,56 +169,113 @@ impl Registry {
     }
 }
 
-pub fn resolve(query: &str, platforms: &[String], cutoff: Option<i64>, cx: &Cx, out: &mut LockedPkg) -> Result<()> {
+/// Resolve aqua package `query`, installed as `pkg_name` (which names a bare downloaded binary).
+pub fn resolve(
+    query: &str,
+    pkg_name: &str,
+    version: Option<&str>,
+    platforms: &[String],
+    cutoff: Option<i64>,
+    cx: &Cx,
+    out: &mut LockedPkg,
+) -> Result<()> {
     if cx.registry.get().is_none() {
         let reg = Registry::parse(&cx.fetch.get(REGISTRY)?)?;
         let _ = cx.registry.set(reg);
     }
     let entry = cx.registry.get().expect("set above").find(query)?;
     let repo = entry.repo().ok_or_else(|| anyhow!("aqua package `{query}` has no repo_owner/repo_name"))?;
-    if entry.def.kind.as_deref() != Some("github_release") {
-        bail!(
-            "aqua package type `{}` is not supported yet, only github_release",
-            entry.def.kind.as_deref().unwrap_or("?")
-        );
+    let kind = entry.def.kind.as_deref().unwrap_or("?");
+    if !matches!(kind, "github_release" | "http") {
+        bail!("aqua package type `{kind}` is not supported yet, only github_release and http");
     }
-    let release = pick_release(&repo, cutoff, entry.def.version_prefix.as_deref(), cx)?;
-    let tag = release.tag_name.clone();
+    let prefix = entry.def.version_prefix.as_deref();
+    let tags = entry.def.version_source.as_deref() == Some("github_tag");
+    let (tag, release) = match (version, kind, tags) {
+        (Some(v), "http", true) => (format!("{}{v}", prefix.unwrap_or_default()), None),
+        (None, "http", true) => {
+            if cutoff.is_some() {
+                bail!("{repo} takes versions from git tags, which carry no date for release_age; pin a version");
+            }
+            (newest_tag(&repo, prefix, cx)?, None)
+        }
+        (Some(v), ..) => {
+            let r = pick_release_tagged(&repo, &format!("{}{v}", prefix.unwrap_or_default()), cx)?;
+            (r.tag_name.clone(), Some(r))
+        }
+        (None, ..) => {
+            let r = pick_release(&repo, cutoff, prefix, cx)?;
+            (r.tag_name.clone(), Some(r))
+        }
+    };
     let def = effective(entry, &tag)?;
-    out.version = Some(trim_v(&tag).to_string());
+    let kind = def.kind.as_deref().unwrap_or(kind);
+    out.version = Some(trim_v(prefix.and_then(|p| tag.strip_prefix(p)).unwrap_or(&tag)).to_string());
     for p in platforms {
         let plat = Platform::parse(p)?;
         if !supported(&def.supported_envs, plat) {
             bail!("{repo} does not support {p} (supported_envs: {})", def.supported_envs.join(", "));
         }
         let r = for_platform(&def, plat);
-        let asset_tpl =
-            r.asset.as_deref().ok_or_else(|| anyhow!("{repo} {tag}: the registry gives no asset template"))?;
-        let vars = Vars::new(&tag, def.version_prefix.as_deref(), plat, &r);
-        let name = expand(asset_tpl, &vars)?;
+        let vars = Vars::new(&tag, prefix, plat, &r);
+        let (url, digest, name) = if kind == "http" {
+            let tpl = r.url.as_deref().ok_or_else(|| anyhow!("{repo} {tag}: the registry gives no url template"))?;
+            let url = expand(tpl, &vars)?;
+            let name = url.rsplit('/').next().unwrap_or_default().to_string();
+            (url, None, name)
+        } else {
+            let release = release.as_ref().expect("github_release packages pick a release");
+            let asset_tpl =
+                r.asset.as_deref().ok_or_else(|| anyhow!("{repo} {tag}: the registry gives no asset template"))?;
+            let name = expand(asset_tpl, &vars)?;
+            let asset = release.assets.iter().find(|a| a.name == name).ok_or_else(|| {
+                let names: Vec<_> = release.assets.iter().map(|a| a.name.as_str()).collect();
+                anyhow!("{repo} {tag}: expected asset `{name}` for {p} but the release has: {}", names.join(", "))
+            })?;
+            (asset.browser_download_url.clone(), asset.digest.clone(), name)
+        };
         let vars = vars.with_asset(&name);
-        let asset = release.assets.iter().find(|a| a.name == name).ok_or_else(|| {
-            let names: Vec<_> = release.assets.iter().map(|a| a.name.as_str()).collect();
-            anyhow!("{repo} {tag}: expected asset `{name}` for {p} but the release has: {}", names.join(", "))
-        })?;
         let mut bins = Vec::new();
         for f in r.files.iter().flatten() {
-            bins.push(expand(f.src.as_deref().unwrap_or(&f.name), &vars)?);
+            // A bare binary is stored under the package's name, whatever the download was called.
+            let path = if r.format == "raw" {
+                pkg_name.to_string()
+            } else {
+                expand(f.src.as_deref().unwrap_or(&f.name), &vars)?
+            };
+            bins.push(bin_entry(&f.name, &path));
         }
         if r.format == "raw" && bins.is_empty() {
-            bins.push(asset.name.clone());
+            bins.push(pkg_name.to_string());
         }
         out.artifacts.insert(
             p.clone(),
             Artifact {
-                url: Some(asset.browser_download_url.clone()),
-                hash: Some(hash_of(&asset.browser_download_url, asset.digest.as_deref(), cx)?),
+                url: Some(url.clone()),
+                hash: Some(hash_of(&url, digest.as_deref(), cx)?),
                 bins,
                 ..Default::default()
             },
         );
     }
     Ok(())
+}
+
+/// The highest stable version among the repository's tags.
+fn newest_tag(repo: &str, prefix: Option<&str>, cx: &Cx) -> Result<String> {
+    let url = format!("https://api.github.com/repos/{repo}/tags?per_page=100");
+    let tags = cx.fetch.get_json(&url)?;
+    let names =
+        tags.as_array().with_context(|| format!("{url} returned no list"))?.iter().filter_map(|t| t["name"].as_str());
+    names
+        .filter(|n| prefix.is_none_or(|p| n.starts_with(p)))
+        .filter(|n| {
+            let v = trim_v(prefix.and_then(|p| n.strip_prefix(p)).unwrap_or(n));
+            !v.is_empty() && v.chars().all(|c| c.is_ascii_digit() || c == '.')
+        })
+        .max_by(|a, b| cmp_ver(&parse_ver(a), &parse_ver(b)))
+        .map(str::to_string)
+        .ok_or_else(|| anyhow!("{repo} has no stable version tag"))
 }
 
 /// The package definition for `tag`: the base, or the first `version_overrides` entry whose
@@ -233,6 +304,8 @@ fn layer(base: &Def, o: &Def) -> Def {
         version_constraint: o.version_constraint.clone(),
         version_prefix: o.version_prefix.clone().or(base.version_prefix.clone()),
         asset: o.asset.clone().or(base.asset.clone()),
+        url: o.url.clone().or(base.url.clone()),
+        version_source: o.version_source.clone().or(base.version_source.clone()),
         format: o.format.clone().or(base.format.clone()),
         format_overrides: if o.format_overrides.is_empty() {
             base.format_overrides.clone()
@@ -258,6 +331,7 @@ fn supported(envs: &[String], p: Platform) -> bool {
 /// A definition with the platform's `overrides` and `format_overrides` applied.
 struct Resolved {
     asset: Option<String>,
+    url: Option<String>,
     format: String,
     replacements: BTreeMap<String, String>,
     files: Option<Vec<FileSpec>>,
@@ -266,6 +340,7 @@ struct Resolved {
 fn for_platform(def: &Def, p: Platform) -> Resolved {
     let mut r = Resolved {
         asset: def.asset.clone(),
+        url: def.url.clone(),
         format: def.format.clone().unwrap_or_default(),
         replacements: def.replacements.clone().unwrap_or_default(),
         files: def.files.clone(),
@@ -281,6 +356,7 @@ fn for_platform(def: &Def, p: Platform) -> Resolved {
             continue;
         }
         r.asset = o.asset.clone().or(r.asset);
+        r.url = o.url.clone().or(r.url);
         r.format = o.format.clone().unwrap_or(r.format);
         r.replacements.extend(o.replacements.clone().unwrap_or_default());
         r.files = o.files.clone().or(r.files);
@@ -582,6 +658,7 @@ impl Parser<'_> {
                     Some(Tok::Op("!=")) => Ok(self.version != rhs),
                     Some(Tok::Ident(w)) if w == "startsWith" => Ok(self.version.starts_with(&rhs)),
                     Some(Tok::Ident(w)) if w == "endsWith" => Ok(self.version.ends_with(&rhs)),
+                    Some(Tok::Ident(w)) if w == "contains" => Ok(self.version.contains(&rhs)),
                     _ => bail!("unsupported operator after Version"),
                 }
             }

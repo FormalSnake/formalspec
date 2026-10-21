@@ -12,8 +12,27 @@ pub struct Lock {
     #[serde(default)]
     pub pkg: Vec<LockedPkg>,
     /// Per host: the system layer's pinned digest.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub system: BTreeMap<String, LockedSystem>,
+    /// For a project's `dev.star`: its `lib(...)` and `bin(...)` dependencies, per package manager.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub native: Vec<LockedNative>,
+    /// For a project's `dev.star`: each OCI image it names (`debian:13`) pinned by digest.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub image: BTreeMap<String, String>,
+}
+
+/// What provides one `lib(...)` or `bin(...)`: the package (or `pkgconfig(...)`, `/usr/bin/...`
+/// capability) to install, keyed by package manager, and why a lookup found nothing.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct LockedNative {
+    /// `lib` or `bin`.
+    pub kind: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub miss: BTreeMap<String, String>,
+    #[serde(flatten)]
+    pub provides: BTreeMap<String, String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -50,7 +69,7 @@ pub struct Artifact {
     pub commit: Option<String>,
     /// Executables inside the unpacked artifact, relative to its root (`rg`,
     /// `ripgrep-15.1.0-x86_64-unknown-linux-musl/rg`). Empty: link every executable regular
-    /// file in the top two levels.
+    /// file in the top two levels. `<command>=<path>` names the command differently.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bins: Vec<String>,
 }
@@ -74,6 +93,10 @@ impl Lock {
         let tmp = path.with_extension("lock.tmp");
         fs::write(&tmp, toml::to_string(self)?).with_context(|| format!("writing {}", tmp.display()))?;
         fs::rename(&tmp, path).with_context(|| format!("renaming {} into place", tmp.display()))
+    }
+
+    pub fn native(&self, kind: &str, name: &str) -> Option<&LockedNative> {
+        self.native.iter().find(|n| n.kind == kind && n.name == name)
     }
 
     pub fn pkg(&self, name: &str) -> Option<&LockedPkg> {
