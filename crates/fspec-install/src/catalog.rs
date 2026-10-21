@@ -191,7 +191,7 @@ pub const DISTROS: [Distro; 15] = [
         desktops: &[Gnome, Kde],
     },
     Distro {
-        id: "opensuse-aeon",
+        id: "aeon",
         name: "openSUSE Aeon",
         reason: "A GNOME desktop that updates itself daily in the background, with apps from Flatpak and tools in Distrobox.",
         release: Rolling,
@@ -206,7 +206,7 @@ pub const DISTROS: [Distro; 15] = [
         desktops: &[Gnome],
     },
     Distro {
-        id: "opensuse-kalpa",
+        id: "kalpa-desktop",
         name: "openSUSE Kalpa",
         reason: "Aeon's approach with KDE Plasma: automatic transactional updates, apps from Flatpak and Distrobox.",
         release: Rolling,
