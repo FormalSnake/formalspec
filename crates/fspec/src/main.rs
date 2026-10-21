@@ -238,6 +238,9 @@ enum DiskCommand {
         /// A backup taken in the last 24 hours, when there is no recent snapshot under @snapshots.
         #[arg(long)]
         backup: Option<PathBuf>,
+        /// Convert without a backup: nothing on DEVICE needs saving. The rollback journal still applies.
+        #[arg(long, conflicts_with = "backup")]
+        no_backup: bool,
         /// Size of the swapfile in @swap, in GiB.
         #[arg(long, default_value_t = 4)]
         swap: u64,
@@ -756,6 +759,19 @@ fn confirm(device: &str, what: &str) -> Result<()> {
 }
 
 /// `path` was modified in the last 24 hours.
+fn require_backup(device: &str, backup: Option<&Path>, no_backup: bool) -> Result<()> {
+    match backup {
+        Some(b) => recent_backup(b),
+        None if no_backup => {
+            eprintln!("converting {device} without a backup (--no-backup)");
+            Ok(())
+        }
+        None => {
+            bail!("converting {device} needs a backup taken in the last 24 hours, named with --backup, or --no-backup")
+        }
+    }
+}
+
 fn recent_backup(path: &Path) -> Result<()> {
     let age = std::fs::metadata(path)
         .and_then(|m| m.modified())
@@ -835,11 +851,8 @@ fn disk(paths: &Paths, spec_path: &Path, cmd: &DiskCommand) -> Result<()> {
             let disk = runner.check(&Cmd::new("lsblk").args(["-ndpo", "PKNAME", device]))?.stdout.trim().to_string();
             let plan = fspec_switch::convert(paths, device, &disk, &m.firmware);
             match cmd {
-                DiskCommand::Migrate { backup, .. } => {
-                    let Some(backup) = backup else {
-                        bail!("converting {device} needs a backup taken in the last 24 hours, named with --backup")
-                    };
-                    recent_backup(backup)?;
+                DiskCommand::Migrate { backup, no_backup, .. } => {
+                    require_backup(device, backup.as_deref(), *no_backup)?;
                     confirm(device, &format!("This converts the ext4 filesystem on {device} to btrfs."))?;
                     plan.execute(runner)?;
                     println!("{device} is btrfs now; boot it and run `fspec disk migrate` for the rest");
@@ -947,7 +960,7 @@ fn migrate_nixos(
 ) -> Result<()> {
     let device = root.device.as_str();
     let steps = fspec_switch::nixos_migrate(paths, root, esp, &state.display().to_string());
-    let DiskCommand::Migrate { backup, .. } = cmd else {
+    let DiskCommand::Migrate { backup, no_backup, .. } = cmd else {
         for (i, s) in steps.iter().enumerate() {
             let mark = if s.destructive { " (destructive)" } else { "" };
             println!("{}. {}{mark}", i + 1, s.what);
@@ -959,10 +972,7 @@ fn migrate_nixos(
         );
         return Ok(());
     };
-    let Some(backup) = backup else {
-        bail!("converting {device} needs a backup taken in the last 24 hours, named with --backup")
-    };
-    recent_backup(backup)?;
+    require_backup(device, backup.as_deref(), *no_backup)?;
     confirm(device, &format!("This converts the ext4 filesystem on {device} to btrfs and moves NixOS into @nixos."))?;
     let mut journal = fspec_core::journal::Journal::begin(state, 0)?;
     for (i, step) in steps.iter().enumerate() {
