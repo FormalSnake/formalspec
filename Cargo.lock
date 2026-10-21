@@ -1245,6 +1245,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "fspec-install"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fspec-core",
+ "fspec-eval",
+ "fspec-switch",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "fspec-os"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,22 @@
+[package]
+name = "fspec-install"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The FormalSpec installer: a full-screen front end over fspec disk init"
+
+[[bin]]
+name = "fspec-install"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+fspec-core.workspace = true
+fspec-eval.workspace = true
+fspec-switch.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
