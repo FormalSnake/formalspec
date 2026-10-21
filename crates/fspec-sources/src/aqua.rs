@@ -151,7 +151,9 @@ impl Registry {
         let exact = by(&|e| e.full_name().as_deref() == Some(query) || e.repo().as_deref() == Some(query));
         let aliased = by(&|e| e.aliases.iter().any(|a| a.name == query));
         let named = by(&|e| e.repo_name.as_deref().is_some_and(|n| n.eq_ignore_ascii_case(query)));
-        for pool in [exact, aliased, named] {
+        // `nextest-rs/nextest/cargo-nextest` is found as `cargo-nextest`.
+        let last = by(&|e| e.full_name().is_some_and(|n| n.rsplit('/').next() == Some(query)));
+        for pool in [exact, aliased, named, last] {
             match pool.as_slice() {
                 [] => continue,
                 [one] => return Ok(one),
@@ -531,7 +533,7 @@ fn call(f: &str, a: &[String]) -> Result<String> {
 }
 
 // Version constraints: `true`, `false`, `semver("<= 1.2, > 0.5")`, `Version == "v1"`,
-// `Version != "v1"`, `Version startsWith "v1"`, with `!`, `&&`, `||` and parentheses.
+// `Version != "v1"`, `Version startsWith "v1"`, `Version in ["v1", "v2"]`, with `!`, `&&`, `||` and parentheses.
 
 #[derive(Debug, Clone, PartialEq)]
 enum Tok {
@@ -556,7 +558,7 @@ fn lex(s: &str) -> Result<Vec<Tok>> {
         } else if let Some(op) = ["&&", "||", "==", "!="].into_iter().find(|o| *o == two) {
             out.push(Tok::Op(op));
             i += 2;
-        } else if let Some(op) = ["(", ")", "!"].into_iter().find(|o| o.starts_with(c)) {
+        } else if let Some(op) = ["(", ")", "!", "[", "]", ","].into_iter().find(|o| o.starts_with(c)) {
             out.push(Tok::Op(op));
             i += 1;
         } else if c.is_alphanumeric() || c == '_' {
@@ -651,6 +653,9 @@ impl Parser<'_> {
             "Version" => {
                 let op = self.peek().cloned();
                 self.at += 1;
+                if op == Some(Tok::Ident("in".into())) {
+                    return self.list().map(|l| l.iter().any(|v| v == self.version));
+                }
                 let Some(Tok::Str(rhs)) = self.peek().cloned() else { bail!("expected a string after Version") };
                 self.at += 1;
                 match op {
@@ -664,6 +669,22 @@ impl Parser<'_> {
             }
             other => bail!("unsupported term `{other}`"),
         }
+    }
+
+    fn list(&mut self) -> Result<Vec<String>> {
+        if !self.eat("[") {
+            bail!("`in` needs a list");
+        }
+        let mut out = Vec::new();
+        while !self.eat("]") {
+            let Some(Tok::Str(v)) = self.peek().cloned() else { bail!("expected a string in the list") };
+            self.at += 1;
+            out.push(v);
+            if !self.eat(",") && !matches!(self.peek(), Some(Tok::Op("]"))) {
+                bail!("expected `,` or `]`");
+            }
+        }
+        Ok(out)
     }
 }
 
@@ -757,6 +778,8 @@ mod tests {
         assert!(!eval_constraint(r#"semver(">= 1.0, < 2")"#, "2.0.0").unwrap());
         assert!(eval_constraint(r#"Version == "v1" || Version startsWith "v2""#, "v2.3").unwrap());
         assert!(eval_constraint(r#"!(Version == "v1") && true"#, "v2").unwrap());
+        assert!(eval_constraint(r#"Version in ["v0.5.1", "v0.6.0"]"#, "v0.6.0").unwrap());
+        assert!(!eval_constraint(r#"Version in ["v0.5.1"] && true"#, "v0.6.0").unwrap());
         let v = Vars {
             version: "v1.2.3".into(),
             semver: "1.2.3".into(),

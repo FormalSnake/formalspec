@@ -299,8 +299,15 @@ fn search(r: &Resolver, manager: &str, ws: &[&Want]) -> Vec<Result<String, Strin
 fn candidates(manager: &str, w: &Want, lines: &[&str]) -> Vec<String> {
     let n = &w.native.name;
     let file_ok = |path: &str| match w.kind {
-        // 32-bit multilib copies are never what a project builds against.
-        Kind::Lib => path.ends_with(&format!("/pkgconfig/{n}.pc")) && !path.contains("/lib32/"),
+        // Only pkg-config's own search directories: not 32-bit multilib copies, and not a
+        // toolchain's private sysroot (emscripten ships an egl.pc of its own).
+        Kind::Lib => {
+            let p = path.trim_start_matches('/');
+            let Some(dir) = p.strip_suffix(&format!("/pkgconfig/{n}.pc")) else { return false };
+            let dir = dir.strip_prefix("usr/").unwrap_or(dir);
+            matches!(dir, "lib" | "lib64" | "share" | "local/lib" | "local/share")
+                || dir.strip_prefix("lib/").is_some_and(|t| t.ends_with("-linux-gnu") && !t.contains('/'))
+        }
         Kind::Bin => {
             let p = path.trim_start_matches('/');
             ["usr/bin/", "bin/", "usr/sbin/", "sbin/"].iter().any(|d| p.strip_prefix(d) == Some(n.as_str()))
@@ -342,12 +349,14 @@ fn pick(manager: &str, w: &Want, found: &[String]) -> Result<String, String> {
         [] => Err(format!("its file index has nothing shipping {}", w.kind.what(n))),
         [one] => Ok(one.clone()),
         many => {
-            let preferred: Vec<&String> = match w.kind {
-                Kind::Bin => many.iter().filter(|p| *p == n).collect(),
-                Kind::Lib => many.iter().filter(|p| p.ends_with("-dev") || p.ends_with("-devel")).collect(),
-            };
-            match preferred.as_slice() {
-                [one] => Ok((*one).clone()),
+            // The package named like the file, else the only -dev package, else the one the
+            // others are variants of (`mesa` beside `mesa-amber`).
+            let named: Vec<&String> = many.iter().filter(|p| *p == n).collect();
+            let dev: Vec<&String> = many.iter().filter(|p| p.ends_with("-dev") || p.ends_with("-devel")).collect();
+            let base: Vec<&String> =
+                many.iter().filter(|b| many.iter().all(|p| p == *b || p.starts_with(&format!("{b}-")))).collect();
+            match (named.as_slice(), dev.as_slice(), base.as_slice()) {
+                ([one], _, _) | ([], [one], _) | ([], _, [one]) => Ok((*one).clone()),
                 _ => Err(format!("{manager} has several packages shipping {}: {}", w.kind.what(n), many.join(", "))),
             }
         }
@@ -578,6 +587,16 @@ mod tests {
         let ninja = want(Kind::Bin, "ninja");
         assert_eq!(pick("apt", &ninja, &["ninja".into(), "ninja-build".into()]), Ok("ninja".into()));
         assert!(pick("apt", &ninja, &["a".into(), "b".into()]).unwrap_err().contains("several packages"));
+        let gbm = want(Kind::Lib, "gbm");
+        assert_eq!(pick("pacman", &gbm, &["mesa".into(), "mesa-amber".into()]), Ok("mesa".into()));
+        let ssl = want(Kind::Lib, "openssl");
+        assert_eq!(pick("pacman", &ssl, &["libressl".into(), "openssl".into()]), Ok("openssl".into()));
+        let egl = want(Kind::Lib, "egl");
+        let lines = [
+            "extra\0libglvnd\x001\0usr/lib/pkgconfig/egl.pc",
+            "extra\0emscripten\x001\0usr/lib/emscripten/system/lib/pkgconfig/egl.pc",
+        ];
+        assert_eq!(candidates("pacman", &egl, &lines), ["libglvnd"]);
         assert!(pick("apt", &ninja, &[]).unwrap_err().contains("nothing shipping"));
     }
 
