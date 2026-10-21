@@ -170,7 +170,10 @@ fn switching_on_the_default_layout_builds_a_uki_root() {
     let plan = switch_distro(&paths(), &default_arch(), Some("arch"), &target("fedora")).unwrap();
     let lines = plan.lines();
     let at = |p: &str| position(&lines, p);
-    assert!(at("mount -o subvolid=5 UUID=1111-aaaa") < at("test -e /r/run/fspec/switch/top/@fedora"));
+    assert!(
+        at("mount -o subvolid=5,noatime,compress=zstd:1 UUID=1111-aaaa")
+            < at("test -e /r/run/fspec/switch/top/@fedora")
+    );
     assert!(at("btrfs subvolume create /r/run/fspec/switch/top/@fedora") < at("dnf --installroot"));
     assert!(lines[at("dnf --installroot")].ends_with("kernel systemd-ukify systemd-boot-unsigned"));
     assert!(at("tee /r/run/fspec/switch/fedora/etc/kernel/install.conf") < at("mount --rbind /r/efi"));
@@ -413,7 +416,7 @@ fn init_formats_the_default_layout_with_luks() {
             "cryptsetup open /dev/vdb2 luks-cccc",
             "mkfs.btrfs -f -L root -U ffff /dev/mapper/luks-cccc",
             "mkdir -p /r/run/fspec/disk/top",
-            "mount /dev/mapper/luks-cccc /r/run/fspec/disk/top",
+            "mount -o noatime,compress=zstd:1 /dev/mapper/luks-cccc /r/run/fspec/disk/top",
             "btrfs subvolume create /r/run/fspec/disk/top/@home",
             "btrfs subvolume create /r/run/fspec/disk/top/@swap",
             "btrfs subvolume create /r/run/fspec/disk/top/@snapshots",
@@ -576,7 +579,7 @@ fn migrate_replaces_a_small_esp_and_keeps_its_identity() {
 
 #[test]
 fn migrate_offers_to_delete_what_the_move_left_behind() {
-    let left = Leftovers { old_root: Some(String::new()), shadowed: vec!["/home".into()] };
+    let left = Leftovers { old_root: Some(String::new()), shadowed: vec!["/home".into()], ..Leftovers::default() };
     let steps = migrate(&paths(), &default_arch(), &left, &ids(), 4).unwrap();
     let what: Vec<(&str, bool)> = steps.iter().map(|s| (s.what.as_str(), s.destructive)).collect();
     assert_eq!(
@@ -586,7 +589,7 @@ fn migrate_offers_to_delete_what_the_move_left_behind() {
             ("delete the copies of /home left under their mounts in @arch", true),
         ]
     );
-    let left = Leftovers { old_root: Some("root".into()), shadowed: vec![] };
+    let left = Leftovers { old_root: Some("root".into()), ..Leftovers::default() };
     let steps = migrate(&paths(), &default_arch(), &left, &ids(), 4).unwrap();
     assert!(
         steps[0].plan.lines().contains(&"btrfs subvolume delete --recursive /r/run/fspec/disk/top/root".to_string())
@@ -629,6 +632,211 @@ fn convert_keeps_the_uuid_and_fixes_the_fstab_type() {
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
         assert_eq!(String::from_utf8(out.stdout).unwrap(), to);
     }
+}
+
+const NIXOS_UUID: &str = "1a10e345-3d66-4bde-9f6b-55d43e6f7e0d";
+
+fn nixos_root() -> crate::NixosRoot {
+    crate::NixosRoot {
+        device: "/dev/nvme0n1p2".into(),
+        generation: 426,
+        system: "/nix/store/x58v-nixos-system-e1504g".into(),
+        esp: "/dev/disk/by-uuid/ABCD-1234".into(),
+        esp_at: "/boot".into(),
+    }
+}
+
+#[test]
+fn a_nixos_system_must_mount_its_root_from_at_nixos() {
+    let ours = format!("/dev/disk/by-uuid/{NIXOS_UUID}");
+    let fstab = format!(
+        "# This is a generated file.\n{ours} / btrfs subvol=@nixos,noatime,compress=zstd:1 0 0\n/dev/disk/by-uuid/ABCD-1234 /boot vfat \
+         fmask=0077,dmask=0077 0 2\n{ours} /home btrfs subvol=@home,noatime 0 0\n{ours} /swap btrfs subvol=@swap,noatime \
+         0 0\n/swap/swapfile none swap defaults 0 0\n"
+    );
+    assert_eq!(
+        crate::nixos_fstab(&fstab, NIXOS_UUID).unwrap(),
+        ("/dev/disk/by-uuid/ABCD-1234".to_string(), "/boot".to_string())
+    );
+    let ext4 = format!("{ours} / ext4 defaults 0 1\n/dev/disk/by-uuid/ABCD-1234 /boot vfat defaults 0 2\n");
+    let err = crate::nixos_fstab(&ext4, NIXOS_UUID).unwrap_err().to_string();
+    assert!(err.contains("not btrfs subvol=@nixos"), "{err}");
+    let other = fstab.replace(NIXOS_UUID, "0000");
+    assert!(crate::nixos_fstab(&other, NIXOS_UUID).is_err());
+    let home = fstab.replace("subvol=@home", "subvol=@other");
+    let err = crate::nixos_fstab(&home, NIXOS_UUID).unwrap_err().to_string();
+    assert!(err.contains("/home"), "{err}");
+    let no_esp = format!("{ours} / btrfs subvol=/@nixos 0 0\n");
+    assert!(crate::nixos_fstab(&no_esp, NIXOS_UUID).unwrap_err().to_string().contains("no vfat ESP"));
+}
+
+#[test]
+fn store_symlinks_resolve_inside_the_mounted_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("nix/store/sys")).unwrap();
+    std::fs::create_dir_all(root.join("nix/store/etc/etc")).unwrap();
+    std::fs::write(root.join("nix/store/fstab"), "x").unwrap();
+    std::os::unix::fs::symlink("/nix/store/etc/etc", root.join("nix/store/sys/etc")).unwrap();
+    std::os::unix::fs::symlink("../../fstab", root.join("nix/store/etc/etc/fstab")).unwrap();
+    let found = crate::disk::resolve_in(root, "/nix/store/sys/etc/fstab").unwrap();
+    assert_eq!(found, root.join("nix/store/fstab"));
+}
+
+#[test]
+fn a_nixos_root_converts_snapshots_and_boots_its_new_system() {
+    let steps = crate::nixos_migrate(&paths(), &nixos_root(), "/r/var/lib/fspec/disk");
+    let what: Vec<(&str, bool)> = steps.iter().map(|s| (s.what.as_str(), s.destructive)).collect();
+    assert_eq!(
+        what,
+        [
+            (
+                "convert the ext4 root /dev/nvme0n1p2 to btrfs in place, keeping its UUID and the ext4 image as \
+                 ext2_saved for `btrfs-convert -r`",
+                true
+            ),
+            (
+                "snapshot the top level into @nixos, and create @home with a reflink copy of /home, @swap without \
+                 copy-on-write, @snapshots and @fspec",
+                false
+            ),
+            (
+                "make /nix/store/x58v-nixos-system-e1504g generation 427 of NixOS in @nixos and its boot default with \
+                 three tries, move generation 426 and older to loader/entries.ext4 on the ESP, and point the fspec-live \
+                 entry at @fspec/live",
+                false
+            ),
+        ]
+    );
+    let convert = steps[0].plan.lines();
+    let at = |l: &[String], p: &str| position(l, p);
+    assert!(at(&convert, "undo sh -c") < at(&convert, "btrfs-convert --uuid copy /dev/nvme0n1p2"));
+    assert!(convert.iter().any(|l| l.contains("btrfs-convert -r")));
+    let subvols = steps[1].plan.lines();
+    let top = "/r/run/fspec/disk/top";
+    assert!(
+        at(&subvols, &format!("btrfs subvolume snapshot {top} {top}/@nixos"))
+            < at(&subvols, &format!("btrfs subvolume create {top}/@home"))
+    );
+    assert!(subvols.contains(&format!("chattr +C {top}/@swap")));
+    assert!(!subvols.iter().any(|l| l.contains("mkswapfile")));
+    let boot = steps[2].plan.lines();
+    let root = "/r/run/fspec/disk/nixos";
+    assert!(boot.contains(&format!("mount -o subvol=@nixos,noatime,compress=zstd:1 /dev/nvme0n1p2 {root}")));
+    assert!(at(&boot, "undo sh -c") < at(&boot, &format!("mount -t proc proc {root}/proc")));
+    let sys = "/nix/store/x58v-nixos-system-e1504g";
+    let env = format!("chroot {root} {sys}/sw/bin/env PATH={sys}/sw/bin HOME=/root LOCALE_ARCHIVE=");
+    let find = |what: &str| boot.iter().position(|l| l.starts_with(&env) && l.contains(what)).unwrap();
+    assert!(find("nix-env -p /nix/var/nix/profiles/system --set") < find("bin/switch-to-configuration boot"));
+    assert!(boot.iter().any(|l| l.contains("init=$2/init") && l.ends_with("/nix/store/x58v-nixos-system-e1504g")));
+}
+
+/// Runs the ESP scripts of the NixOS boot step against a fake ESP. They use GNU sed.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_new_generation_gets_tries_and_the_live_entry_moves_into_at_fspec() {
+    let dir = tempfile::tempdir().unwrap();
+    let (esp, top) = (dir.path().join("esp"), dir.path().join("top"));
+    let entries = esp.join("loader/entries");
+    std::fs::create_dir_all(&entries).unwrap();
+    std::fs::create_dir_all(top.join("@fspec/live")).unwrap();
+    let w = |p: std::path::PathBuf, t: &str| std::fs::write(p, t).unwrap();
+    let sys = "/nix/store/x58v-nixos-system-e1504g";
+    w(entries.join("nixos-aaa.conf"), &format!("title NixOS\noptions init={sys}/init loglevel=4\n"));
+    w(entries.join("nixos-bbb.conf"), "title NixOS\noptions init=/nix/store/old/init loglevel=4\n");
+    let live = "title FormalSpec live\nlinux /fspec-live/vmlinuz\noptions boot=live findiso=/var/lib/fspec-live/formalspec-installer-amd64.iso fspec.overlay=/var/lib/fspec-live/overlay.tar quiet\n";
+    w(entries.join("fspec-live+3.conf"), live);
+    w(esp.join("loader/loader.conf"), "timeout 3\ndefault nixos-aaa.conf\nconsole-mode keep\n");
+    let steps = crate::nixos_migrate(&paths(), &nixos_root(), "/r/var/lib/fspec/disk");
+    let script = |marker: &str| {
+        steps[2]
+            .plan
+            .steps
+            .iter()
+            .find_map(|s| match s {
+                crate::Step::Run(c) if c.program == "sh" && c.args[1].contains(marker) => Some(c.args[1].clone()),
+                _ => None,
+            })
+            .unwrap()
+    };
+    let run = |script: String, args: &[&std::path::Path]| {
+        let out = std::process::Command::new("sh").arg("-c").arg(script).arg("sh").args(args).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    };
+    let ls = |d: &std::path::Path| {
+        let mut v: Vec<String> =
+            std::fs::read_dir(d).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        v.sort();
+        v
+    };
+    run(script("panic_on_fail"), &[&esp, Path::new(sys)]);
+    assert_eq!(ls(&entries), ["fspec-live+3.conf", "nixos-aaa+3.conf"]);
+    assert_eq!(ls(&esp.join("loader/entries.ext4")), ["nixos-bbb.conf"]);
+    let new = std::fs::read_to_string(entries.join("nixos-aaa+3.conf")).unwrap();
+    assert!(new.contains(&format!("options init={sys}/init loglevel=4 boot.panic_on_fail panic=10\n")), "{new}");
+    assert_eq!(std::fs::read_to_string(esp.join("loader/loader.conf")).unwrap(), "timeout 3\nconsole-mode keep\n");
+
+    let move_live = script("fspec-live*.conf");
+    let err =
+        std::process::Command::new("sh").arg("-c").arg(&move_live).arg("sh").arg(&esp).arg(&top).output().unwrap();
+    assert!(!err.status.success() && String::from_utf8_lossy(&err.stderr).contains("not in @fspec/live"));
+    assert_eq!(std::fs::read_to_string(entries.join("fspec-live+3.conf")).unwrap(), live);
+    w(top.join("@fspec/live/formalspec-installer-amd64.iso"), "");
+    w(top.join("@fspec/live/overlay.tar"), "");
+    run(move_live, &[&esp, &top]);
+    assert_eq!(
+        std::fs::read_to_string(entries.join("fspec-live+3.conf")).unwrap(),
+        live.replace("=/var/lib/fspec-live/", "=/@fspec/live/")
+    );
+    assert_eq!(ls(&entries), ["fspec-live+3.conf", "nixos-aaa+3.conf"]);
+}
+
+#[test]
+fn a_failed_nixos_step_leaves_its_undo_to_the_journal() {
+    let dir = tempfile::tempdir().unwrap();
+    let steps = crate::nixos_migrate(&paths(), &nixos_root(), "/r/var/lib/fspec/disk");
+    let runner = RecordingRunner::default();
+    answer(&runner, "btrfs-convert --uuid", 1, "");
+    assert!(steps[0].plan.execute(&runner).unwrap_err().to_string().contains("need a journal"));
+    let mut journal = fspec_core::journal::Journal::begin(dir.path(), 0).unwrap();
+    assert!(steps[0].plan.execute_journaled(&runner, &mut journal).is_err());
+    let ran = runner.lines().len();
+    journal.rollback(&runner).unwrap();
+    let undo = &runner.lines()[ran..];
+    assert_eq!(undo.len(), 1);
+    assert!(undo[0].contains("btrfs-convert -r") && undo[0].ends_with("/r/run/fspec/disk /dev/nvme0n1p2"), "{undo:?}");
+    assert!(!dir.path().join("journal.json").exists());
+}
+
+#[test]
+fn nixos_on_btrfs_only_cleans_up_after_the_move() {
+    let l =
+        lsblk("gpt", vec![esp("/dev/vda1", 1, 1024, &["/boot"]), btrfs_part("/dev/vda2", 2, &["/", "/home", "/swap"])]);
+    let mut f = facts("/@nixos", l, true);
+    f.volumes.push("ext2_saved".into());
+    let m = classify(&f, "nixos".into(), "init=/nix/store/x/init".into()).unwrap();
+    assert!(migrate(&paths(), &m, &Leftovers::default(), &ids(), 4).unwrap().is_empty());
+    let left = Leftovers { old_root: Some(String::new()), shadowed: vec!["/home".into()], old_swapfile: true };
+    let steps = migrate(&paths(), &m, &left, &ids(), 4).unwrap();
+    let what: Vec<(&str, bool)> = steps.iter().map(|s| (s.what.as_str(), s.destructive)).collect();
+    assert_eq!(
+        what,
+        [
+            (
+                "delete the old root's files from the btrfs top level, and ext2_saved, after which `btrfs-convert -r` \
+                 cannot go back to ext4",
+                true
+            ),
+            ("delete the copies of /home left under their mounts in @nixos", true),
+            ("delete the old /swapfile in @nixos", true),
+        ]
+    );
+    assert!(steps[2].plan.lines().contains(&"rm -f /r/run/fspec/disk/top/@nixos/swapfile".to_string()));
+    let guard = steps[0].plan.steps.iter().find_map(|s| match s {
+        crate::Step::Expect { probe, ok: true, msg } if msg.contains("fspec-live") => Some(probe.to_string()),
+        _ => None,
+    });
+    assert!(guard.unwrap().ends_with(" sh /r/boot"));
 }
 
 #[test]

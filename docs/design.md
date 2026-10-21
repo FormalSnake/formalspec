@@ -927,6 +927,34 @@ cannot satisfy is refused with the fix, usually a `fspec disk` command.
   `@<distro>`, `disk plan` lists what the move left behind (the old root's
   files, the copies of `/home` and `/opt/fspec` under their new mounts) as
   destructive steps.
+- A NixOS root is different: its `fstab` and initrd come from its
+  configuration, and every generation in its boot menu mounts `/` as ext4.
+  `disk migrate <device> --nixos-system <path>` takes a system built to mount
+  `/` as btrfs `subvol=@nixos` on the same UUID (and `/home` from `@home`,
+  `/swap` from `@swap`), already copied into the root's `/nix/store`, and
+  refuses without one or when its `fstab` does not say so. It converts with
+  `btrfs-convert --uuid copy`, keeping `ext2_saved`, snapshots the top level
+  into `@nixos`, creates `@home` (a reflink copy of `/home`), `@swap` with
+  `chattr +C` (NixOS creates the swapfile), `@snapshots` and `@fspec` (with a
+  reflink copy of `/var/lib/fspec-live`), and leaves the default subvolume at
+  the top level. It then makes the system a new generation of the system
+  profile and runs its `switch-to-configuration boot` in a chroot of `@nixos`
+  with the ESP, `/dev`, `/proc`, `/sys` and efivarfs mounted, so NixOS writes
+  its own entry. The older generations cannot boot btrfs, so their entries
+  move to `loader/entries.ext4/` on the ESP; the new one gets three boot
+  tries and `boot.panic_on_fail panic=10`, `loader.conf` loses its `default`,
+  and the `fspec-live` entry's `findiso=` and `fspec.overlay=` move to
+  `/@fspec/live/`. After three failed boots systemd-boot falls through to
+  `fspec-live`; NixOS's `systemd-bless-boot` marks a good boot. Every step
+  journals its undo under `/var/lib/fspec/disk` on the live system: a failure,
+  or the next run after one was killed, runs `btrfs-convert -r` and puts the
+  ESP's `loader`, `EFI/systemd` and `EFI/BOOT` back, so NixOS boots from ext4
+  as before. After a successful run, `fspec-compress.service` recompresses
+  `@home` and `@nixos` (not the store) with zstd until the filesystem is 80%
+  full or the live system reboots. From the booted `@nixos`, `disk plan` lists
+  deleting the old top level with `ext2_saved` (which ends the way back to
+  ext4), the copy of `/home` in `@nixos` and its old `/swapfile`, and refuses
+  the first while `fspec-live` still finds its files outside `@fspec`.
 - `fspec disk init <device> [--layout default|zfs|bios] [--luks] [--distro d
   --host h]` partitions and formats a disk from scratch, creates the shared
   subvolumes or datasets, installs the bootloader, and with `--distro`

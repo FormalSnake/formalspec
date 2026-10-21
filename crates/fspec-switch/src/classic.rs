@@ -4,7 +4,7 @@ use anyhow::{Result, bail};
 use fspec_core::Paths;
 use fspec_core::runner::Cmd;
 
-use crate::machine::{Layout, Machine, SHARED_BOOT};
+use crate::machine::{BTRFS_OPTS, Layout, Machine, SHARED_BOOT};
 use crate::recipe::{Boot, boot_files, bootstrap, cmdline_file, misfit, populate, recipe};
 use crate::{Plan, subvol};
 
@@ -358,7 +358,13 @@ pub fn switch_distro(paths: &Paths, m: &Machine, owner: Option<&str>, t: &Target
     let Mounts { top, root } = mounts(paths, t.distro);
     if let Some(b) = m.layout.btrfs() {
         plan.run(Cmd::new("mkdir").arg("-p").arg(&top));
-        plan.run(Cmd::new("mount").args(["-o", "subvolid=5"]).arg(format!("UUID={}", b.uuid)).arg(&top));
+        plan.run(
+            Cmd::new("mount")
+                .arg("-o")
+                .arg(format!("subvolid=5,{BTRFS_OPTS}"))
+                .arg(format!("UUID={}", b.uuid))
+                .arg(&top),
+        );
         plan.cleanup.push(Cmd::new("umount").arg(&top));
     }
     create_root(&mut plan, &m.layout, t.distro, &top, &root);

@@ -12,6 +12,7 @@ mod recipe;
 mod tests;
 
 use anyhow::{Result, bail};
+use fspec_core::journal::{Journal, Undo};
 use fspec_core::runner::{Cmd, Runner};
 
 pub use adopt::adopt_boot;
@@ -43,6 +44,8 @@ pub enum Step {
         ok: bool,
         msg: String,
     },
+    /// Journaled when reached, so a failure from here on, or a run killed from here on, runs it.
+    Undo(Cmd),
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -55,6 +58,10 @@ pub struct Plan {
 impl Plan {
     pub(crate) fn run(&mut self, cmd: Cmd) {
         self.steps.push(Step::Run(cmd));
+    }
+
+    pub(crate) fn undo(&mut self, cmd: Cmd) {
+        self.steps.push(Step::Undo(cmd));
     }
 
     pub(crate) fn expect(&mut self, probe: Cmd, ok: bool, msg: impl Into<String>) {
@@ -76,11 +83,12 @@ impl Plan {
         self
     }
 
-    /// Every command in execution order, probes and cleanup included.
+    /// Every command in execution order, probes and cleanup included, and undo steps as `undo <cmd>`.
     pub fn lines(&self) -> Vec<String> {
         let steps = self.steps.iter().map(|s| match s {
             Step::Run(c) => c.to_string(),
             Step::Expect { probe, .. } => probe.to_string(),
+            Step::Undo(c) => format!("undo {c}"),
         });
         steps.chain(self.cleanup.iter().map(ToString::to_string)).collect()
     }
@@ -88,16 +96,34 @@ impl Plan {
     /// Hand every command to `runner` and ignore the answers. Under `--root` the runner only logs,
     /// so probes cannot steer the plan.
     pub fn log(&self, runner: &dyn Runner) -> Result<()> {
-        let all = self.steps.iter().map(|s| match s {
-            Step::Run(c) => c,
-            Step::Expect { probe, .. } => probe,
+        let all = self.steps.iter().filter_map(|s| match s {
+            Step::Run(c) => Some(c),
+            Step::Expect { probe, .. } => Some(probe),
+            Step::Undo(_) => None,
         });
         all.chain(&self.cleanup).try_for_each(|c| runner.run(c).map(drop))
     }
 
     pub fn execute(&self, runner: &dyn Runner) -> Result<()> {
+        if self.steps.iter().any(|s| matches!(s, Step::Undo(_))) {
+            bail!("this plan has undo steps, which need a journal");
+        }
+        self.run_steps(runner, None)
+    }
+
+    /// Run the plan, recording its undo steps in `journal` as they are reached. The caller rolls
+    /// the journal back on failure, after the cleanup has unmounted what the plan mounted.
+    pub fn execute_journaled(&self, runner: &dyn Runner, journal: &mut Journal) -> Result<()> {
+        self.run_steps(runner, Some(journal))
+    }
+
+    fn run_steps(&self, runner: &dyn Runner, mut journal: Option<&mut Journal>) -> Result<()> {
         let result = self.steps.iter().try_for_each(|s| match s {
             Step::Run(c) => runner.check(c).map(drop),
+            Step::Undo(c) => match journal.as_deref_mut() {
+                Some(j) => j.record(Undo::Run { cmd: c.clone() }),
+                None => bail!("no journal for the undo step `{c}`"),
+            },
             Step::Expect { probe, ok, msg } => {
                 if (runner.run(probe)?.status == 0) == *ok {
                     Ok(())

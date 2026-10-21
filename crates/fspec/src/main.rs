@@ -223,10 +223,18 @@ enum CiCommand {
 enum DiskCommand {
     /// Show the steps that bring this disk, or the unmounted ext4 root partition DEVICE, onto a
     /// supported layout.
-    Plan { device: Option<String> },
+    Plan {
+        device: Option<String>,
+        /// For a NixOS root on DEVICE: the system to boot from @nixos, in that root's /nix/store.
+        #[arg(long, requires = "device")]
+        nixos_system: Option<String>,
+    },
     /// Run those steps: in place on the running system, or converting DEVICE to btrfs.
     Migrate {
         device: Option<String>,
+        /// For a NixOS root on DEVICE: the system to boot from @nixos, in that root's /nix/store.
+        #[arg(long, requires = "device")]
+        nixos_system: Option<String>,
         /// A backup taken in the last 24 hours, when there is no recent snapshot under @snapshots.
         #[arg(long)]
         backup: Option<PathBuf>,
@@ -782,7 +790,22 @@ fn disk(paths: &Paths, spec_path: &Path, cmd: &DiskCommand) -> Result<()> {
     let runner = switch_runner(paths)?;
     let runner = runner.as_ref();
     match cmd {
-        DiskCommand::Plan { device: Some(device) } | DiskCommand::Migrate { device: Some(device), .. } => {
+        DiskCommand::Plan { device: Some(device), nixos_system }
+        | DiskCommand::Migrate { device: Some(device), nixos_system, .. } => {
+            let state = paths.system("/var/lib/fspec/disk");
+            if state.join("journal.json").exists() {
+                if let DiskCommand::Plan { .. } = cmd {
+                    println!(
+                        "an interrupted migration left {}; `fspec disk migrate {device}` rolls it back",
+                        state.display()
+                    );
+                    return Ok(());
+                }
+                fspec_core::journal::Journal::recover(&state, runner)
+                    .context("rolling back the interrupted migration")?;
+                println!("rolled back the interrupted migration; {device} is as it was before it");
+                return Ok(());
+            }
             let fstype = runner.check(&Cmd::new("lsblk").args(["-no", "FSTYPE,MOUNTPOINTS", device]))?.stdout;
             let mut f = fstype.split_whitespace();
             if f.next() != Some("ext4") {
@@ -790,6 +813,13 @@ fn disk(paths: &Paths, spec_path: &Path, cmd: &DiskCommand) -> Result<()> {
             }
             if f.next().is_some() {
                 bail!("{device} is mounted; it converts only from a live system with it unmounted");
+            }
+            let uuid = runner.check(&Cmd::new("lsblk").args(["-no", "UUID", device]))?.stdout.trim().to_string();
+            if let Some(root) = fspec_switch::nixos_root(runner, paths, device, &uuid, nixos_system.as_deref())? {
+                return migrate_nixos(paths, runner, cmd, &root, &state);
+            }
+            if nixos_system.is_some() {
+                bail!("{device} does not hold NixOS; --nixos-system only applies to a NixOS root");
             }
             let m = fspec_switch::detect(runner, paths)?;
             let disk = runner.check(&Cmd::new("lsblk").args(["-ndpo", "PKNAME", device]))?.stdout.trim().to_string();
@@ -811,7 +841,7 @@ fn disk(paths: &Paths, spec_path: &Path, cmd: &DiskCommand) -> Result<()> {
             }
             Ok(())
         }
-        DiskCommand::Plan { device: None } | DiskCommand::Migrate { device: None, .. } => {
+        DiskCommand::Plan { device: None, .. } | DiskCommand::Migrate { device: None, .. } => {
             let m = fspec_switch::detect(runner, paths)?;
             let left = fspec_switch::leftovers(runner, paths, &m)?;
             let swap = match cmd {
@@ -894,6 +924,55 @@ fn disk(paths: &Paths, spec_path: &Path, cmd: &DiskCommand) -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// `disk plan` or `disk migrate` for the NixOS root on a live system's unmounted ext4 partition.
+fn migrate_nixos(
+    paths: &Paths,
+    runner: &dyn Runner,
+    cmd: &DiskCommand,
+    root: &fspec_switch::NixosRoot,
+    state: &Path,
+) -> Result<()> {
+    let device = root.device.as_str();
+    let steps = fspec_switch::nixos_migrate(paths, root, &state.display().to_string());
+    let DiskCommand::Migrate { backup, .. } = cmd else {
+        for (i, s) in steps.iter().enumerate() {
+            let mark = if s.destructive { " (destructive)" } else { "" };
+            println!("{}. {}{mark}", i + 1, s.what);
+        }
+        println!(
+            "then boot generation {} and run `fspec disk plan`, which lists deleting the old root's files and \
+             ext2_saved from the top level, the copy of /home in @nixos and its old /swapfile (destructive)",
+            root.generation + 1
+        );
+        return Ok(());
+    };
+    let Some(backup) = backup else {
+        bail!("converting {device} needs a backup taken in the last 24 hours, named with --backup")
+    };
+    recent_backup(backup)?;
+    confirm(device, &format!("This converts the ext4 filesystem on {device} to btrfs and moves NixOS into @nixos."))?;
+    let mut journal = fspec_core::journal::Journal::begin(state, 0)?;
+    for (i, step) in steps.iter().enumerate() {
+        println!("step {} of {}: {}", i + 1, steps.len(), step.what);
+        if let Err(e) = step.plan.execute_journaled(runner, &mut journal) {
+            return match journal.rollback(runner) {
+                Ok(()) => Err(e.context(format!("rolled back: {device} is ext4 again, with NixOS as it was"))),
+                Err(r) => Err(e.context(format!("the rollback failed too: {r:#}"))),
+            };
+        }
+    }
+    journal.finish()?;
+    fspec_core::journal::remove_any(&state.join("esp"))?;
+    runner.check(&fspec_switch::compress(paths, device))?;
+    println!("started fspec-compress.service, which recompresses @home and @nixos with zstd; a reboot stops it");
+    println!(
+        "done; reboot into NixOS generation {} from @nixos. Until ext2_saved is deleted, `btrfs-convert -r {device}` \
+         from a live system goes back to ext4",
+        root.generation + 1
+    );
+    Ok(())
 }
 
 fn kind_name(k: fspec_switch::Kind) -> &'static str {

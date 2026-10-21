@@ -3,7 +3,7 @@ use fspec_core::Paths;
 use fspec_core::runner::Cmd;
 
 use crate::classic::{Mounts, Sources, WORK, grub_menu, mounts, require_owner, s};
-use crate::machine::{Layout, Machine};
+use crate::machine::{BTRFS_OPTS, Layout, Machine};
 use crate::{DISTROS, Plan, subvol};
 
 /// Delete the root `fspec switch --distro` created for `distro`, with its kernels and boot
@@ -35,7 +35,13 @@ pub fn forget(paths: &Paths, m: &Machine, owner: Option<&str>, distro: &str) -> 
         Layout::Default { btrfs, .. } | Layout::Bios { btrfs, .. } => {
             let new = subvol(distro);
             plan.run(Cmd::new("mkdir").arg("-p").arg(&top));
-            plan.run(Cmd::new("mount").args(["-o", "subvolid=5"]).arg(format!("UUID={}", btrfs.uuid)).arg(&top));
+            plan.run(
+                Cmd::new("mount")
+                    .arg("-o")
+                    .arg(format!("subvolid=5,{BTRFS_OPTS}"))
+                    .arg(format!("UUID={}", btrfs.uuid))
+                    .arg(&top),
+            );
             plan.cleanup.push(Cmd::new("umount").arg(&top));
             plan.expect(
                 Cmd::new("test").arg("-e").arg(format!("{top}/{new}")),
