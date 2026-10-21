@@ -223,7 +223,8 @@ package. A reference without a digest is refused. The host never compiles.
 
 Patches on npm and other packages that ship as an unpacked tree need no build:
 `prepare` applies them in pure Rust (the `diffy` crate: git or unified diffs
-with `a/` and `b/` prefixes, text edits, file creation, deletion and rename)
+with `a/` and `b/` prefixes, text edits, file creation, deletion and rename; a
+rename with no hunks moves the file as is, so it works on binaries)
 to the package directory (`package/` for npm, `node_modules/<name>` after an
 `npm install`, else the archive's single top-level directory) before the tree
 gets its store path. The store directory name hashes the artifact hash together
@@ -332,8 +333,14 @@ archive whose top levels hold more executables than commands (Discord's
 `files/` also holds `chrome_crashpad_handler`). Store directories are named
 `<hash8>-<name>-<version>`, never rewritten, and reused when present. An
 artifact is verified against its `sha256-` or `sha512-` SRI hash before
-anything is unpacked (`.tar.gz`, `.tar.xz`, `.tar.zst`, `.zip`, or a bare
-binary named after the package).
+anything is unpacked (`.tar.gz`, `.tar.xz`, `.tar.zst`, `.zip`, a
+brotli-compressed tar, an Electron `.asar`, or a bare binary named after the
+package). Formats are told apart by their bytes, not their names. Brotli has no
+magic number, so a download that matches nothing else is decoded and kept as a
+tar only when the result is one (`ustar` at offset 257): Discord publishes its
+Linux builds that way (`full.distro`). An asar is unpacked the way moonlight's
+own extractor reads it, refusing entries that name `..` or live outside the
+archive; moonlight's extensions ship as asars.
 
 Data-only packages (fonts, icon and cursor themes, GTK themes) have no
 executables; they declare where their trees go with `share`, a map from a path
