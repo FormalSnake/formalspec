@@ -73,7 +73,7 @@ impl Remote<'_> {
             )),
             255 => Ok(Reach::Unreachable(out.stderr.trim().to_string())),
             127 => bail!(
-                "fspec is not installed on {alias} (not on PATH for a non-interactive ssh shell); install it there first, e.g. `cargo install --git https://github.com/FormalSnake/formalspec fspec`"
+                "fspec is not installed on {alias} (not on PATH for a non-interactive ssh shell); install it there first, e.g. `cargo install --git https://github.com/FormalStudio/formalspec fspec`"
             ),
             _ => bail!("`fspec facts --json` failed on {alias}: {}", failure(&out)),
         }

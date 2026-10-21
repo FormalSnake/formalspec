@@ -28,7 +28,7 @@ rustPlatform.buildRustPackage {
 
   meta = {
     description = "Declare your machines in Starlark and keep them identical";
-    homepage = "https://github.com/FormalSnake/formalspec";
+    homepage = "https://github.com/FormalStudio/formalspec";
     license = lib.licenses.mit;
     mainProgram = "fspec";
     platforms = lib.platforms.linux ++ lib.platforms.darwin;

@@ -106,7 +106,7 @@ mod tests {
     #[test]
     fn workflow_golden() {
         let hosts = ["e1504g".to_string(), "g815".to_string()];
-        golden("fspec-images.yml", &workflow("ghcr.io/formalsnake", "spec.star", &hosts).unwrap());
+        golden("fspec-images.yml", &workflow("ghcr.io/formalstudio", "spec.star", &hosts).unwrap());
     }
 
     #[test]
@@ -123,11 +123,11 @@ mod tests {
     #[test]
     fn registry_comes_from_the_git_remote() {
         for url in [
-            "git@github.com:FormalSnake/formalspec.git",
-            "https://github.com/FormalSnake/formalspec",
-            "ssh://git@github.com/FormalSnake/formalspec.git",
+            "git@github.com:FormalStudio/formalspec.git",
+            "https://github.com/FormalStudio/formalspec",
+            "ssh://git@github.com/FormalStudio/formalspec.git",
         ] {
-            assert_eq!(default_registry(&remote(url), Path::new("/repo")).unwrap(), "ghcr.io/formalsnake", "{url}");
+            assert_eq!(default_registry(&remote(url), Path::new("/repo")).unwrap(), "ghcr.io/formalstudio", "{url}");
         }
         let err = default_registry(&remote("git@gitlab.com:o/r.git"), Path::new("/repo")).unwrap_err();
         assert!(err.to_string().contains("--registry"), "{err}");

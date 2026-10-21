@@ -134,7 +134,7 @@ name = "librepods"
 source = "git:https://example/librepods@main"
 rev = "4f1c2a9"
 patches = "sha256-CCCC"
-x86_64-linux = { oci = "ghcr.io/formalsnake/fspec-cache/librepods@sha256:dd" }
+x86_64-linux = { oci = "ghcr.io/formalstudio/fspec-cache/librepods@sha256:dd" }
 
 [system.g815]
 image = "ghcr.io/ublue-os/bazzite-nvidia@sha256:ee"

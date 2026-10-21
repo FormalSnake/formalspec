@@ -14,9 +14,9 @@ permissions:
   pull-requests: write
 
 env:
-  REGISTRY: ghcr.io/formalsnake
+  REGISTRY: ghcr.io/formalstudio
   SPEC: spec.star
-  FSPEC_SOURCE: https://github.com/FormalSnake/formalspec
+  FSPEC_SOURCE: https://github.com/FormalStudio/formalspec
 
 jobs:
   build:

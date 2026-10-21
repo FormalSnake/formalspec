@@ -140,8 +140,8 @@ mod tests {
     use super::*;
 
     const DIGEST: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-    const TOKEN_URL: &str = "https://ghcr.io/token?scope=repository:formalsnake/fspec-g815:pull";
-    const MANIFEST_URL: &str = "https://ghcr.io/v2/formalsnake/fspec-g815/manifests/latest";
+    const TOKEN_URL: &str = "https://ghcr.io/token?scope=repository:formalstudio/fspec-g815:pull";
+    const MANIFEST_URL: &str = "https://ghcr.io/v2/formalstudio/fspec-g815/manifests/latest";
 
     fn registry(digest_header: Option<&str>) -> MapFetch {
         let f = MapFetch::default()
@@ -185,7 +185,7 @@ mod tests {
     #[test]
     fn token_then_manifest_digest_header() {
         let f = registry(Some(DIGEST));
-        assert_eq!(resolve_digest(&f, "ghcr.io/formalsnake/fspec-g815", "latest").unwrap(), DIGEST);
+        assert_eq!(resolve_digest(&f, "ghcr.io/formalstudio/fspec-g815", "latest").unwrap(), DIGEST);
         let sent = f.requests.lock().unwrap();
         assert_eq!(sent.len(), 1);
         let (url, headers) = &sent[0];
@@ -199,7 +199,7 @@ mod tests {
     #[test]
     fn digest_falls_back_to_the_body_hash() {
         let f = registry(None);
-        let got = resolve_digest(&f, "ghcr.io/formalsnake/fspec-g815", "latest").unwrap();
+        let got = resolve_digest(&f, "ghcr.io/formalstudio/fspec-g815", "latest").unwrap();
         let want = format!("sha256:{}", hex(&Sha256::digest(b"{\"manifests\":[]}")));
         assert_eq!(got, want);
     }
@@ -207,11 +207,11 @@ mod tests {
     #[test]
     fn bad_registries_and_digests_fail() {
         let f = registry(Some("md5:abc"));
-        let err = resolve_digest(&f, "ghcr.io/formalsnake/fspec-g815", "latest").unwrap_err();
+        let err = resolve_digest(&f, "ghcr.io/formalstudio/fspec-g815", "latest").unwrap_err();
         assert!(format!("{err:#}").contains("not sha256"), "{err:#}");
         let err = resolve_digest(&f, "quay.io/x/y", "latest").unwrap_err();
         assert!(err.to_string().contains("only ghcr.io"), "{err}");
-        let err = resolve_digest(&MapFetch::default(), "ghcr.io/formalsnake/fspec-g815", "latest").unwrap_err();
+        let err = resolve_digest(&MapFetch::default(), "ghcr.io/formalstudio/fspec-g815", "latest").unwrap_err();
         assert!(format!("{err:#}").contains("must be public"), "{err:#}");
     }
 
@@ -221,12 +221,12 @@ mod tests {
         let mac = Host { system: None, platform: "aarch64-darwin".into(), ..image_host("macbook") };
         let hosts = [image_host("g815"), mac];
         let old = Lock::default();
-        let u = update_images(&hosts, &old, "ghcr.io/FormalSnake", &f).unwrap();
+        let u = update_images(&hosts, &old, "ghcr.io/FormalStudio", &f).unwrap();
         assert!(u.errors.is_empty(), "{:?}", u.errors);
-        assert_eq!(u.lock.system["g815"].image, format!("ghcr.io/formalsnake/fspec-g815@{DIGEST}"));
-        assert_eq!(u.changes, [format!("+ image g815 ghcr.io/formalsnake/fspec-g815@{DIGEST}")]);
+        assert_eq!(u.lock.system["g815"].image, format!("ghcr.io/formalstudio/fspec-g815@{DIGEST}"));
+        assert_eq!(u.changes, [format!("+ image g815 ghcr.io/formalstudio/fspec-g815@{DIGEST}")]);
 
-        let again = update_images(&hosts, &u.lock, "ghcr.io/FormalSnake", &f).unwrap();
+        let again = update_images(&hosts, &u.lock, "ghcr.io/FormalStudio", &f).unwrap();
         assert!(again.changes.is_empty());
         assert_eq!(again.lock, u.lock);
     }

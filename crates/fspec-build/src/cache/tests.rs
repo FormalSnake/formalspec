@@ -11,7 +11,7 @@ fn out(stdout: &str) -> Output {
 #[test]
 fn registry_comes_from_the_origin_remote() {
     for (origin, want) in [
-        ("git@github.com:FormalSnake/formalspec.git\n", "ghcr.io/formalsnake/fspec-cache"),
+        ("git@github.com:FormalStudio/formalspec.git\n", "ghcr.io/formalstudio/fspec-cache"),
         ("https://github.com/FormalSnake/dotfiles\n", "ghcr.io/formalsnake/fspec-cache"),
     ] {
         let r = RecordingRunner::default();
