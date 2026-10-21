@@ -139,3 +139,75 @@ pub struct Choices {
     /// Enrol our own keys with sbctl and sign what the vendor did not.
     pub secure_boot: bool,
 }
+
+/// The choices made so far. The front end fills it screen by screen and renders the spec it would
+/// write from whatever is set.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Draft {
+    pub locale: Option<Locale>,
+    pub disk: Option<DiskChoice>,
+    pub system: Option<SystemChoice>,
+    pub account: Option<Account>,
+    pub secure_boot: bool,
+}
+
+impl Draft {
+    pub fn complete(&self) -> Option<Choices> {
+        Some(Choices {
+            locale: self.locale.clone()?,
+            disk: self.disk.clone()?,
+            system: self.system.clone()?,
+            account: self.account.clone()?,
+            secure_boot: self.secure_boot,
+        })
+    }
+}
+
+/// A host found in a cloned spec, for the restore picker.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostSummary {
+    pub name: String,
+    pub platform: String,
+    /// `fedora`, `bazzite`, …; empty when the host declares no system.
+    pub distro: String,
+    /// Login names it declares.
+    pub users: Vec<String>,
+    /// Why it cannot be installed from here, e.g. a macOS host.
+    pub unsupported: Option<String>,
+}
+
+/// Firmware facts the review screen needs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Firmware {
+    pub efi: bool,
+    /// Secure Boot is in setup mode, so sbctl can enrol keys.
+    pub setup_mode: bool,
+    pub secure_boot_on: bool,
+}
+
+/// A whole disk the installer can install onto, as lsblk describes it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DiskInfo {
+    pub path: String,
+    pub model: String,
+    pub bytes: u64,
+    /// `nvme`, `sata`, `usb`, `virtio`.
+    pub transport: String,
+    pub removable: bool,
+    /// Labels and filesystems of what is on it now, `EFI (vfat)`, `root (btrfs)`. Empty when blank.
+    pub contents: Vec<String>,
+    /// The live session booted from it, so it cannot be the target.
+    pub live_medium: bool,
+}
+
+/// What the install reports while it runs, in order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Progress {
+    /// A new stage started. `index` counts from 0 up to `total`.
+    Stage { index: usize, total: usize, title: String },
+    /// A line a command printed.
+    Output(String),
+    Done,
+    /// The install stopped. `log` holds every command and its output.
+    Failed { stage: String, error: String, log: PathBuf },
+}

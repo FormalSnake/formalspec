@@ -2,5 +2,6 @@
 //! repo, and installs that spec onto a disk through `fspec-switch`'s `disk init`, so the machine is
 //! managed by FormalSpec from its first boot.
 
+pub mod backend;
 pub mod catalog;
 pub mod model;
