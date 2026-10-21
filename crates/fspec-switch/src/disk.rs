@@ -9,7 +9,9 @@ use fspec_core::runner::{Cmd, Runner};
 use fspec_core::{Host, Paths};
 
 use crate::classic::{Sources, Target, create_root, fstab, grub_menu, install_root, kernel_options, s, sd_default};
-use crate::machine::{Btrfs, ESP_TYPE, Firmware, GIB, Layout, MIB, Machine, Part, SHARED_BOOT, SHARED_SUBVOLS, probe};
+use crate::machine::{
+    BTRFS_OPTS, Btrfs, ESP_TYPE, Firmware, GIB, Layout, MIB, Machine, Part, SHARED_BOOT, SHARED_SUBVOLS, probe,
+};
 use crate::recipe::{Boot, boot_files, populate, recipe};
 use crate::{Plan, subvol};
 
@@ -248,7 +250,7 @@ pub fn init(paths: &Paths, i: &Init) -> Result<Plan> {
             }
             plan.run(Cmd::new("mkfs.btrfs").args(["-f", "-L", "root", "-U", &ids.fs, &fsdev]));
             plan.run(Cmd::new("mkdir").arg("-p").arg(&top));
-            plan.run(Cmd::new("mount").arg(&fsdev).arg(&top));
+            plan.run(Cmd::new("mount").args(["-o", BTRFS_OPTS]).arg(&fsdev).arg(&top));
             cleanup.push(Cmd::new("umount").arg(&top));
             if let Some(luks) = &luks {
                 // Services socket-activated during the install can hold the filesystem in their own
@@ -342,6 +344,9 @@ pub struct Leftovers {
     /// `/home` and `/opt/fspec` were copied into their subvolumes and the originals still sit
     /// under the mounts in this root.
     pub shadowed: Vec<String>,
+    /// The root's old `/swapfile` is still in `@<distro>` and not in use; the swapfile lives in
+    /// `@swap` now.
+    pub old_swapfile: bool,
 }
 
 /// Read the [`Leftovers`] by mounting the btrfs top level read-only.
@@ -354,8 +359,10 @@ pub fn leftovers(runner: &dyn Runner, paths: &Paths, m: &Machine) -> Result<Left
     runner.check(&Cmd::new("mount").args(["-o", "ro,subvolid=5"]).arg(format!("UUID={}", m.fs_uuid)).arg(&top))?;
     let read = || -> Result<Leftovers> {
         let mut found = Leftovers::default();
+        // NixOS's /etc/os-release is a symlink into its store, which only resolves from that root.
         let has = |p: &str| -> Result<bool> {
-            Ok(probe(runner, Cmd::new("test").arg("-e").arg(format!("{top}/{p}")))?.is_some())
+            let test = Cmd::new("sh").args(["-c", r#"test -e "$1" || test -L "$1""#, "sh"]);
+            Ok(probe(runner, test.arg(format!("{top}/{p}")))?.is_some())
         };
         if has("etc/os-release")? {
             found.old_root = Some(String::new());
@@ -372,6 +379,11 @@ pub fn leftovers(runner: &dyn Runner, paths: &Paths, m: &Machine) -> Result<Left
                 found.shadowed.push(format!("/{dir}"));
             }
         }
+        let swapfile = format!("{top}/@{}/swapfile", m.running);
+        let swaps = std::fs::read_to_string(paths.system("/proc/swaps")).unwrap_or_default();
+        found.old_swapfile = m.facts.volumes.iter().any(|v| v == "@swap")
+            && probe(runner, Cmd::new("test").arg("-f").arg(&swapfile))?.is_some()
+            && !swaps.lines().any(|l| l.split_whitespace().next() == Some("/swapfile"));
         Ok(found)
     };
     let found = read();
@@ -401,13 +413,14 @@ pub fn migrate(paths: &Paths, m: &Machine, left: &Leftovers, ids: &Ids, swap_gib
     if d.is_empty() {
         bail!("could not read ID= from /etc/os-release, which names this root's subvolume");
     }
-    recipe(d)?;
     let top = s(&paths.system("/run/fspec/disk/top"));
-    let mount_top = |plan: &mut Plan| {
-        plan.run(Cmd::new("mkdir").arg("-p").arg(&top));
-        plan.run(Cmd::new("mount").args(["-o", "subvolid=5"]).arg(format!("UUID={}", m.fs_uuid)).arg(&top));
-        plan.cleanup.push(Cmd::new("umount").arg(&top));
-    };
+    // NixOS boots the way its own configuration says, so fspec only cleans up after
+    // `disk migrate <device>` moved it into @nixos.
+    if d == "nixos" {
+        return Ok(private(paths, left_behind(paths, m, left, &top)));
+    }
+    recipe(d)?;
+    let mount_top = |plan: &mut Plan| mount_top(plan, &top, format!("UUID={}", m.fs_uuid));
     let mut steps = Vec::new();
 
     // The shared subvolumes, with copies of what this root holds at their mount points. A
@@ -522,18 +535,48 @@ pub fn migrate(paths: &Paths, m: &Machine, left: &Leftovers, ids: &Ids, swap_gib
         return Ok(private(paths, steps));
     }
 
-    // After a reboot into @<distro>, what the move left behind.
+    Ok(private(paths, left_behind(paths, m, left, &top)))
+}
+
+fn mount_top(plan: &mut Plan, top: &str, source: String) {
+    plan.run(Cmd::new("mkdir").arg("-p").arg(top));
+    plan.run(Cmd::new("mount").arg("-o").arg(format!("subvolid=5,{BTRFS_OPTS}")).arg(source).arg(top));
+    plan.cleanup.push(Cmd::new("umount").arg(top));
+}
+
+/// After a reboot into `@<distro>`, what the move left behind.
+fn left_behind(paths: &Paths, m: &Machine, left: &Leftovers, top: &str) -> Vec<Step> {
+    let d = m.running.as_str();
+    let source = || format!("UUID={}", m.fs_uuid);
+    let mut steps = Vec::new();
     if let Some(old) = &left.old_root {
         let mut plan = Plan::default();
-        mount_top(&mut plan);
+        mount_top(&mut plan, top, source());
         let what = if old.is_empty() {
+            if let Some(esp) = m.parts.iter().filter(|p| p.parttype == ESP_TYPE).find_map(|p| p.mounts.first()) {
+                plan.expect(
+                    Cmd::new("sh").args([
+                        "-c",
+                        r#"for f in "$1"/loader/entries/fspec-live*.conf; do [ -e "$f" ] || continue; if grep -oE '(findiso|fspec\.overlay)=[^ ]+' "$f" | grep -qv '=/@fspec/'; then exit 1; fi; done"#,
+                        "sh",
+                    ]).arg(s(&paths.system(esp))),
+                    true,
+                    "the fspec-live boot entry still finds its ISO or overlay outside @fspec, in the old top-level files",
+                );
+            }
             // Everything at the top level except the subvolumes the layout uses. The old root's own
             // subvolumes (Arch's /var/lib/machines) go first, deepest first, since `rm` stays on
             // one filesystem.
             let script = r#"btrfs subvolume list "$1" | sed 's/.* path //' | grep -v '^@' | sort -r | while read -r v; do btrfs subvolume delete "$1/$v"; done
 for e in "$1"/* "$1"/.[!.]*; do case "${e##*/}" in @*) ;; *) rm -rf --one-file-system "$e" ;; esac; done"#;
-            plan.run(Cmd::new("sh").args(["-c", script, "sh", &top]));
-            "delete the old root's files from the btrfs top level".to_string()
+            plan.run(Cmd::new("sh").args(["-c", script, "sh", top]));
+            if m.facts.volumes.iter().any(|v| v == "ext2_saved") {
+                "delete the old root's files from the btrfs top level, and ext2_saved, after which `btrfs-convert -r` \
+                 cannot go back to ext4"
+                    .to_string()
+            } else {
+                "delete the old root's files from the btrfs top level".to_string()
+            }
         } else {
             plan.run(Cmd::new("btrfs").args(["subvolume", "delete", "--recursive"]).arg(format!("{top}/{old}")));
             format!("delete the old root subvolume {old}")
@@ -542,7 +585,7 @@ for e in "$1"/* "$1"/.[!.]*; do case "${e##*/}" in @*) ;; *) rm -rf --one-file-s
     }
     if !left.shadowed.is_empty() {
         let mut plan = Plan::default();
-        mount_top(&mut plan);
+        mount_top(&mut plan, top, source());
         for dir in &left.shadowed {
             let under = format!("{top}/@{d}{dir}");
             plan.run(Cmd::new("sh").args([
@@ -555,7 +598,13 @@ for e in "$1"/* "$1"/.[!.]*; do case "${e##*/}" in @*) ;; *) rm -rf --one-file-s
         let what = format!("delete the copies of {} left under their mounts in @{d}", left.shadowed.join(" and "));
         steps.push(Step { what, destructive: true, plan });
     }
-    Ok(private(paths, steps))
+    if left.old_swapfile {
+        let mut plan = Plan::default();
+        mount_top(&mut plan, top, source());
+        plan.run(Cmd::new("rm").arg("-f").arg(format!("{top}/@{d}/swapfile")));
+        steps.push(Step { what: format!("delete the old /swapfile in @{d}"), destructive: true, plan });
+    }
+    steps
 }
 
 fn private(paths: &Paths, steps: Vec<Step>) -> Vec<Step> {
@@ -860,4 +909,386 @@ pub fn convert(paths: &Paths, device: &str, disk: &str, firmware: &Firmware) -> 
             .env("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"),
     );
     plan.private(&s(&paths.system(DISK)))
+}
+
+/// A NixOS root on the unmounted ext4 partition `disk migrate <device>` converts, and the system
+/// to boot from `@nixos` afterwards.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NixosRoot {
+    pub device: String,
+    /// The generation `/nix/var/nix/profiles/system` points at.
+    pub generation: u64,
+    /// A store path in the root's own store whose `fileSystems` mount `/` from `@nixos`.
+    pub system: String,
+    /// The ESP as the system's `fstab` names it, and where it mounts it.
+    pub esp: String,
+    pub esp_at: String,
+}
+
+/// `path` inside the tree at `root`, following symlinks as if `root` were `/`.
+pub(crate) fn resolve_in(root: &Path, path: &str) -> Result<std::path::PathBuf> {
+    let parts = |p: &str| p.split('/').filter(|c| !c.is_empty()).rev().map(String::from).collect::<Vec<_>>();
+    let mut todo = parts(path);
+    let mut at = std::path::PathBuf::new();
+    let mut hops = 0;
+    while let Some(c) = todo.pop() {
+        match c.as_str() {
+            "." => continue,
+            ".." => {
+                at.pop();
+                continue;
+            }
+            _ => {}
+        }
+        let next = at.join(&c);
+        match std::fs::read_link(root.join(&next)) {
+            Ok(target) => {
+                hops += 1;
+                if hops > 40 {
+                    bail!("too many symlinks resolving {path} under {}", root.display());
+                }
+                let target = target.to_string_lossy().into_owned();
+                if target.starts_with('/') {
+                    at = std::path::PathBuf::new();
+                }
+                todo.extend(parts(&target));
+            }
+            Err(_) => at = next,
+        }
+    }
+    Ok(root.join(at))
+}
+
+/// Check that the `fstab` of the system to boot mounts `/` from `@nixos` on the filesystem `uuid`
+/// (and `/home` and `/swap`, if it mounts them, from `@home` and `@swap`), and return its ESP line's device and mount point.
+pub fn nixos_fstab(fstab: &str, uuid: &str) -> Result<(String, String)> {
+    let lines: Vec<Vec<&str>> = fstab
+        .lines()
+        .map(|l| l.split_whitespace().collect::<Vec<_>>())
+        .filter(|f| f.len() >= 4 && !f[0].starts_with('#'))
+        .collect();
+    let ours = |f: &[&str]| f[0] == format!("/dev/disk/by-uuid/{uuid}") || f[0] == format!("UUID={uuid}");
+    let subvol = |f: &[&str], want: &str| {
+        f[2] == "btrfs"
+            && ours(f)
+            && f[3].split(',').any(|o| o == format!("subvol={want}") || o == format!("subvol=/{want}"))
+    };
+    let Some(root) = lines.iter().find(|f| f[1] == "/") else { bail!("its fstab mounts nothing at /") };
+    if !subvol(root, "@nixos") {
+        bail!(
+            "its fstab mounts / as `{}`, not btrfs subvol=@nixos on UUID {uuid}; build it with fileSystems.\"/\" on that",
+            root.join(" ")
+        );
+    }
+    for (at, want) in [("/home", "@home"), ("/swap", "@swap")] {
+        if let Some(line) = lines.iter().find(|f| f[1] == at)
+            && !subvol(line, want)
+        {
+            bail!("its fstab mounts {at} as `{}`, not btrfs subvol={want} on UUID {uuid}", line.join(" "));
+        }
+    }
+    let Some(esp) = lines.iter().find(|f| f[2] == "vfat") else {
+        bail!("its fstab mounts no vfat ESP, where its systemd-boot entries go")
+    };
+    Ok((esp[0].to_string(), esp[1].to_string()))
+}
+
+/// Read the root on the unmounted ext4 `device` (UUID `uuid`) read-only, and when it is NixOS,
+/// check `system` against it. Refuses a NixOS root without a system to boot.
+pub fn nixos_root(
+    runner: &dyn Runner,
+    paths: &Paths,
+    device: &str,
+    uuid: &str,
+    system: Option<&str>,
+) -> Result<Option<NixosRoot>> {
+    let mnt = s(&paths.system(format!("{DISK}/look")));
+    runner.check(&Cmd::new("mkdir").arg("-p").arg(&mnt))?;
+    runner.check(&Cmd::new("mount").args(["-t", "ext4", "-o", "ro,noload", device, &mnt]))?;
+    let read = || -> Result<Option<NixosRoot>> {
+        let root = Path::new(&mnt);
+        let profile = root.join("nix/var/nix/profiles/system");
+        if !root.join("etc/NIXOS").exists() && profile.symlink_metadata().is_err() {
+            return Ok(None);
+        }
+        let Some(system) = system else {
+            bail!(
+                "{device} holds NixOS, whose fstab and initrd come from its configuration: build a system that \
+                 mounts / as btrfs subvol=@nixos, copy it into this root's /nix/store, and name it with --nixos-system"
+            )
+        };
+        let link = std::fs::read_link(&profile).with_context(|| format!("reading {}", profile.display()))?;
+        let link = link.to_string_lossy();
+        let generation = link
+            .strip_prefix("system-")
+            .and_then(|l| l.strip_suffix("-link"))
+            .and_then(|n| n.parse().ok())
+            .with_context(|| format!("the system profile points at {link}, not a system-<n>-link generation"))?;
+        let name = system.strip_prefix("/nix/store/").filter(|n| !n.is_empty() && !n.contains('/'));
+        if name.is_none() || !root.join(&system[1..]).is_dir() {
+            bail!("{system} is not a store path in {device}'s /nix/store; copy it there with `nix copy --to`");
+        }
+        if !resolve_in(root, &format!("{system}/bin/switch-to-configuration"))?.is_file() {
+            bail!("{system} has no bin/switch-to-configuration, so it is not a NixOS system");
+        }
+        let fstab = resolve_in(root, &format!("{system}/etc/fstab"))?;
+        let fstab = std::fs::read_to_string(&fstab).with_context(|| format!("reading {system}/etc/fstab"))?;
+        let (esp, esp_at) = nixos_fstab(&fstab, uuid).with_context(|| format!("{system} does not fit"))?;
+        Ok(Some(NixosRoot { device: device.into(), generation, system: system.into(), esp, esp_at }))
+    };
+    let found = read();
+    runner.run(&Cmd::new("umount").arg(&mnt))?;
+    found
+}
+
+/// The ESP directories NixOS's systemd-boot installer rewrites, which a rollback puts back.
+const ESP_DIRS: &str = "loader EFI/systemd EFI/BOOT";
+
+/// Where `disk migrate <device>` mounts the disk's ESP on the live system. The journal of a NixOS
+/// migration lives on it, so it survives the live system rebooting.
+pub const ESP_MOUNT: &str = "/run/fspec/esp";
+
+/// Mount the ESP of the disk holding `device` at [`ESP_MOUNT`], unless it is mounted there, and
+/// return its device and mount point. `None` for a disk without one.
+pub fn mount_esp(runner: &dyn Runner, paths: &Paths, device: &str) -> Result<Option<(String, String)>> {
+    let disk = runner.check(&Cmd::new("lsblk").args(["-ndpo", "PKNAME", device]))?.stdout.trim().to_string();
+    let parts = runner.check(&Cmd::new("lsblk").args(["-nrpo", "NAME,PARTTYPE", &disk]))?.stdout;
+    let esps: Vec<&str> = parts
+        .lines()
+        .filter_map(|l| l.split_once(' '))
+        .filter(|(_, t)| t.trim().eq_ignore_ascii_case(ESP_TYPE))
+        .map(|(n, _)| n)
+        .collect();
+    let esp = match esps[..] {
+        [] => return Ok(None),
+        [one] => one.to_string(),
+        _ => bail!("{disk} has more than one ESP: {}", esps.join(", ")),
+    };
+    let at = s(&paths.system(ESP_MOUNT));
+    if probe(runner, Cmd::new("mountpoint").args(["-q", &at]))?.is_none() {
+        // FAT has no journal, so a reset mid-migration can leave it needing a repair before the
+        // journal on it is read.
+        runner.check(&Cmd::new("sh").args(["-c", r#"fsck.fat -a -w "$1"; [ $? -le 1 ]"#, "sh", &esp]))?;
+        runner.check(&Cmd::new("mkdir").arg("-p").arg(&at))?;
+        runner.check(&Cmd::new("mount").arg(&esp).arg(&at))?;
+    }
+    Ok(Some((esp, at)))
+}
+
+/// The steps that move the NixOS root `r` onto btrfs, run from a live system with the ESP mounted
+/// at `esp_mnt`: boot the fspec-live entry by default meanwhile, convert the root, keeping
+/// ext2_saved, snapshot the top level into `@nixos` and add the shared subvolumes, then boot
+/// `r.system` from `@nixos` as a new generation. Every step journals its undo: `btrfs-convert -r`
+/// and the ESP's boot files saved under `state`, so a failure leaves NixOS on ext4 as it was.
+pub fn nixos_migrate(paths: &Paths, r: &NixosRoot, esp_mnt: &str, state: &str) -> Vec<Step> {
+    let dev = r.device.as_str();
+    let disk = s(&paths.system(DISK));
+    let top = s(&paths.system(format!("{DISK}/top")));
+    let mut steps = Vec::new();
+
+    // A live system that reboots mid-migration comes back into fspec-live, where the journal on
+    // the ESP rolls the migration back. An EFI default entry would outrank loader.conf.
+    let mut plan = Plan::default();
+    plan.expect(
+        Cmd::new("sh").args(["-c", r#"ls "$1"/loader/entries/fspec-live*.conf"#, "sh", esp_mnt]),
+        true,
+        "the ESP has no fspec-live entry to boot while the migration runs; install the live entry first",
+    );
+    plan.expect(
+        Cmd::new("test")
+            .arg("-e")
+            .arg(s(&paths.system("/sys/firmware/efi/efivars/LoaderEntryDefault-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f"))),
+        false,
+        "the EFI variable LoaderEntryDefault outranks loader.conf; clear it with `bootctl set-default \"\"` first",
+    );
+    plan.undo(Cmd::new("sh").args([
+        "-c",
+        r#"set -e; [ -f "$2" ] || exit 0; cp "$2" "$1.fspec-tmp"; sync "$1.fspec-tmp"; mv "$1.fspec-tmp" "$1"; sync -f "$1""#,
+        "sh",
+        &format!("{esp_mnt}/loader/loader.conf"),
+        &format!("{state}/loader.conf"),
+    ]));
+    plan.run(Cmd::new("sh").args([
+        "-c",
+        r#"set -e; cp "$1" "$2.part"; sync "$2.part"; mv "$2.part" "$2"
+{ grep -v '^default ' "$1" || true; echo 'default fspec-live*'; } > "$1.fspec-tmp"
+sync "$1.fspec-tmp"; mv "$1.fspec-tmp" "$1"; sync -f "$1""#,
+        "sh",
+        &format!("{esp_mnt}/loader/loader.conf"),
+        &format!("{state}/loader.conf"),
+    ]));
+    steps.push(Step {
+        what: "boot the fspec-live entry by default until the migration is done".into(),
+        destructive: false,
+        plan,
+    });
+
+    let mut plan = Plan::default();
+    plan.undo(Cmd::new("sh").args([
+        "-c",
+        r#"umount -R "$1" 2>/dev/null; if [ "$(blkid -o value -s TYPE "$2")" = btrfs ]; then btrfs-convert -r "$2"; fi"#,
+        "sh",
+        &disk,
+        dev,
+    ]));
+    plan.run(Cmd::new("e2fsck").args(["-fy", dev]));
+    plan.run(Cmd::new("btrfs-convert").args(["--uuid", "copy", dev]));
+    let what = format!(
+        "convert the ext4 root {dev} to btrfs in place, keeping its UUID and the ext4 image as ext2_saved for \
+         `btrfs-convert -r`"
+    );
+    steps.push(Step { what, destructive: true, plan });
+
+    let mut plan = Plan::default();
+    mount_top(&mut plan, &top, dev.into());
+    plan.expect(Cmd::new("test").arg("-e").arg(format!("{top}/@nixos")), false, "@nixos already exists");
+    plan.run(Cmd::new("btrfs").args(["subvolume", "snapshot", &top]).arg(format!("{top}/@nixos")));
+    for v in std::iter::once("@home").chain(SHARED_SUBVOLS) {
+        plan.run(Cmd::new("btrfs").args(["subvolume", "create"]).arg(format!("{top}/{v}")));
+    }
+    plan.run(reflink_copy(&format!("{top}/home"), &format!("{top}/@home")));
+    plan.run(reflink_copy(&format!("{top}/opt/fspec"), &format!("{top}/@fspec")));
+    // The swapfile NixOS creates in @swap has to be no copy-on-write, which only an empty
+    // directory passes on to new files.
+    plan.run(Cmd::new("chattr").arg("+C").arg(format!("{top}/@swap")));
+    plan.run(Cmd::new("mkdir").arg("-p").arg(format!("{top}/@nixos/swap")));
+    // The live system's ISO and overlay, which its ESP entry finds by path from the top level, so
+    // they have to outlive the old top-level files.
+    plan.run(Cmd::new("sh").args([
+        "-c",
+        r#"if [ -d "$1/var/lib/fspec-live" ]; then cp -a --reflink=always "$1/var/lib/fspec-live" "$1/@fspec/live" && sync -f "$1/@fspec/live"; fi"#,
+        "sh",
+        &top,
+    ]));
+    steps.push(Step {
+        what: "snapshot the top level into @nixos, and create @home with a reflink copy of /home, @swap without \
+               copy-on-write, @snapshots and @fspec"
+            .into(),
+        destructive: false,
+        plan,
+    });
+
+    let mut plan = Plan::default();
+    let root = s(&paths.system(format!("{DISK}/nixos")));
+    let esp = format!("{root}{}", r.esp_at);
+    let saved = format!("{state}/esp");
+    plan.run(Cmd::new("mkdir").arg("-p").arg(&root));
+    plan.run(Cmd::new("mount").arg("-o").arg(format!("subvol=@nixos,{BTRFS_OPTS}")).args([dev, &root]));
+    plan.cleanup.push(Cmd::new("umount").arg("-R").arg(&root));
+    plan.run(Cmd::new("mkdir").arg("-p").arg(&esp));
+    plan.run(Cmd::new("mount").arg("--bind").arg(esp_mnt).arg(&esp));
+    plan.undo(Cmd::new("sh").args([
+        "-c",
+        r#"set -e; [ -d "$2" ] || exit 0; for d in $3; do rm -rf "$1/$d"; if [ -e "$2/$d" ]; then mkdir -p "$(dirname "$1/$d")"; cp -a "$2/$d" "$1/$d"; fi; done; sync -f "$1""#,
+        "sh",
+        esp_mnt,
+        &saved,
+        ESP_DIRS,
+    ]));
+    plan.run(Cmd::new("sh").args([
+        "-c",
+        r#"set -e; rm -rf "$2" "$2.part"; mkdir -p "$2.part"; for d in $3; do if [ -e "$1/$d" ]; then mkdir -p "$(dirname "$2.part/$d")"; cp -a "$1/$d" "$2.part/$d"; fi; done; sync -f "$2.part"; mv "$2.part" "$2""#,
+        "sh",
+        esp_mnt,
+        &saved,
+        ESP_DIRS,
+    ]));
+    for (from, to) in [("/dev", "dev"), ("/sys", "sys")] {
+        plan.run(Cmd::new("mount").arg("--rbind").arg(from).arg(format!("{root}/{to}")));
+        plan.run(Cmd::new("mount").arg("--make-rslave").arg(format!("{root}/{to}")));
+    }
+    plan.run(Cmd::new("mount").args(["-t", "proc", "proc"]).arg(format!("{root}/proc")));
+    plan.run(Cmd::new("mount").args(["-t", "tmpfs", "tmpfs"]).arg(format!("{root}/run")));
+    // bootctl writes the boot entry variables through efivarfs, which a live system may not mount.
+    plan.run(Cmd::new("sh").args([
+        "-c",
+        r#"d="$1/sys/firmware/efi/efivars"; if [ -d "$d" ] && ! mountpoint -q "$d"; then mount -t efivarfs efivarfs "$d"; fi"#,
+        "sh",
+        &root,
+    ]));
+    let next = r.generation + 1;
+    let sys = r.system.as_str();
+    // Store binaries only run against their own store, so the chroot is @nixos and not the live
+    // root, and the environment is set inside it, where the live root's PATH means nothing.
+    let chroot = |args: &[&str]| {
+        Cmd::new("chroot")
+            .arg(&root)
+            .arg(format!("{sys}/sw/bin/env"))
+            .arg(format!("PATH={sys}/sw/bin"))
+            .arg("HOME=/root")
+            .arg(format!("LOCALE_ARCHIVE={sys}/sw/lib/locale/locale-archive"))
+            .args(args.iter().copied())
+    };
+    let profile = "/nix/var/nix/profiles/system";
+    plan.run(chroot(&[&format!("{sys}/sw/bin/nix-env"), "-p", profile, "--set", sys]));
+    plan.expect(
+        // The link points into @nixos's store, which `-e` would look for in the live root's.
+        Cmd::new("test").arg("-L").arg(format!("{root}{profile}-{next}-link")),
+        true,
+        format!("nix-env did not make {sys} generation {next} of the system profile"),
+    );
+    plan.run(chroot(&[&format!("{sys}/bin/switch-to-configuration"), "boot"]));
+    // Newer NixOS names its entries by hash instead of nixos-generation-<n>.conf.
+    plan.expect(
+        Cmd::new("sh").args(["-c", r#"grep -qs "init=$2/init" "$1"/loader/entries/*.conf"#, "sh", &esp, sys]),
+        true,
+        format!("switch-to-configuration wrote no boot entry for {sys}"),
+    );
+    // Only the new entry can boot the btrfs root, so it gets three tries, its initrd panics and
+    // reboots on failure instead of waiting in emergency mode, the booted system goes on to sshd
+    // past a failed mount, since `systemd.mask=` only applies after the initrd, and the ext4
+    // generations move out of systemd-boot's sight. Without a `default`, systemd-boot boots the first entry in its order,
+    // which puts entries out of tries last, so the fspec-live entry follows three failures.
+    plan.run(Cmd::new("sh").args([
+        "-c",
+        r#"set -e; e="$1/loader/entries"; new=$(grep -ls "init=$2/init" "$e"/*.conf | head -n 1)
+base=${new##*/}; base=${base%.conf}; base=${base%%+*}
+sed -i 's|^options .*|& boot.panic_on_fail panic=10 systemd.mask=emergency.target systemd.mask=emergency.service systemd.mask=rescue.target systemd.mask=rescue.service|' "$new"
+mv "$new" "$e/$base+3.conf"
+mkdir -p "$1/loader/entries.ext4"
+for f in "$e"/nixos-*.conf; do if [ "${f##*/}" != "$base+3.conf" ]; then mv "$f" "$1/loader/entries.ext4/"; fi; done
+sed -i '/^default /d' "$1/loader/loader.conf"
+sync -f "$1/loader""#,
+        "sh",
+        &esp,
+        sys,
+    ]));
+    mount_top(&mut plan, &top, dev.into());
+    plan.run(Cmd::new("sh").args([
+        "-c",
+        r#"set -e; found=; for f in "$1"/loader/entries/fspec-live*.conf; do
+[ -e "$f" ] || continue; found=1
+for p in $(grep -oE '(findiso|fspec\.overlay)=/var/lib/fspec-live/[^ ]+' "$f" | sed 's#.*/##'); do
+  [ -f "$2/@fspec/live/$p" ] || { echo "$p is not in @fspec/live" >&2; exit 1; }
+done
+sed -E 's#((findiso|fspec\.overlay)=)/var/lib/fspec-live/#\1/@fspec/live/#g' "$f" > "$f.fspec-tmp"
+sync "$f.fspec-tmp"; mv "$f.fspec-tmp" "$f"; sync -f "$f"
+done
+[ -n "$found" ] || echo "no fspec-live entry on the ESP, so no live ISO to point at @fspec/live""#,
+        "sh",
+        &esp,
+        &top,
+    ]));
+    let what = format!(
+        "make {sys} generation {next} of NixOS in @nixos and its boot default with three tries, move generation {} \
+         and older to loader/entries.ext4 on the ESP, and point the fspec-live entry at @fspec/live",
+        r.generation
+    );
+    steps.push(Step { what, destructive: false, plan });
+    private(paths, steps)
+}
+
+/// A transient unit that recompresses `@home` and `@nixos` on `device` with zstd, which
+/// btrfs-convert leaves uncompressed. It skips the store, whose files are hardlinked, and the old
+/// swapfile, which is deleted later. Rewriting a file unshares it from the old top level and
+/// ext2_saved until those are deleted, so it stops once the filesystem is 80% full.
+pub fn compress(paths: &Paths, device: &str) -> Cmd {
+    let top = s(&paths.system(format!("{DISK}-compress")));
+    let script = r#"mkdir -p "$1" && mount -o "subvolid=5,$3" "$2" "$1" || exit 1
+find "$1/@home" "$1/@nixos" -xdev \( -path "$1/@nixos/nix/store" -o -path "$1/@nixos/swapfile" \) -prune -o -type f -print0 |
+  xargs -0 -r -n 256 sh -c 'used=$(df --output=pcent "$0" | tail -n 1 | tr -dc 0-9); [ "$used" -lt 80 ] || exit 255; btrfs filesystem defragment -czstd "$@" || true' "$1"
+umount "$1""#;
+    Cmd::new("systemd-run")
+        .args(["--unit=fspec-compress", "--collect", "sh", "-c", script, "sh"])
+        .args([&top, device, BTRFS_OPTS])
 }

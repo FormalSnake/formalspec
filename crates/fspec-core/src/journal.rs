@@ -65,11 +65,26 @@ impl Journal {
         Ok(true)
     }
 
+    /// Synced before it returns, since the next step only runs once its undo is on disk. On vfat
+    /// (a journal on the ESP) fsync of the directory does not persist the rename, so the whole
+    /// filesystem is synced.
     fn persist(&self) -> Result<()> {
+        use std::io::Write;
         let tmp = self.path.with_extension("json.tmp");
         let on_disk = OnDisk { generation: self.generation, steps: self.steps.clone() };
-        fs::write(&tmp, serde_json::to_vec_pretty(&on_disk)?)?;
+        let mut f = fs::File::create(&tmp)?;
+        f.write_all(&serde_json::to_vec_pretty(&on_disk)?)?;
+        f.sync_all()?;
         fs::rename(&tmp, &self.path)?;
+        let dir = fs::File::open(self.path.parent().unwrap_or(Path::new(".")))?;
+        dir.sync_all()?;
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::AsRawFd;
+            if unsafe { libc::syncfs(dir.as_raw_fd()) } != 0 {
+                return Err(std::io::Error::last_os_error()).context("syncing the journal's filesystem");
+            }
+        }
         Ok(())
     }
 

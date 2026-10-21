@@ -10,6 +10,8 @@ pub const BIOS_GRUB_TYPE: &str = "21686148-6449-6e6f-744e-656564454649";
 pub const SHARED_BOOT: &str = "/var/lib/fspec/boot";
 /// The subvolumes every root of the default and BIOS layouts shares, besides the home.
 pub const SHARED_SUBVOLS: [&str; 3] = ["@swap", "@snapshots", "@fspec"];
+/// The options fspec mounts the btrfs filesystem with.
+pub const BTRFS_OPTS: &str = "noatime,compress=zstd:1";
 pub const GIB: u64 = 1 << 30;
 pub const MIB: u64 = 1 << 20;
 
