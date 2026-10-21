@@ -4,6 +4,7 @@ pub mod facts;
 pub mod fetch;
 pub mod journal;
 pub mod lock;
+pub mod moss;
 pub mod patches;
 pub mod paths;
 pub mod plan;

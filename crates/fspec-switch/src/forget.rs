@@ -48,6 +48,10 @@ pub fn forget(paths: &Paths, m: &Machine, owner: Option<&str>, distro: &str) -> 
             } else {
                 let clear = r#"rm -rf "$1/$2" "$1"/EFI/Linux/"$2"-*.efi "$1"/loader/entries/"$2"-*.conf"#;
                 plan.run(Cmd::new("sh").args(["-c", clear, "sh", &src.esp, distro]));
+                if distro == "aerynos" {
+                    // blsforme keeps AerynOS's kernels under EFI/aerynos.
+                    plan.run(Cmd::new("rm").arg("-rf").arg(format!("{}/EFI/aerynos", src.esp)));
+                }
             }
             plan.run(Cmd::new("btrfs").args(["subvolume", "delete", "--recursive"]).arg(format!("{top}/{new}")));
         }

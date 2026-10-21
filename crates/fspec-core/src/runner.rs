@@ -81,11 +81,19 @@ pub struct Output {
 pub trait Runner: Sync {
     fn run(&self, cmd: &Cmd) -> Result<Output>;
 
-    /// Run and fail on a non-zero exit, with stderr in the error.
+    /// Run and fail on a non-zero exit, with stderr in the error, or the end of stdout for tools
+    /// like moss that report errors there.
     fn check(&self, cmd: &Cmd) -> Result<Output> {
         let out = self.run(cmd)?;
         if out.status != 0 {
-            bail!("`{cmd}` exited {}: {}", out.status, out.stderr.trim());
+            let why = match out.stderr.trim() {
+                "" => {
+                    let lines: Vec<&str> = out.stdout.trim().lines().collect();
+                    lines[lines.len().saturating_sub(5)..].join("\n")
+                }
+                e => e.to_string(),
+            };
+            bail!("`{cmd}` exited {}: {why}", out.status);
         }
         Ok(out)
     }

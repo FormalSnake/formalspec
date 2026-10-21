@@ -82,6 +82,9 @@ pub fn resolve(pkg: &Pkg, platforms: &[String], min_age: Option<i64>, cx: &Cx) -
         Source::Dnf(_) | Source::Pacman(_) | Source::Apt(_) | Source::Xbps(_) => {
             distro::resolve(&pkg.source, &pkg.name, platforms, cx, &mut locked)
         }
+        // moss installs from a repository stream, not from package files, and rolls back through
+        // its own states, so its packages lock by name only.
+        Source::Moss(_) => Ok(()),
     };
     result.map_err(|e| anyhow!("{}: {e:#}", ctx()))?;
     if !pkg.patches.is_empty() {

@@ -37,3 +37,11 @@ family_backend!(
     "xbps",
     Family::Xbps
 );
+
+family_backend!(
+    /// Packages from the AerynOS repositories. They lock by name only: moss installs from its
+    /// repository stream, and a rollback activates the moss state from before the apply.
+    MossBackend,
+    "moss",
+    Family::Moss
+);

@@ -47,8 +47,9 @@ impl Backend for DistroBackend {
         cx.facts.os == Os::Linux && !cx.facts.image && matches!(r, Resource::Distro(_))
     }
 
+    /// The packages are live once installed, so services and files can use what they ship.
     fn phase(&self) -> Phase {
-        Phase::System
+        Phase::Packages
     }
 
     fn check(&self, cx: &Cx, _r: &Resource) -> Result<()> {
@@ -59,8 +60,8 @@ impl Backend for DistroBackend {
         drift_names(cx, family(cx)?, &recorded(entry), &entry.record)
     }
 
-    /// Takes the btrfs snapshot here because the package phase commits before the system phase,
-    /// and a snapshot taken after it would already hold the new kernel.
+    /// Takes the btrfs snapshot here because every backend prepares before any commits, so the
+    /// snapshot holds the system from before the `pkg` packages and the new kernel.
     fn prepare(&self, cx: &Cx, ops: &[Op], _staging: &Path) -> Result<()> {
         if ops.iter().all(Op::is_removal) {
             return Ok(());

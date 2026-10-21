@@ -23,7 +23,7 @@ pub use machine::{Btrfs, Facts, Firmware, Layout, Machine, Part, assumed, boot_o
 pub use recipe::{Recipe, caveats, misfit, recipe};
 
 /// The distros `fspec switch --distro` can bootstrap.
-pub const DISTROS: [&str; 5] = ["fedora", "arch", "debian", "ubuntu", "void"];
+pub const DISTROS: [&str; 6] = ["fedora", "arch", "debian", "ubuntu", "void", "aerynos"];
 
 /// The runner could not start the program because it is not installed.
 pub(crate) fn not_installed(e: &anyhow::Error) -> bool {

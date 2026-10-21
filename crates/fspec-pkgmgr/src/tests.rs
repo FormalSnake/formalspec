@@ -11,10 +11,20 @@ use fspec_core::{Paths, State};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use crate::{AptBackend, BrewBackend, DistroBackend, DnfBackend, FlatpakBackend, PacmanBackend, XbpsBackend};
+use crate::{
+    AptBackend, BrewBackend, DistroBackend, DnfBackend, FlatpakBackend, MossBackend, PacmanBackend, XbpsBackend,
+};
 
-const ALL: [&dyn Backend; 7] =
-    [&FlatpakBackend, &BrewBackend, &DnfBackend, &PacmanBackend, &AptBackend, &XbpsBackend, &DistroBackend];
+const ALL: [&dyn Backend; 8] = [
+    &FlatpakBackend,
+    &BrewBackend,
+    &DnfBackend,
+    &PacmanBackend,
+    &AptBackend,
+    &XbpsBackend,
+    &MossBackend,
+    &DistroBackend,
+];
 
 struct World {
     _dir: tempfile::TempDir,
@@ -776,4 +786,33 @@ fn btrfs_snapshot_is_taken_before_the_commit_only_on_btrfs() {
     // Nothing to change, nothing to snapshot.
     w.apply(Scope::System, &want).unwrap();
     assert!(w.take().iter().all(|l| !l.starts_with("btrfs")));
+}
+
+fn moss_line(args: &[&str]) -> String {
+    fspec_core::moss::moss(crate::family::LOADER_CONF, args.iter().copied()).to_string()
+}
+
+#[test]
+fn moss_installs_by_name_and_rolls_back_to_the_earlier_state() {
+    let w = World::on("aerynos", &[]);
+    fs::create_dir_all(w.paths.root.join("usr")).unwrap();
+    fs::write(w.paths.root.join("usr/.stateID"), "7\n").unwrap();
+    let pkg = |n: &str| pkg(n, json!({"kind": "moss", "names": []}), "pinned");
+    w.answer(&moss_line(&["-y", "install", "b"]), 1, "");
+    assert!(w.apply(Scope::System, &[pkg("a"), pkg("b")]).is_err());
+    let lines = w.take();
+    assert!(lines.contains(&moss_line(&["-y", "install", "a"])), "{lines:#?}");
+    assert_eq!(lines.last(), Some(&moss_line(&["-y", "state", "activate", "7"])));
+    assert!(!lines.iter().any(|l| l.contains("remove")), "{lines:#?}");
+}
+
+#[test]
+fn moss_versions_come_from_the_installed_list() {
+    let w = World::on("aerynos", &[]);
+    let query = "sh -c";
+    w.answer(query, 0, "3.4.1-12\n");
+    w.apply(Scope::System, &[pkg("htop", json!({"kind": "moss", "names": []}), "pinned")]).unwrap();
+    let state = w.state(Scope::System);
+    let rec = &state.entries.values().next().unwrap().record;
+    assert_eq!(rec["versions"]["htop"], "3.4.1-12");
 }

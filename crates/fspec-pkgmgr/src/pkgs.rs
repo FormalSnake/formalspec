@@ -34,7 +34,7 @@ struct Want {
 }
 
 fn names(fam: Family, p: &Pkg) -> Result<Vec<String>> {
-    let (Source::Dnf(d) | Source::Pacman(d) | Source::Apt(d) | Source::Xbps(d)) = &p.source else {
+    let (Source::Dnf(d) | Source::Pacman(d) | Source::Apt(d) | Source::Xbps(d) | Source::Moss(d)) = &p.source else {
         bail!("pkg:{} is not a {} package", p.name, fam.label())
     };
     Ok(if d.names.is_empty() { vec![p.name.clone()] } else { d.names.clone() })
@@ -123,6 +123,15 @@ fn journal_all(journal: &mut Journal, cmds: Vec<Cmd>) -> Result<()> {
     cmds.into_iter().rev().try_for_each(|cmd| journal.record(Undo::Run { cmd }))
 }
 
+/// Journal what undoes the next change: the manager's own state from before it when it keeps
+/// one, `cmds` otherwise.
+fn journal_undo(cx: &Cx, journal: &mut Journal, fam: Family, cmds: impl FnOnce() -> Vec<Cmd>) -> Result<()> {
+    match fam.restore_point(&cx.paths.system("/")) {
+        Some(cmd) => journal.record(Undo::Run { cmd }),
+        None => journal_all(journal, cmds()),
+    }
+}
+
 fn install_cmds(cx: &Cx, fam: Family, names: &[String], cached: Option<&Cached>) -> Vec<Cmd> {
     match cached {
         Some(c) => fam.install_file(&cache_dir(cx).join(&c.file), names),
@@ -138,15 +147,16 @@ pub(crate) fn install(
     names: &[String],
     cached: Option<&Cached>,
 ) -> Result<()> {
-    journal.record(Undo::Run { cmd: fam.remove(names) })?;
+    journal_undo(cx, journal, fam, || vec![fam.remove(names)])?;
     run_all(cx, &install_cmds(cx, fam, names, cached))
 }
 
 /// Installing over an existing package can only be reversed when the previous file is cached.
 fn upgrade(cx: &Cx, journal: &mut Journal, fam: Family, w: &Want, rec: &Map<String, Value>) -> Result<()> {
-    if let Some(prev) = cached_file(cx, rec) {
-        journal_all(journal, fam.install_file(&prev, &w.names))?;
-    }
+    journal_undo(cx, journal, fam, || match cached_file(cx, rec) {
+        Some(prev) => fam.install_file(&prev, &w.names),
+        None => Vec::new(),
+    })?;
     run_all(cx, &install_cmds(cx, fam, &w.names, w.cached.as_ref()))
 }
 
@@ -159,11 +169,10 @@ pub(crate) fn remove(
     names: &[String],
     rec: &Map<String, Value>,
 ) -> Result<()> {
-    let back = match cached_file(cx, rec) {
+    journal_undo(cx, journal, fam, || match cached_file(cx, rec) {
         Some(path) => fam.install_file(&path, names),
         None => fam.install_names(names),
-    };
-    journal_all(journal, back)?;
+    })?;
     cx.runner.check(&fam.remove(names))?;
     Ok(())
 }

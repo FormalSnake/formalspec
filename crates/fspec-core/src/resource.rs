@@ -271,6 +271,7 @@ pub enum Source {
     Pacman(DistroPkgs),
     Apt(DistroPkgs),
     Xbps(DistroPkgs),
+    Moss(DistroPkgs),
     Git {
         url: String,
         #[serde(default = "main")]
@@ -306,6 +307,7 @@ impl Source {
             Source::Pacman(_) => "pacman",
             Source::Apt(_) => "apt",
             Source::Xbps(_) => "xbps",
+            Source::Moss(_) => "moss",
             Source::Git { .. } => "git",
             Source::Nix { .. } => "nix",
         }
@@ -320,7 +322,7 @@ impl fmt::Display for Source {
             Source::Github { repo, .. } => write!(f, "{kind}:{repo}"),
             Source::Flatpak { id, .. } => write!(f, "{kind}{}", opt(id)),
             Source::Brew { name, cask } => write!(f, "{kind}{}{}", if *cask { ":cask" } else { "" }, opt(name)),
-            Source::Dnf(d) | Source::Pacman(d) | Source::Apt(d) | Source::Xbps(d) => {
+            Source::Dnf(d) | Source::Pacman(d) | Source::Apt(d) | Source::Xbps(d) | Source::Moss(d) => {
                 write!(f, "{kind}:{}", d.names.join(","))
             }
             Source::Git { url, rev } => write!(f, "{kind}:{url}@{rev}"),

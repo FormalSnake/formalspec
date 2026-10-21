@@ -175,7 +175,8 @@ fn switching_on_the_default_layout_builds_a_uki_root() {
     assert!(lines[at("dnf --installroot")].ends_with("kernel systemd-ukify systemd-boot-unsigned"));
     assert!(at("tee /r/run/fspec/switch/fedora/etc/kernel/install.conf") < at("mount --rbind /r/efi"));
     assert!(
-        at("chroot /r/run/fspec/switch/fedora /usr/local/bin/fspec") < at("chroot /r/run/fspec/switch/fedora sh -c")
+        at("chroot /r/run/fspec/switch/fedora /usr/local/bin/fspec")
+            < at("chroot /r/run/fspec/switch/fedora sh -c 'set -e")
     );
     assert_eq!(
         stdin_of(&plan, "tee /r/run/fspec/switch/fedora/etc/fstab"),
@@ -259,7 +260,9 @@ fn a_switch_the_disk_cannot_take_is_refused_with_the_fix() {
 #[test]
 fn the_kernel_command_line_keeps_the_machine_options_and_adds_luks() {
     let mut m = default_arch();
-    m.cmdline = "BOOT_IMAGE=/v root=UUID=x ro rootflags=subvol=@old,compress=zstd:1 rd.luks.uuid=old quiet".into();
+    m.cmdline = "BOOT_IMAGE=/v root=UUID=x ro rootflags=subvol=@old,compress=zstd:1 rd.luks.uuid=old quiet \
+                 systemd.machine_id=abc moss.fstx=3 spl.spl_hostid=0x1"
+        .into();
     if let Layout::Default { btrfs, .. } = &mut m.layout {
         btrfs.luks = Some("cccc".into());
     }
@@ -272,7 +275,8 @@ fn the_kernel_command_line_keeps_the_machine_options_and_adds_luks() {
         stdin_of(&plan, "tee /r/run/fspec/switch/debian/etc/crypttab"),
         "luks-cccc UUID=cccc none luks,discard,initramfs\n"
     );
-    let populate = plan.lines().into_iter().find(|l| l.starts_with("chroot /r/run/fspec/switch/debian sh -c")).unwrap();
+    let populate =
+        plan.lines().into_iter().find(|l| l.starts_with("chroot /r/run/fspec/switch/debian sh -c 'set -e")).unwrap();
     assert!(populate.contains("systemd-ukify systemd-boot-efi cryptsetup cryptsetup-initramfs"), "{populate}");
     assert!(populate.contains("update-initramfs -c -k"));
 }
@@ -795,4 +799,51 @@ fn populate_adds_the_update_and_security_pockets() {
             )
         );
     }
+}
+
+#[test]
+fn switching_to_aerynos_lets_moss_sync_boot_with_the_subvolume_in_the_options() {
+    let plan = switch_distro(&paths(), &default_arch(), Some("arch"), &target("aerynos")).unwrap();
+    let lines = plan.lines();
+    let at = |p: &str| lines.iter().position(|l| l.contains(p)).unwrap_or_else(|| panic!("no `{p}` in {lines:#?}"));
+    let root = "/r/run/fspec/switch/aerynos";
+    assert!(at(&format!("mount --rbind /r/efi {root}/efi")) < at("sh -c 'command -v moss"));
+    assert_eq!(lines.iter().filter(|l| l.starts_with("mount --rbind /r/efi")).count(), 1);
+    let install = &lines[at(&format!("/r/efi/loader/loader.conf -D {root} -y install pkgset-aeryn-base"))];
+    assert!(install.ends_with("linux-firmware btrfs-progs"), "{install}");
+    assert!(
+        stdin_of(&plan, &format!("tee {root}/etc/kernel/cmdline.d/fspec.cmdline"))
+            .starts_with("root=UUID=1111-aaaa rootflags=subvol=@aerynos rw console=ttyS0,115200")
+    );
+    assert!(at(&format!("tee {root}/etc/kernel/cmdline.d/fspec.cmdline")) < at("-y install pkgset-aeryn-base"));
+    assert!(at(&format!("{root}/sys/firmware/efi/efivars")) < at(&format!("chroot {root} /usr/local/bin/fspec")));
+    assert!(!lines.iter().any(|l| l.contains("/etc/kernel/cmdline ")), "{lines:#?}");
+}
+
+#[test]
+fn aerynos_needs_the_default_layout() {
+    for (m, owner) in [(bios_debian(), "debian"), (zfs_debian(), "debian")] {
+        let err = switch_distro(&paths(), &m, Some(owner), &target("aerynos")).unwrap_err().to_string();
+        assert!(err.contains("aerynos boots only through systemd-boot from the default layout"), "{err}");
+    }
+}
+
+#[test]
+fn forgetting_aerynos_clears_the_kernels_blsforme_keeps() {
+    let lines = forget(&paths(), &default_arch(), Some("arch"), "aerynos").unwrap().lines();
+    assert!(lines.contains(&"rm -rf /r/efi/EFI/aerynos".to_string()), "{lines:#?}");
+}
+
+#[test]
+fn the_boot_owner_reads_the_default_blsforme_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = Paths::new(dir.path().into(), dir.path().join("home"));
+    std::fs::create_dir_all(dir.path().join("efi/loader")).unwrap();
+    let owner = |conf: &str| {
+        std::fs::write(dir.path().join("efi/loader/loader.conf"), conf).unwrap();
+        crate::boot_owner(&RecordingRunner::default(), &paths, &default_arch()).unwrap()
+    };
+    assert_eq!(owner("timeout 3\ndefault fedora-*\n").as_deref(), Some("fedora"));
+    assert_eq!(owner("default \"aerynos*\"\n").as_deref(), Some("aerynos"));
+    assert_eq!(owner("timeout 3\n"), None);
 }

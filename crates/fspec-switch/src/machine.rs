@@ -418,10 +418,13 @@ pub fn assumed(running: &str) -> Machine {
 pub fn boot_owner(runner: &dyn Runner, paths: &Paths, m: &Machine) -> Result<Option<String>> {
     let read = |p: &str| std::fs::read_to_string(paths.system(p)).unwrap_or_default();
     Ok(match &m.layout {
+        // fspec writes `default <distro>-*`; AerynOS's blsforme writes `default "aerynos*"`.
         Layout::Default { .. } => read("/efi/loader/loader.conf")
             .lines()
             .find_map(|l| l.trim().strip_prefix("default"))
-            .and_then(|d| d.trim().strip_suffix("-*"))
+            .map(|d| d.trim().trim_matches('"'))
+            .and_then(|d| d.strip_suffix("-*").or_else(|| d.strip_suffix('*')))
+            .filter(|d| !d.is_empty())
             .map(String::from),
         Layout::Zfs { pool, .. } => {
             probe(runner, Cmd::new("zpool").args(["get", "-H", "-o", "value", "bootfs", pool]))?

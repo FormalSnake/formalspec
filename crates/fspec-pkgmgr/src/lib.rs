@@ -21,7 +21,7 @@ use serde_json::{Map, Value};
 pub use brew::BrewBackend;
 pub use distro::DistroBackend;
 pub use flatpak::FlatpakBackend;
-pub use managers::{AptBackend, DnfBackend, PacmanBackend, XbpsBackend};
+pub use managers::{AptBackend, DnfBackend, MossBackend, PacmanBackend, XbpsBackend};
 
 fn pkg(r: &Resource) -> Result<&Pkg> {
     match r {

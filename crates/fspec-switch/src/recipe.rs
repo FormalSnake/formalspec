@@ -17,16 +17,44 @@ pub struct Recipe {
     pub uki: bool,
     /// Boots from ZFS with the distro's own packages.
     pub zfs: bool,
+    /// Boots only through systemd-boot, so neither ZFSBootMenu nor BIOS GRUB.
+    pub only_esp: bool,
 }
 
-const RECIPES: [Recipe; 5] = [
+const RECIPES: [Recipe; 6] = [
     // Fedora keeps three kernels, each a UKI with a full dracut initramfs.
-    Recipe { distro: "fedora", min_esp_mib: 1024, kernel_mib: 400, uki: true, zfs: false },
-    Recipe { distro: "arch", min_esp_mib: 512, kernel_mib: 150, uki: true, zfs: false },
-    Recipe { distro: "debian", min_esp_mib: 512, kernel_mib: 200, uki: true, zfs: true },
-    Recipe { distro: "ubuntu", min_esp_mib: 512, kernel_mib: 250, uki: true, zfs: true },
-    Recipe { distro: "void", min_esp_mib: 256, kernel_mib: 100, uki: false, zfs: true },
+    Recipe { distro: "fedora", min_esp_mib: 1024, kernel_mib: 400, uki: true, zfs: false, only_esp: false },
+    Recipe { distro: "arch", min_esp_mib: 512, kernel_mib: 150, uki: true, zfs: false, only_esp: false },
+    Recipe { distro: "debian", min_esp_mib: 512, kernel_mib: 200, uki: true, zfs: true, only_esp: false },
+    Recipe { distro: "ubuntu", min_esp_mib: 512, kernel_mib: 250, uki: true, zfs: true, only_esp: false },
+    Recipe { distro: "void", min_esp_mib: 256, kernel_mib: 100, uki: false, zfs: true, only_esp: false },
+    // Each kernel ships a 200 MB generic initramfs, and blsforme keeps the kernels of the last five
+    // moss states on the ESP. It boots only through systemd-boot.
+    Recipe { distro: "aerynos", min_esp_mib: 1024, kernel_mib: 450, uki: false, zfs: false, only_esp: true },
 ];
+
+/// Where AerynOS's moss bootstraps from: the stream its own installer uses. moss rewrites this
+/// index URL to the root-index form itself.
+const AERYNOS_REPO: &str = "https://cdn.aerynos.dev/stream/unstable/x86_64/stone.index";
+
+/// AerynOS's own metapackage for a bootable base, a kernel with firmware, and what the layout
+/// needs. `systemd` carries systemd-boot, and the kernel package a prebuilt initramfs.
+const AERYNOS_BASE: [&str; 4] = ["pkgset-aeryn-base", "linux-stable", "linux-firmware", "btrfs-progs"];
+
+/// The file the distro's kernel tooling reads the kernel options from. blsforme appends
+/// `/etc/kernel/cmdline.d` to the root it detects, and writes `rootfsflags=`, which neither dracut
+/// nor systemd reads, so the root's subvolume has to come from here.
+pub(crate) fn cmdline_file(distro: &str) -> &'static str {
+    match distro {
+        "aerynos" => "/etc/kernel/cmdline.d/fspec.cmdline",
+        _ => "/etc/kernel/cmdline",
+    }
+}
+
+/// moss with the shared ESP's default entry kept; see [`fspec_core::moss`].
+pub(crate) fn moss<I: IntoIterator<Item = S>, S: Into<String>>(esp: &str, args: I) -> Cmd {
+    fspec_core::moss::moss(&format!("{esp}/loader/loader.conf"), args)
+}
 
 pub fn recipe(distro: &str) -> Result<&'static Recipe> {
     match RECIPES.iter().find(|r| r.distro == distro) {
@@ -91,7 +119,9 @@ fn apt_packages(distro: &str, arch: &str, boot: Boot, luks: bool) -> Vec<String>
 }
 
 /// The command that installs the base system into `root`.
-pub fn bootstrap(t: &Target, boot: Boot, luks: bool, root: &str) -> Result<Vec<Cmd>> {
+/// The ESP the new root boots from, at `esp`, is mounted at `<root>/efi` before this runs, since
+/// moss syncs boot as part of the install.
+pub fn bootstrap(t: &Target, boot: Boot, luks: bool, root: &str, esp: &str) -> Result<Vec<Cmd>> {
     let arch = t.arch;
     let extra = boot_packages(t.distro, boot, luks);
     Ok(match t.distro {
@@ -157,6 +187,15 @@ pub fn bootstrap(t: &Target, boot: Boot, luks: bool, root: &str) -> Result<Vec<C
                 // A fresh root has no repository key yet, and `-y` does not answer the import prompt.
                 .stdin("y\n"),
         ],
+        "aerynos" => {
+            let has_moss = "command -v moss >/dev/null || { echo 'bootstrapping AerynOS needs moss on PATH: the static \
+                            build is moss.tar.gz on https://github.com/AerynOS/os-tools/releases' >&2; exit 1; }";
+            vec![
+                Cmd::new("sh").args(["-c", has_moss]),
+                moss(esp, ["-D", root, "-y", "repo", "add", "unstable", AERYNOS_REPO, "-p", "0"]),
+                moss(esp, ["-D", root, "-y", "install"].into_iter().chain(AERYNOS_BASE).chain(extra.iter().copied())),
+            ]
+        }
         other => bail!("cannot bootstrap `{other}`; --distro takes one of {}", DISTROS.join(", ")),
     })
 }
@@ -293,6 +332,8 @@ pub fn populate(distro: &str, arch: &str, boot: Boot, luks: bool) -> String {
             ));
         }
         ("debian" | "ubuntu", Boot::Grub) => sh.push(each("linux-update-symlinks install \"$v\" \"/boot/vmlinuz-$v\"")),
+        // moss ships a prebuilt initramfs per kernel and syncs boot on every transaction.
+        ("aerynos", _) => sh.push("rm -f /etc/machine-id\nsystemd-machine-id-setup".into()),
         ("void", _) => {
             if luks || boot == Boot::Zbm {
                 sh.push("dracut --regenerate-all --force".into());
@@ -333,6 +374,9 @@ pub fn misfit(r: &Recipe, layout: &Layout, firmware: &Firmware) -> Option<String
                 )),
                 _ => None,
             }
+        }
+        Layout::Bios { .. } | Layout::Zfs { .. } if r.only_esp => {
+            Some(format!("{} boots only through systemd-boot from the default layout", r.distro))
         }
         Layout::Bios { boot, .. } => match boot.avail.map(mib) {
             Some(free) if free < r.kernel_mib => Some(format!(

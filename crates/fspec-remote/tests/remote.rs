@@ -49,7 +49,10 @@ fn apply_lines(dir: &Path, runner: &RecordingRunner) -> Vec<String> {
 #[test]
 fn apply_probes_ships_then_runs_with_a_terminal() {
     let (dir, runner) = fixture("");
-    runner.respond(&format!("{PROBE} 'fspec facts --json'"), ok(&probe_json("x86_64-linux", "bazzite")));
+    runner.respond(
+        &format!("{PROBE} 'PATH=\"$PATH:/usr/local/bin\" fspec facts --json'"),
+        ok(&probe_json("x86_64-linux", "bazzite")),
+    );
     let h = host("g815", "x86_64-linux", "bazzite");
     remote(dir.path(), &runner, false).apply(&h, "g815", None).unwrap();
 
@@ -57,9 +60,12 @@ fn apply_probes_ships_then_runs_with_a_terminal() {
     let tar = lines[1].clone();
     assert!(tar.starts_with("tar -cf ") && tar.ends_with(&format!(" -C {} -T -", dir.path().display())), "{tar}");
     let dest = "\"$HOME/.cache/fspec/spec/abc123\"";
-    assert_eq!(lines[0], format!("{PROBE} 'fspec facts --json'"));
+    assert_eq!(lines[0], format!("{PROBE} 'PATH=\"$PATH:/usr/local/bin\" fspec facts --json'"));
     assert_eq!(lines[2], format!("{PROBE} 'mkdir -p {dest} && tar -xf - -C {dest}'"));
-    assert_eq!(lines[3], format!("ssh -t g815 'fspec --spec {dest}/spec.star apply --local --host g815'"));
+    assert_eq!(
+        lines[3],
+        format!("ssh -t g815 'PATH=\"$PATH:/usr/local/bin\" fspec --spec {dest}/spec.star apply --local --host g815'")
+    );
     assert_eq!(lines.len(), 4);
 
     let calls = runner.calls.lock().unwrap();
@@ -107,8 +113,14 @@ fn missing_fspec_on_the_remote_gives_an_install_hint() {
 #[test]
 fn plan_returns_the_remote_plan() {
     let (dir, runner) = fixture("");
-    runner.respond(&format!("{PROBE} 'fspec facts"), ok(&probe_json("x86_64-linux", "bazzite")));
-    runner.respond(&format!("{PROBE} 'fspec --spec"), ok(r#"{"host":"g815","changes":[]}"#));
+    runner.respond(
+        &format!("{PROBE} 'PATH=\"$PATH:/usr/local/bin\" fspec facts"),
+        ok(&probe_json("x86_64-linux", "bazzite")),
+    );
+    runner.respond(
+        &format!("{PROBE} 'PATH=\"$PATH:/usr/local/bin\" fspec --spec"),
+        ok(r#"{"host":"g815","changes":[]}"#),
+    );
     let h = host("g815", "x86_64-linux", "bazzite");
     let Planned::Plan(plan) = remote(dir.path(), &runner, false).plan(&h, "g815").unwrap() else {
         panic!("expected a plan")

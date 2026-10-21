@@ -470,6 +470,10 @@ fn builtins(builder: &mut GlobalsBuilder) {
         distro_("void", "runit", kwargs)
     }
 
+    fn aerynos<'v>(#[starlark(kwargs)] kwargs: Value<'v>) -> anyhow::Result<Resource_> {
+        distro_("aerynos", "systemd", kwargs)
+    }
+
     fn aqua<'v>(
         #[starlark(args)] args: UnpackTuple<Value<'v>>,
         #[starlark(kwargs)] kwargs: Value<'v>,
@@ -538,6 +542,13 @@ fn builtins(builder: &mut GlobalsBuilder) {
         #[starlark(kwargs)] kwargs: Value<'v>,
     ) -> anyhow::Result<Resource_> {
         make::<Source>("xbps", &["names"], args, kwargs)
+    }
+
+    fn moss<'v>(
+        #[starlark(args)] args: UnpackTuple<Value<'v>>,
+        #[starlark(kwargs)] kwargs: Value<'v>,
+    ) -> anyhow::Result<Resource_> {
+        make::<Source>("moss", &["names"], args, kwargs)
     }
 
     fn git<'v>(

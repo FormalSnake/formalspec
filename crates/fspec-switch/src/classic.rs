@@ -5,7 +5,7 @@ use fspec_core::Paths;
 use fspec_core::runner::Cmd;
 
 use crate::machine::{Layout, Machine, SHARED_BOOT};
-use crate::recipe::{Boot, boot_files, bootstrap, misfit, populate, recipe};
+use crate::recipe::{Boot, boot_files, bootstrap, cmdline_file, misfit, populate, recipe};
 use crate::{Plan, subvol};
 
 /// What `switch --distro` builds. The host's `system` already declares `distro`, so the apply
@@ -54,6 +54,9 @@ fn carried(cmdline: &str) -> (Vec<&str>, Vec<&str>) {
         let key = arg.split('=').next().unwrap_or(arg);
         match key {
             "BOOT_IMAGE" | "root" | "initrd" | "ro" | "rw" | "rd.luks.uuid" | "rd.luks.name" | "cryptdevice" => {}
+            // Each names the running root: its machine ID, its moss state, the host ID ZFSBootMenu
+            // passes when it boots a pool.
+            "systemd.machine_id" | "moss.fstx" | "spl.spl_hostid" => {}
             "rootflags" => flags.extend(
                 arg["rootflags=".len()..]
                     .split(',')
@@ -145,8 +148,8 @@ pub(crate) fn grub_menu(boot_dir: &str, uuid: &str, default: &str) -> Cmd {
 /// outrank `loader.conf`.
 pub(crate) fn sd_default(esp_dir: &str, default: &str) -> Vec<Cmd> {
     let conf = format!("{esp_dir}/loader/loader.conf");
-    let edit =
-        r#"mkdir -p "${1%/*}" && touch "$1" && sed -i '/^default[[:space:]]/d' "$1" && echo "default $2-*" >> "$1""#;
+    // Plain sh, since AerynOS's base has no sed or grep.
+    let edit = r#"mkdir -p "${1%/*}" && touch "$1" && { while IFS= read -r l || [ -n "$l" ]; do case $l in default | default[[:space:]]*) ;; *) printf '%s\n' "$l" ;; esac; done <"$1"; echo "default $2-*"; } >"$1.new" && mv "$1.new" "$1""#;
     vec![
         Cmd::new("sh").args(["-c", edit, "sh", &conf, default]),
         Cmd::new("sh").args(["-c", "if command -v bootctl >/dev/null; then bootctl set-default '' || true; fi"]),
@@ -242,7 +245,7 @@ pub(crate) fn install_root(
 ) -> Result<()> {
     let Some(boot) = Boot::of(layout) else { bail!("the disk is not on a supported layout") };
     let luks = layout.btrfs().is_some_and(|b| b.luks.is_some());
-    let bootstrap = bootstrap(t, boot, luks, root)?;
+    let bootstrap = bootstrap(t, boot, luks, root, &src.esp)?;
     let d = t.distro;
     let options = kernel_options(layout, d, cmdline);
     let shared = format!("{}/{d}", src.shared_boot);
@@ -252,8 +255,15 @@ pub(crate) fn install_root(
         plan.run(Cmd::new("mkdir").arg("-p").arg(&shared).arg(format!("{root}/boot")));
         plan.run(Cmd::new("mount").arg("--bind").arg(&shared).arg(format!("{root}/boot")));
     }
+    // moss syncs boot while it installs, into the ESP it finds under the root and with the kernel
+    // options already there.
+    let moss_boots = d == "aerynos";
+    if moss_boots {
+        bind(plan, &src.esp, &format!("{root}/efi"));
+        write(plan, &format!("{root}{}", cmdline_file(d)), format!("{options}\n"), false);
+    }
     bootstrap.into_iter().for_each(|c| plan.run(c));
-    let resolv = r#"src=$1; if grep -qs '^nameserver 127\.0\.0\.53' "$src" && [ -s "$2" ]; then src=$2; fi; rm -f "$3"; cp -L "$src" "$3""#;
+    let resolv = r#"src=$1; stub=; if [ -r "$src" ]; then while read -r k v _; do [ "$k" = nameserver ] && [ "$v" = 127.0.0.53 ] && stub=1; done <"$src"; fi; if [ -n "$stub" ] && [ -s "$2" ]; then src=$2; fi; rm -f "$3"; cp -L "$src" "$3""#;
     plan.run(
         Cmd::new("sh").args(["-c", resolv, "sh", &src.resolv, &src.resolved]).arg(format!("{root}/etc/resolv.conf")),
     );
@@ -272,7 +282,8 @@ pub(crate) fn install_root(
                     .arg(format!("{pool}/ROOT/{d}")),
             );
         }
-        _ => write(plan, &format!("{root}/etc/kernel/cmdline"), format!("{options}\n"), false),
+        _ if moss_boots => {}
+        _ => write(plan, &format!("{root}{}", cmdline_file(d)), format!("{options}\n"), false),
     }
     if boot == Boot::Grub {
         write(plan, &format!("{shared}/fspec-cmdline"), format!("{options}\n"), false);
@@ -283,20 +294,30 @@ pub(crate) fn install_root(
 
     // The shared home goes in before the apply, so a declared user's home lands in it.
     let mut binds = vec![(src.home.as_str(), "home"), (src.fspec.as_str(), "opt/fspec")];
-    if boot != Boot::Grub {
+    if boot != Boot::Grub && !moss_boots {
         binds.push((src.esp.as_str(), "efi"));
     }
     for (from, to) in binds.into_iter().chain([("/dev", "dev"), ("/sys", "sys")]) {
-        let to = format!("{root}/{to}");
-        plan.run(Cmd::new("mkdir").arg("-p").arg(&to));
-        plan.run(Cmd::new("mount").arg("--rbind").arg(from).arg(&to));
-        plan.run(Cmd::new("mount").arg("--make-rslave").arg(&to));
+        bind(plan, from, &format!("{root}/{to}"));
     }
+    if moss_boots {
+        // Inside the root, blsforme takes the ESP the running loader names in its EFI variables,
+        // which from an installer is the installer's own. Without them it takes the ESP on the
+        // root's disk.
+        let hide = r#"if [ -d "$1" ]; then mount -t tmpfs fspec-no-efivars "$1"; fi"#;
+        plan.run(Cmd::new("sh").args(["-c", hide, "sh"]).arg(format!("{root}/sys/firmware/efi/efivars")));
+    }
+    // moss leaves the root without the mount point.
+    plan.run(Cmd::new("mkdir").arg("-p").arg(format!("{root}/proc")));
     plan.run(Cmd::new("mount").args(["-t", "proc", "proc"]).arg(format!("{root}/proc")));
 
     let spec_copy = format!("{root}/var/lib/fspec/spec");
-    plan.run(Cmd::new("mkdir").arg("-p").arg(&spec_copy).arg(format!("{root}/usr/local/bin")));
-    plan.run(Cmd::new("cp").arg(s(t.exe)).arg(format!("{root}/usr/local/bin/fspec")));
+    plan.run(Cmd::new("mkdir").arg("-p").arg(&spec_copy));
+    // Moved into place from inside the root: AerynOS links /usr/local to /var/local with an
+    // absolute link, which a path from out here would follow onto the running system.
+    plan.run(Cmd::new("cp").arg(s(t.exe)).arg(format!("{root}/fspec.new")));
+    let place = r#"mkdir -p "$(readlink -f /usr/local)/bin" && mv /fspec.new /usr/local/bin/fspec"#;
+    plan.run(in_root(root, Cmd::new("sh").args(["-c", place])));
     plan.run(Cmd::new("cp").arg("-a").arg(format!("{}/.", s(t.spec_dir))).arg(&spec_copy));
     let apply = Cmd::new("/usr/local/bin/fspec")
         .arg("--spec")
@@ -305,6 +326,12 @@ pub(crate) fn install_root(
     plan.run(in_root(root, apply));
     plan.run(in_root(root, Cmd::new("sh").args(["-c", &populate(d, t.arch, boot, luks)])));
     Ok(())
+}
+
+fn bind(plan: &mut Plan, from: &str, to: &str) {
+    plan.run(Cmd::new("mkdir").arg("-p").arg(to));
+    plan.run(Cmd::new("mount").arg("--rbind").arg(from).arg(to));
+    plan.run(Cmd::new("mount").arg("--make-rslave").arg(to));
 }
 
 /// Refuse to touch boot from a root that does not own it, so the bootloader's default never goes

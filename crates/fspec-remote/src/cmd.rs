@@ -27,12 +27,16 @@ pub fn spec_dir(commit: &str, dirty: bool) -> String {
     format!("\"$HOME/.cache/fspec/spec/{leaf}\"")
 }
 
+/// fspec as the remote's shell finds it. `fspec switch` and `fspec disk init` install it in
+/// /usr/local/bin, which AerynOS's non-interactive ssh PATH leaves out.
+const FSPEC: &str = r#"PATH="$PATH:/usr/local/bin" fspec"#;
+
 fn batch(alias: &str) -> Cmd {
     Cmd::new("ssh").args(["-o", "ConnectTimeout=5", "-o", "BatchMode=yes"]).arg(alias)
 }
 
 pub fn probe(alias: &str) -> Cmd {
-    batch(alias).arg("fspec facts --json")
+    batch(alias).arg(format!("{FSPEC} facts --json"))
 }
 
 pub fn git_commit(spec_dir: &Path) -> Cmd {
@@ -60,7 +64,7 @@ pub fn ship(alias: &str, dest: &str, archive: &Path, dirty: bool) -> Cmd {
 }
 
 fn fspec(dest: &str, spec_file: &str, args: &[&str]) -> String {
-    format!("fspec --spec {dest}/{spec_file} {}", args.join(" "))
+    format!("{FSPEC} --spec {dest}/{spec_file} {}", args.join(" "))
 }
 
 pub fn apply(alias: &str, dest: &str, spec_file: &str, host: &str, scope: Option<&str>) -> Cmd {
@@ -100,7 +104,10 @@ mod tests {
 
     #[test]
     fn probe_line() {
-        assert_eq!(probe("g815").to_string(), "ssh -o ConnectTimeout=5 -o BatchMode=yes g815 'fspec facts --json'");
+        assert_eq!(
+            probe("g815").to_string(),
+            r#"ssh -o ConnectTimeout=5 -o BatchMode=yes g815 'PATH="$PATH:/usr/local/bin" fspec facts --json'"#
+        );
     }
 
     #[test]
@@ -150,14 +157,18 @@ mod tests {
         assert_eq!(apply.program, "ssh");
         assert_eq!(
             apply.args,
-            ["-t", "g815", "fspec --spec \"$HOME/.cache/fspec/spec/abc123\"/spec.star apply --local --host g815"]
+            [
+                "-t",
+                "g815",
+                r#"PATH="$PATH:/usr/local/bin" fspec --spec "$HOME/.cache/fspec/spec/abc123"/spec.star apply --local --host g815"#
+            ]
         );
         assert!(apply.interactive);
         let scoped = super::apply("g815", &dest, "spec.star", "g815", Some("user"));
         assert!(scoped.args[2].ends_with("apply --local --host g815 --scope user"));
         assert_eq!(
             plan("g815", &dest, "spec.star", "g815").args[5],
-            "fspec --spec \"$HOME/.cache/fspec/spec/abc123\"/spec.star plan --json --local --host g815"
+            r#"PATH="$PATH:/usr/local/bin" fspec --spec "$HOME/.cache/fspec/spec/abc123"/spec.star plan --json --local --host g815"#
         );
     }
 }

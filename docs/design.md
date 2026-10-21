@@ -36,7 +36,7 @@ Host facts come from the `host()` declaration itself, never from the network,
 so evaluation stays pure. `platform` is a
 required argument (`"x86_64-linux"`, `"aarch64-darwin"`); `distro` and `init`
 follow from `system` (`image(...)` gives the image's distro and systemd,
-`fedora(...)`, `arch(...)`, `debian(...)` and `void(...)` give their own, and an
+`fedora(...)`, `arch(...)`, `debian(...)`, `void(...)` and `aerynos(...)` give their own, and an
 `aarch64-darwin` platform implies macOS and launchd). An entry in `modules` can
 be a resource, a list of them, or a function, which FormalSpec calls with the
 host's facts:
@@ -242,6 +242,11 @@ repo metadata simple enough to parse here, so on any other machine those
 platforms stay name-only: the host installs the newest version by name and
 nothing is cached. Run `fspec update` on a Fedora or Debian machine of the
 right arch to get exact pins; `release_age` does not apply to distro sources.
+`moss` packages (AerynOS) always lock by name only. moss installs from a
+repository stream rather than from package files, so there is no file to
+cache, and AerynOS's own reproducibility unit is the whole-system state moss
+records on every transaction; a rollback goes back to that state (see the
+system layer).
 The lock entry for a distro package holds one artifact per platform, so the
 cached file is used for single-name packages; a multi-name `dnf([...])` package
 installs by name. Flatpak pins live in `any = { commit = … }`, brew records
@@ -625,6 +630,20 @@ Xbps has no exact-version flag here, so the local repository pins by being the
 only place that file lives; if the Void repos hold a newer version, xbps may
 prefer it.
 
+These packages, both the `packages` list and `pkg` sources, commit in the
+package phase, before services, so a `service("sshd")` can enable a unit the
+same apply installed.
+
+AerynOS's `aerynos(packages = [...])` and `pkg(..., source = moss())` run
+`moss install` and `moss remove`. moss builds every transaction as a new
+`/usr` from its deduplicated store and swaps it in atomically, recording a
+numbered state (`/usr/.stateID`). fspec maps its rollback onto those states:
+before each moss change it journals `moss state activate <the current state>`,
+so a failed apply returns the system to the exact state it started from,
+upgrades included, rather than reversing package by package. The installed
+version comes from `moss list installed`. Every fspec command run on AerynOS
+sticks to plain sh, since its base system has no grep, sed or awk.
+
 macOS has no equivalent of either; the system layer there is `defaults`,
 launchd and Homebrew.
 
@@ -671,7 +690,7 @@ interrupted run repeats on the next boot. tmpfiles then recreates the image's
 but not their passwords.
 
 To or from a classic distro, `fspec switch --distro void` (fedora, arch,
-debian, ubuntu or void). The host's `system` must already declare the target
+debian, ubuntu, void or aerynos). The host's `system` must already declare the target
 distro, so edit `system =` to `void(...)` first and pass `--host` for that
 host; the command refuses any other host. Nothing is built from a second
 declaration. Every root lives on one disk in one of the layouts below, side by
@@ -844,6 +863,44 @@ plan`, run as root on a classic distro, prints which root owns boot.
 
 bootc roots keep bootupd as their bootloader owner; `--adopt-boot` refuses them
 for now and says so.
+
+### AerynOS
+
+AerynOS's kernels and boot entries are managed by blsforme, which moss runs
+after every transaction. It fits the default layout without fspec's own
+kernel tooling: it writes the kernel and its prebuilt initramfs to
+`/efi/EFI/aerynos/<version>/` and Boot Loader Specification entries
+`/efi/loader/entries/aerynos-<version>-<state>.conf` for the newest five moss
+states (each with `moss.fstx=<state>`, so the menu doubles as moss's rollback),
+and garbage-collects only `aerynos` and `serpentos` entries and folders. Three
+things need handling, since AerynOS assumes it is alone on the ESP:
+
+- blsforme rewrites `loader.conf` to `default "aerynos*"` on every
+  transaction, which would make AerynOS the boot owner after any package
+  change. fspec runs moss through a wrapper that puts `loader.conf` back unless
+  AerynOS already owned boot, and reads `default "aerynos*"` as AerynOS owning
+  it. A `moss` run by hand still takes boot; `fspec switch --adopt-boot` from
+  the owner gives it back.
+- blsforme also copies AerynOS's systemd-boot over `EFI/BOOT/BOOTX64.EFI` and
+  `EFI/systemd/systemd-bootx64.efi` whenever they differ, so the shared
+  bootloader is whichever version moss last installed.
+- blsforme puts `rootfsflags=subvol=` on the command line, which neither dracut
+  nor systemd reads, so the root's subvolume comes from fspec's
+  `/etc/kernel/cmdline.d/fspec.cmdline`, written before moss first syncs boot.
+
+`fspec switch --distro aerynos` bootstraps with the host's `moss -D <root>`
+(the static build from AerynOS's os-tools releases has to be on `PATH`), from
+the `unstable` stream with `pkgset-aeryn-base`, `linux-stable`,
+`linux-firmware` and `btrfs-progs`, with the ESP mounted in the new root first
+because moss syncs boot as part of the install. Inside the new root, blsforme
+would take the ESP the running bootloader names in its EFI variables, which
+from an installer is the installer's own, so the chroot gets an empty
+`efivars` and blsforme falls back to the ESP on the root's disk. Each kernel
+ships a 200 MB generic initramfs, so AerynOS needs a 1 GiB ESP and about 450
+MiB free, and it boots only through systemd-boot: the ZFS and BIOS layouts
+refuse it. `fspec forget aerynos` also deletes `/efi/EFI/aerynos`. AerynOS
+links `/usr/local` to `/var/local` and its non-interactive ssh `PATH` leaves out
+`/usr/local/bin`, so the remote commands add it themselves.
 
 `fspec switch --to-image` turns a classic machine into the host's bootc image
 with `podman run ... <locked image> bootc install to-existing-root

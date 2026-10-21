@@ -720,7 +720,7 @@ fn boot_setup(paths: &Paths, plan: &mut Plan, m: &Machine, layout: &Layout, new:
         let opts = if matches!(d, "debian" | "ubuntu") { "luks,discard,initramfs" } else { "luks,discard" };
         tee(plan, format!("{root}/etc/crypttab"), format!("luks-{l} UUID={l} none {opts}\n"));
     }
-    tee(plan, format!("{root}/etc/kernel/cmdline"), format!("{options}\n"));
+    tee(plan, format!("{root}{}", crate::recipe::cmdline_file(d)), format!("{options}\n"));
     for f in boot_files(d, boot, luks) {
         tee(plan, format!("{root}{}", f.path), f.text);
         if f.exec {

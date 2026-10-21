@@ -3,7 +3,7 @@ use std::path::Path;
 use fspec_core::resource::Source;
 use fspec_core::runner::Cmd;
 
-/// The four distro package managers FormalSpec drives. Everything that differs between them is
+/// The distro package managers FormalSpec drives. Everything that differs between them is
 /// a command line, so the install, cache and journal logic is shared.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Family {
@@ -11,6 +11,7 @@ pub(crate) enum Family {
     Pacman,
     Apt,
     Xbps,
+    Moss,
 }
 
 impl Family {
@@ -20,6 +21,7 @@ impl Family {
             "arch" => Some(Family::Pacman),
             "debian" | "ubuntu" => Some(Family::Apt),
             "void" => Some(Family::Xbps),
+            "aerynos" => Some(Family::Moss),
             _ => None,
         }
     }
@@ -30,6 +32,7 @@ impl Family {
             Source::Pacman(_) => Some(Family::Pacman),
             Source::Apt(_) => Some(Family::Apt),
             Source::Xbps(_) => Some(Family::Xbps),
+            Source::Moss(_) => Some(Family::Moss),
             _ => None,
         }
     }
@@ -40,6 +43,7 @@ impl Family {
             Family::Pacman => "pacman",
             Family::Apt => "apt",
             Family::Xbps => "xbps",
+            Family::Moss => "moss",
         }
     }
 
@@ -49,11 +53,12 @@ impl Family {
             Family::Pacman => Cmd::new("pacman").args(["-S", "--noconfirm", "--needed"]).args(names),
             Family::Apt => apt("install").args(names),
             Family::Xbps => Cmd::new("xbps-install").arg("-y").args(names),
+            Family::Moss => moss(["-y", "install"].into_iter().map(String::from).chain(names.iter().cloned())),
         }]
     }
 
     /// Install a cached package file. A local xbps repository needs its index built first, and
-    /// installs by name from it.
+    /// installs by name from it. moss packages lock by name only, so they never have a file.
     pub fn install_file(self, file: &Path, names: &[String]) -> Vec<Cmd> {
         let file = file.display().to_string();
         match self {
@@ -67,6 +72,7 @@ impl Family {
                     Cmd::new("xbps-install").args(["-y", "-R"]).arg(dir).args(names),
                 ]
             }
+            Family::Moss => self.install_names(names),
         }
     }
 
@@ -76,6 +82,7 @@ impl Family {
             Family::Pacman => Cmd::new("pacman").args(["-R", "--noconfirm"]).args(names),
             Family::Apt => apt("remove").args(names),
             Family::Xbps => Cmd::new("xbps-remove").arg("-y").args(names),
+            Family::Moss => moss(["-y", "remove"].into_iter().map(String::from).chain(names.iter().cloned())),
         }
     }
 
@@ -85,6 +92,14 @@ impl Family {
             Family::Pacman => Cmd::new("pacman").arg("-Q").arg(name),
             Family::Apt => Cmd::new("dpkg-query").args(["-W", "-f=${Version}"]).arg(name),
             Family::Xbps => Cmd::new("xbps-query").args(["-p", "pkgver"]).arg(name),
+            // `moss list installed` prints `name  version-release - summary`, and has no query for
+            // one package. Plain sh, since AerynOS's base has no awk or grep.
+            Family::Moss => Cmd::new("sh").args([
+                "-c",
+                r#"moss list installed | { while read -r n v _; do if [ "$n" = "$1" ]; then echo "$v"; exit 0; fi; done; exit 1; }"#,
+                "sh",
+                name,
+            ]),
         }
     }
 
@@ -94,8 +109,28 @@ impl Family {
         match self {
             Family::Pacman => out.split_whitespace().nth(1).unwrap_or_default().to_string(),
             Family::Xbps => out.strip_prefix(&format!("{name}-")).unwrap_or(out).to_string(),
-            Family::Dnf | Family::Apt => out.to_string(),
+            Family::Dnf | Family::Apt | Family::Moss => out.to_string(),
         }
+    }
+}
+
+/// Where moss's boot sync rewrites the default entry on the shared layout.
+pub(crate) const LOADER_CONF: &str = "/efi/loader/loader.conf";
+
+fn moss(args: impl IntoIterator<Item = String>) -> Cmd {
+    fspec_core::moss::moss(LOADER_CONF, args)
+}
+
+impl Family {
+    /// The command that puts the packages back as they were before the next change, when the
+    /// manager keeps whole-system states: moss records one per transaction in `/usr/.stateID`.
+    pub fn restore_point(self, root: &Path) -> Option<Cmd> {
+        if self != Family::Moss {
+            return None;
+        }
+        let id = std::fs::read_to_string(root.join("usr/.stateID")).ok()?;
+        let id: u64 = id.trim().parse().ok()?;
+        Some(moss(["-y".into(), "state".into(), "activate".into(), id.to_string()]))
     }
 }
 
