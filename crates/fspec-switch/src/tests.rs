@@ -685,11 +685,13 @@ fn store_symlinks_resolve_inside_the_mounted_root() {
 
 #[test]
 fn a_nixos_root_converts_snapshots_and_boots_its_new_system() {
-    let steps = crate::nixos_migrate(&paths(), &nixos_root(), "/r/var/lib/fspec/disk");
+    let steps =
+        crate::nixos_migrate(&paths(), &nixos_root(), "/r/run/fspec/esp", "/r/run/fspec/esp/fspec/disk-journal");
     let what: Vec<(&str, bool)> = steps.iter().map(|s| (s.what.as_str(), s.destructive)).collect();
     assert_eq!(
         what,
         [
+            ("boot the fspec-live entry by default until the migration is done", false),
             (
                 "convert the ext4 root /dev/nvme0n1p2 to btrfs in place, keeping its UUID and the ext4 image as \
                  ext2_saved for `btrfs-convert -r`",
@@ -708,11 +710,11 @@ fn a_nixos_root_converts_snapshots_and_boots_its_new_system() {
             ),
         ]
     );
-    let convert = steps[0].plan.lines();
+    let convert = steps[1].plan.lines();
     let at = |l: &[String], p: &str| position(l, p);
     assert!(at(&convert, "undo sh -c") < at(&convert, "btrfs-convert --uuid copy /dev/nvme0n1p2"));
     assert!(convert.iter().any(|l| l.contains("btrfs-convert -r")));
-    let subvols = steps[1].plan.lines();
+    let subvols = steps[2].plan.lines();
     let top = "/r/run/fspec/disk/top";
     assert!(
         at(&subvols, &format!("btrfs subvolume snapshot {top} {top}/@nixos"))
@@ -720,7 +722,7 @@ fn a_nixos_root_converts_snapshots_and_boots_its_new_system() {
     );
     assert!(subvols.contains(&format!("chattr +C {top}/@swap")));
     assert!(!subvols.iter().any(|l| l.contains("mkswapfile")));
-    let boot = steps[2].plan.lines();
+    let boot = steps[3].plan.lines();
     let root = "/r/run/fspec/disk/nixos";
     assert!(boot.contains(&format!("mount -o subvol=@nixos,noatime,compress=zstd:1 /dev/nvme0n1p2 {root}")));
     assert!(at(&boot, "undo sh -c") < at(&boot, &format!("mount -t proc proc {root}/proc")));
@@ -747,9 +749,10 @@ fn the_new_generation_gets_tries_and_the_live_entry_moves_into_at_fspec() {
     let live = "title FormalSpec live\nlinux /fspec-live/vmlinuz\noptions boot=live findiso=/var/lib/fspec-live/formalspec-installer-amd64.iso fspec.overlay=/var/lib/fspec-live/overlay.tar quiet\n";
     w(entries.join("fspec-live+3.conf"), live);
     w(esp.join("loader/loader.conf"), "timeout 3\ndefault nixos-aaa.conf\nconsole-mode keep\n");
-    let steps = crate::nixos_migrate(&paths(), &nixos_root(), "/r/var/lib/fspec/disk");
+    let steps =
+        crate::nixos_migrate(&paths(), &nixos_root(), "/r/run/fspec/esp", "/r/run/fspec/esp/fspec/disk-journal");
     let script = |marker: &str| {
-        steps[2]
+        steps[3]
             .plan
             .steps
             .iter()
@@ -773,7 +776,13 @@ fn the_new_generation_gets_tries_and_the_live_entry_moves_into_at_fspec() {
     assert_eq!(ls(&entries), ["fspec-live+3.conf", "nixos-aaa+3.conf"]);
     assert_eq!(ls(&esp.join("loader/entries.ext4")), ["nixos-bbb.conf"]);
     let new = std::fs::read_to_string(entries.join("nixos-aaa+3.conf")).unwrap();
-    assert!(new.contains(&format!("options init={sys}/init loglevel=4 boot.panic_on_fail panic=10\n")), "{new}");
+    assert!(
+        new.contains(&format!(
+            "options init={sys}/init loglevel=4 boot.panic_on_fail panic=10 systemd.mask=emergency.target \
+         systemd.mask=emergency.service systemd.mask=rescue.target systemd.mask=rescue.service\n"
+        )),
+        "{new}"
+    );
     assert_eq!(std::fs::read_to_string(esp.join("loader/loader.conf")).unwrap(), "timeout 3\nconsole-mode keep\n");
 
     let move_live = script("fspec-live*.conf");
@@ -794,12 +803,13 @@ fn the_new_generation_gets_tries_and_the_live_entry_moves_into_at_fspec() {
 #[test]
 fn a_failed_nixos_step_leaves_its_undo_to_the_journal() {
     let dir = tempfile::tempdir().unwrap();
-    let steps = crate::nixos_migrate(&paths(), &nixos_root(), "/r/var/lib/fspec/disk");
+    let steps =
+        crate::nixos_migrate(&paths(), &nixos_root(), "/r/run/fspec/esp", "/r/run/fspec/esp/fspec/disk-journal");
     let runner = RecordingRunner::default();
     answer(&runner, "btrfs-convert --uuid", 1, "");
-    assert!(steps[0].plan.execute(&runner).unwrap_err().to_string().contains("need a journal"));
+    assert!(steps[1].plan.execute(&runner).unwrap_err().to_string().contains("need a journal"));
     let mut journal = fspec_core::journal::Journal::begin(dir.path(), 0).unwrap();
-    assert!(steps[0].plan.execute_journaled(&runner, &mut journal).is_err());
+    assert!(steps[1].plan.execute_journaled(&runner, &mut journal).is_err());
     let ran = runner.lines().len();
     journal.rollback(&runner).unwrap();
     let undo = &runner.lines()[ran..];

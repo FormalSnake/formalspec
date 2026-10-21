@@ -1044,15 +1044,84 @@ pub fn nixos_root(
 /// The ESP directories NixOS's systemd-boot installer rewrites, which a rollback puts back.
 const ESP_DIRS: &str = "loader EFI/systemd EFI/BOOT";
 
-/// The steps that move the NixOS root `r` onto btrfs, run from a live system: convert it, keeping
+/// Where `disk migrate <device>` mounts the disk's ESP on the live system. The journal of a NixOS
+/// migration lives on it, so it survives the live system rebooting.
+pub const ESP_MOUNT: &str = "/run/fspec/esp";
+
+/// Mount the ESP of the disk holding `device` at [`ESP_MOUNT`], unless it is mounted there, and
+/// return its device and mount point. `None` for a disk without one.
+pub fn mount_esp(runner: &dyn Runner, paths: &Paths, device: &str) -> Result<Option<(String, String)>> {
+    let disk = runner.check(&Cmd::new("lsblk").args(["-ndpo", "PKNAME", device]))?.stdout.trim().to_string();
+    let parts = runner.check(&Cmd::new("lsblk").args(["-nrpo", "NAME,PARTTYPE", &disk]))?.stdout;
+    let esps: Vec<&str> = parts
+        .lines()
+        .filter_map(|l| l.split_once(' '))
+        .filter(|(_, t)| t.trim().eq_ignore_ascii_case(ESP_TYPE))
+        .map(|(n, _)| n)
+        .collect();
+    let esp = match esps[..] {
+        [] => return Ok(None),
+        [one] => one.to_string(),
+        _ => bail!("{disk} has more than one ESP: {}", esps.join(", ")),
+    };
+    let at = s(&paths.system(ESP_MOUNT));
+    if probe(runner, Cmd::new("mountpoint").args(["-q", &at]))?.is_none() {
+        // FAT has no journal, so a reset mid-migration can leave it needing a repair before the
+        // journal on it is read.
+        runner.check(&Cmd::new("sh").args(["-c", r#"fsck.fat -a -w "$1"; [ $? -le 1 ]"#, "sh", &esp]))?;
+        runner.check(&Cmd::new("mkdir").arg("-p").arg(&at))?;
+        runner.check(&Cmd::new("mount").arg(&esp).arg(&at))?;
+    }
+    Ok(Some((esp, at)))
+}
+
+/// The steps that move the NixOS root `r` onto btrfs, run from a live system with the ESP mounted
+/// at `esp_mnt`: boot the fspec-live entry by default meanwhile, convert the root, keeping
 /// ext2_saved, snapshot the top level into `@nixos` and add the shared subvolumes, then boot
 /// `r.system` from `@nixos` as a new generation. Every step journals its undo: `btrfs-convert -r`
 /// and the ESP's boot files saved under `state`, so a failure leaves NixOS on ext4 as it was.
-pub fn nixos_migrate(paths: &Paths, r: &NixosRoot, state: &str) -> Vec<Step> {
+pub fn nixos_migrate(paths: &Paths, r: &NixosRoot, esp_mnt: &str, state: &str) -> Vec<Step> {
     let dev = r.device.as_str();
     let disk = s(&paths.system(DISK));
     let top = s(&paths.system(format!("{DISK}/top")));
     let mut steps = Vec::new();
+
+    // A live system that reboots mid-migration comes back into fspec-live, where the journal on
+    // the ESP rolls the migration back. An EFI default entry would outrank loader.conf.
+    let mut plan = Plan::default();
+    plan.expect(
+        Cmd::new("sh").args(["-c", r#"ls "$1"/loader/entries/fspec-live*.conf"#, "sh", esp_mnt]),
+        true,
+        "the ESP has no fspec-live entry to boot while the migration runs; install the live entry first",
+    );
+    plan.expect(
+        Cmd::new("test")
+            .arg("-e")
+            .arg(s(&paths.system("/sys/firmware/efi/efivars/LoaderEntryDefault-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f"))),
+        false,
+        "the EFI variable LoaderEntryDefault outranks loader.conf; clear it with `bootctl set-default \"\"` first",
+    );
+    plan.undo(Cmd::new("sh").args([
+        "-c",
+        r#"set -e; [ -f "$2" ] || exit 0; cp "$2" "$1.fspec-tmp"; sync "$1.fspec-tmp"; mv "$1.fspec-tmp" "$1"; sync -f "$1""#,
+        "sh",
+        &format!("{esp_mnt}/loader/loader.conf"),
+        &format!("{state}/loader.conf"),
+    ]));
+    plan.run(Cmd::new("sh").args([
+        "-c",
+        r#"set -e; cp "$1" "$2.part"; sync "$2.part"; mv "$2.part" "$2"
+{ grep -v '^default ' "$1" || true; echo 'default fspec-live*'; } > "$1.fspec-tmp"
+sync "$1.fspec-tmp"; mv "$1.fspec-tmp" "$1"; sync -f "$1""#,
+        "sh",
+        &format!("{esp_mnt}/loader/loader.conf"),
+        &format!("{state}/loader.conf"),
+    ]));
+    steps.push(Step {
+        what: "boot the fspec-live entry by default until the migration is done".into(),
+        destructive: false,
+        plan,
+    });
 
     let mut plan = Plan::default();
     plan.undo(Cmd::new("sh").args([
@@ -1103,26 +1172,24 @@ pub fn nixos_migrate(paths: &Paths, r: &NixosRoot, state: &str) -> Vec<Step> {
     let root = s(&paths.system(format!("{DISK}/nixos")));
     let esp = format!("{root}{}", r.esp_at);
     let saved = format!("{state}/esp");
-    let undo_esp = s(&paths.system(format!("{DISK}/esp")));
     plan.run(Cmd::new("mkdir").arg("-p").arg(&root));
     plan.run(Cmd::new("mount").arg("-o").arg(format!("subvol=@nixos,{BTRFS_OPTS}")).args([dev, &root]));
     plan.cleanup.push(Cmd::new("umount").arg("-R").arg(&root));
     plan.run(Cmd::new("mkdir").arg("-p").arg(&esp));
-    plan.run(Cmd::new("mount").arg(&r.esp).arg(&esp));
+    plan.run(Cmd::new("mount").arg("--bind").arg(esp_mnt).arg(&esp));
     plan.undo(Cmd::new("sh").args([
         "-c",
-        r#"[ -d "$3" ] || exit 0; mkdir -p "$2"; mount "$1" "$2"; for d in $4; do rm -rf "$2/$d"; if [ -e "$3/$d" ]; then mkdir -p "$(dirname "$2/$d")"; cp -a "$3/$d" "$2/$d"; fi; done; umount "$2""#,
+        r#"set -e; [ -d "$2" ] || exit 0; for d in $3; do rm -rf "$1/$d"; if [ -e "$2/$d" ]; then mkdir -p "$(dirname "$1/$d")"; cp -a "$2/$d" "$1/$d"; fi; done; sync -f "$1""#,
         "sh",
-        &r.esp,
-        &undo_esp,
+        esp_mnt,
         &saved,
         ESP_DIRS,
     ]));
     plan.run(Cmd::new("sh").args([
         "-c",
-        r#"rm -rf "$2" "$2.part"; mkdir -p "$2.part"; for d in $3; do if [ -e "$1/$d" ]; then mkdir -p "$(dirname "$2.part/$d")"; cp -a "$1/$d" "$2.part/$d"; fi; done; mv "$2.part" "$2""#,
+        r#"set -e; rm -rf "$2" "$2.part"; mkdir -p "$2.part"; for d in $3; do if [ -e "$1/$d" ]; then mkdir -p "$(dirname "$2.part/$d")"; cp -a "$1/$d" "$2.part/$d"; fi; done; sync -f "$2.part"; mv "$2.part" "$2""#,
         "sh",
-        &esp,
+        esp_mnt,
         &saved,
         ESP_DIRS,
     ]));
@@ -1168,14 +1235,15 @@ pub fn nixos_migrate(paths: &Paths, r: &NixosRoot, state: &str) -> Vec<Step> {
         format!("switch-to-configuration wrote no boot entry for {sys}"),
     );
     // Only the new entry can boot the btrfs root, so it gets three tries, its initrd panics and
-    // reboots on failure instead of waiting in emergency mode, and the ext4 generations move out of
-    // systemd-boot's sight. Without a `default`, systemd-boot boots the first entry in its order,
+    // reboots on failure instead of waiting in emergency mode, the booted system goes on to sshd
+    // past a failed mount, since `systemd.mask=` only applies after the initrd, and the ext4
+    // generations move out of systemd-boot's sight. Without a `default`, systemd-boot boots the first entry in its order,
     // which puts entries out of tries last, so the fspec-live entry follows three failures.
     plan.run(Cmd::new("sh").args([
         "-c",
         r#"set -e; e="$1/loader/entries"; new=$(grep -ls "init=$2/init" "$e"/*.conf | head -n 1)
 base=${new##*/}; base=${base%.conf}; base=${base%%+*}
-sed -i 's|^options .*|& boot.panic_on_fail panic=10|' "$new"
+sed -i 's|^options .*|& boot.panic_on_fail panic=10 systemd.mask=emergency.target systemd.mask=emergency.service systemd.mask=rescue.target systemd.mask=rescue.service|' "$new"
 mv "$new" "$e/$base+3.conf"
 mkdir -p "$1/loader/entries.ext4"
 for f in "$e"/nixos-*.conf; do if [ "${f##*/}" != "$base+3.conf" ]; then mv "$f" "$1/loader/entries.ext4/"; fi; done

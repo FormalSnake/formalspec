@@ -792,8 +792,10 @@ fn disk(paths: &Paths, spec_path: &Path, cmd: &DiskCommand) -> Result<()> {
     match cmd {
         DiskCommand::Plan { device: Some(device), nixos_system }
         | DiskCommand::Migrate { device: Some(device), nixos_system, .. } => {
-            let state = paths.system("/var/lib/fspec/disk");
-            if state.join("journal.json").exists() {
+            // A NixOS migration journals on the ESP, which outlives a reboot of the live system.
+            let esp = fspec_switch::mount_esp(runner, paths, device)?;
+            let state = esp.as_ref().map(|(_, at)| Path::new(at).join("fspec/disk-journal"));
+            if let Some(state) = state.as_ref().filter(|s| s.join("journal.json").exists()) {
                 if let DiskCommand::Plan { .. } = cmd {
                     println!(
                         "an interrupted migration left {}; `fspec disk migrate {device}` rolls it back",
@@ -801,8 +803,9 @@ fn disk(paths: &Paths, spec_path: &Path, cmd: &DiskCommand) -> Result<()> {
                     );
                     return Ok(());
                 }
-                fspec_core::journal::Journal::recover(&state, runner)
+                fspec_core::journal::Journal::recover(state, runner)
                     .context("rolling back the interrupted migration")?;
+                fspec_core::journal::remove_any(state)?;
                 println!("rolled back the interrupted migration; {device} is as it was before it");
                 return Ok(());
             }
@@ -816,7 +819,14 @@ fn disk(paths: &Paths, spec_path: &Path, cmd: &DiskCommand) -> Result<()> {
             }
             let uuid = runner.check(&Cmd::new("lsblk").args(["-no", "UUID", device]))?.stdout.trim().to_string();
             if let Some(root) = fspec_switch::nixos_root(runner, paths, device, &uuid, nixos_system.as_deref())? {
-                return migrate_nixos(paths, runner, cmd, &root, &state);
+                let (Some((esp, at)), Some(state)) = (&esp, &state) else {
+                    bail!("the disk holding {device} has no ESP, which NixOS's systemd-boot entries need")
+                };
+                let named = runner.check(&Cmd::new("readlink").args(["-f", &root.esp]))?.stdout.trim().to_string();
+                if &named != esp {
+                    bail!("the system mounts {} ({named}) as its ESP, but the disk's ESP is {esp}", root.esp);
+                }
+                return migrate_nixos(paths, runner, cmd, &root, at, state);
             }
             if nixos_system.is_some() {
                 bail!("{device} does not hold NixOS; --nixos-system only applies to a NixOS root");
@@ -932,10 +942,11 @@ fn migrate_nixos(
     runner: &dyn Runner,
     cmd: &DiskCommand,
     root: &fspec_switch::NixosRoot,
+    esp: &str,
     state: &Path,
 ) -> Result<()> {
     let device = root.device.as_str();
-    let steps = fspec_switch::nixos_migrate(paths, root, &state.display().to_string());
+    let steps = fspec_switch::nixos_migrate(paths, root, esp, &state.display().to_string());
     let DiskCommand::Migrate { backup, .. } = cmd else {
         for (i, s) in steps.iter().enumerate() {
             let mark = if s.destructive { " (destructive)" } else { "" };
@@ -964,7 +975,7 @@ fn migrate_nixos(
         }
     }
     journal.finish()?;
-    fspec_core::journal::remove_any(&state.join("esp"))?;
+    fspec_core::journal::remove_any(state)?;
     runner.check(&fspec_switch::compress(paths, device))?;
     println!("started fspec-compress.service, which recompresses @home and @nixos with zstd; a reboot stops it");
     println!(
