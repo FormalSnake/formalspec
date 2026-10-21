@@ -83,6 +83,8 @@ fn stage_of(cmd: &Cmd, device: &str, distro: &str, luks: bool) -> Option<String>
         "dnf" | "pacstrap" | "debootstrap" | "xbps-install" => format!("Installing {name}"),
         "chroot" if arg("apply") => "Applying your spec".into(),
         "chroot" if arg("chpasswd") => "Setting your password".into(),
+        // The script that moves the copied fspec binary into place is setup, not the kernel step.
+        "chroot" if cmd.args.iter().any(|a| a.contains("fspec.new")) => return None,
         "chroot" if arg("-c") => "Building the kernel image".into(),
         "cp" if cmd.args.iter().any(|a| a.contains("/home/")) => "Copying your spec".into(),
         _ => return None,
