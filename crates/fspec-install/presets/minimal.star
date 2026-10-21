@@ -1,6 +1,6 @@
 # A console system with networking and sudo. The other presets build on it.
 
-FAMILY = {"cachyos": "arch", "void-musl": "void"}
+FAMILY = {"cachyos": "arch", "void-musl": "void", "opensuse-tumbleweed": "opensuse", "opensuse-leap": "opensuse"}
 
 NETWORK = {
     "fedora": ["NetworkManager"],
@@ -9,13 +9,15 @@ NETWORK = {
     "ubuntu": ["network-manager"],
     "void": ["NetworkManager", "dbus"],
     "aerynos": ["networkmanager"],
+    "opensuse": ["NetworkManager"],
 }
 
 NETWORK_SERVICES = {
     "void": ["dbus", "NetworkManager"],
 }
 
-SUDO = {"aerynos": ["sudo-rs"]}
+# openSUSE's sudoers asks for the root password (targetpw); the policy package lets wheel use its own.
+SUDO = {"aerynos": ["sudo-rs"], "opensuse": ["sudo", "sudo-policy-wheel-auth-self"]}
 EDITOR = ["nano"]
 
 def family(distro):
@@ -38,10 +40,14 @@ def distro_system(distro, packages):
         return void(libc = "musl", packages = packages)
     if distro == "aerynos":
         return aerynos(packages = packages)
+    if distro == "opensuse-tumbleweed":
+        return tumbleweed(packages = packages)
+    if distro == "opensuse-leap":
+        return leap(packages = packages)
     fail("minimal has no system for " + distro)
 
 def system(distro, desktop = None, extra = []):
-    return distro_system(distro, NETWORK[family(distro)] + SUDO.get(distro, ["sudo"]) + EDITOR + extra)
+    return distro_system(distro, NETWORK[family(distro)] + SUDO.get(family(distro), ["sudo"]) + EDITOR + extra)
 
 def modules(distro, desktop = None):
     f = family(distro)

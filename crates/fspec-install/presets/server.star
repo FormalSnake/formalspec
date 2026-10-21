@@ -8,6 +8,7 @@ SSH = {
     "debian": ["openssh-server"],
     "ubuntu": ["openssh-server"],
     "void": ["openssh"],
+    "opensuse": ["openssh-server"],
 }
 
 SSH_SERVICE = {"debian": "ssh", "ubuntu": "ssh"}
@@ -20,12 +21,14 @@ FIREWALL = {
     "debian": ["firewalld"],
     "ubuntu": ["firewalld"],
     "void": ["nftables"],
+    "opensuse": ["firewalld"],
 }
 
 # Rolling distros get no unattended upgrades: a partial upgrade breaks them, so updating
-# stays a deliberate `pacman -Syu` or `xbps-install -Su`.
+# stays a deliberate `pacman -Syu`, `xbps-install -Su` or `zypper dup`.
 UPDATES = {
     "fedora": ["dnf5-plugin-automatic"],
+    "opensuse-leap": ["os-update"],
     "debian": ["unattended-upgrades"],
     "ubuntu": ["unattended-upgrades"],
 }
@@ -53,7 +56,7 @@ APT::Periodic::Unattended-Upgrade "1";
 
 def system(distro, desktop = None):
     f = family(distro)
-    return base_system(distro, extra = SSH[f] + FIREWALL[f] + UPDATES.get(f, []))
+    return base_system(distro, extra = SSH[f] + FIREWALL[f] + UPDATES.get(distro, UPDATES.get(f, [])))
 
 def modules(distro, desktop = None):
     f = family(distro)
@@ -68,6 +71,8 @@ def modules(distro, desktop = None):
             file("/etc/dnf/automatic.conf", format = "ini", content = {"commands": {"upgrade_type": "security", "apply_updates": True}}),
             service("dnf5-automatic.timer"),
         ]
+    if distro == "opensuse-leap":
+        found.append(service("os-update.timer"))
     if f in ["debian", "ubuntu"]:
         found.append(file("/etc/apt/apt.conf.d/20auto-upgrades", content = APT_PERIODIC))
     return found

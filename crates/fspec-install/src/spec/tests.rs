@@ -8,7 +8,16 @@ use crate::model::{Account, Delivery, Desktop, DiskChoice, Distro, Locale, Secre
 
 /// Eval errors from builtins that have not landed on this branch yet. A combination that fails
 /// with one of these is skipped; any other error fails the test.
-const PENDING: &[&str] = &["unknown field `locale`", "Variable `cachyos` not found", "unknown field `libc`", "Variable `aerynos` not found"];
+const PENDING: &[&str] = &[
+    "unknown field `locale`",
+    "unknown field `libc`",
+    "Variable `cachyos` not found",
+    "Variable `aerynos` not found",
+    "Variable `tumbleweed` not found",
+    "Variable `leap` not found",
+    "Variable `aeon` not found",
+    "Variable `kalpa` not found",
+];
 
 fn locale() -> Locale {
     Locale { locale: "en_US.UTF-8".into(), keymap: "us".into(), timezone: "Europe/Madrid".into() }
