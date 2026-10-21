@@ -35,6 +35,10 @@ pub fn is_archive(body: &[u8]) -> bool {
         .any(|magic| body.starts_with(magic))
 }
 
+pub fn is_elf(body: &[u8]) -> bool {
+    body.starts_with(b"\x7fELF")
+}
+
 pub fn unpack(body: &[u8], dest: &Path, name: &str) -> Result<()> {
     fs::create_dir_all(dest).with_context(|| format!("creating {}", dest.display()))?;
     if body.starts_with(&[0x1f, 0x8b]) {

@@ -364,8 +364,9 @@ projects in particular:
   added as a package when `dev.star` does not name it. The venv is built for
   the machine, so a pypi package does not run in a container yet.
 - `url("https://...")` is one file or archive at a fixed URL, pinned by its
-  hash. A file that is not an archive keeps its name and is data, not a
-  command: fonts, a model, a fixture.
+  hash. An ELF executable (an AppImage is one) becomes the command named after
+  the package. Any other file that is not an archive keeps its name and is
+  data, not a command: fonts, a model, a fixture.
 
 Each package's tree is exported as `FSPEC_PKG_<NAME>` (`FSPEC_PKG_YT_DLP`), so
 `env` and `shell_hook` can point into it: a venv's interpreter, a font

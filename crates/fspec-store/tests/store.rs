@@ -322,6 +322,31 @@ fn pkg_bins_pick_among_the_executables() {
 }
 
 #[test]
+fn a_url_elf_is_the_command_and_any_other_file_is_data() {
+    let mut w = World::new();
+    let appimage = b"\x7fELF\x02\x01\x01 AppImage".to_vec();
+    let font = b"OTTO font".to_vec();
+    w.lock.upsert(locked(
+        "beeper",
+        "url:https://example/Beeper-4.3.73-x86_64.AppImage",
+        "1",
+        "https://example/Beeper-4.3.73-x86_64.AppImage",
+        &appimage,
+    ));
+    w.lock.upsert(locked("font", "url:https://example/Geist.otf", "1", "https://example/Geist.otf", &font));
+    w.fetch = MapFetch::default()
+        .with("https://example/Beeper-4.3.73-x86_64.AppImage", appimage)
+        .with("https://example/Geist.otf", font);
+    let url = |name: &str, u: &str| pkg(name, json!({"kind": "url", "url": u}), "pinned");
+    w.apply(&[url("beeper", "https://example/Beeper-4.3.73-x86_64.AppImage")]).unwrap();
+    let beeper = w.root().join("current/bin/beeper");
+    assert!(fs::metadata(&beeper).unwrap().permissions().mode() & 0o111 != 0);
+
+    let err = w.apply(&[url("font", "https://example/Geist.otf")]).unwrap_err();
+    assert!(format!("{err:#}").contains("no executables"), "{err:#}");
+}
+
+#[test]
 fn npm_without_dependencies_links_its_bin() {
     let mut w = World::new();
     let body = tgz(&[

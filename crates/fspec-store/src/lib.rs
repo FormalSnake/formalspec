@@ -274,8 +274,9 @@ fn unpack_into(cx: &Cx, p: &Pkg, origin: &Origin, dirname: &str, dest: &Path, sc
             let body = cx.fetch.get(url)?;
             archive::verify(&body, hash).with_context(|| format!("verifying {url}"))?;
             match &p.source {
-                // A file that is not an archive keeps its own name and is data, not a command.
-                Source::Url { .. } if !archive::is_archive(&body) => {
+                // A file that is neither an archive nor an ELF executable (an AppImage is one)
+                // keeps its own name and is data, not a command.
+                Source::Url { .. } if !archive::is_archive(&body) && !archive::is_elf(&body) => {
                     let name = url.rsplit('/').next().filter(|n| !n.is_empty()).unwrap_or(&p.name);
                     fs::create_dir_all(dest)?;
                     fs::write(dest.join(name), &body)?;
