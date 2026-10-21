@@ -2,17 +2,17 @@
 # Runs inside the privileged debian:trixie container started by build.sh.
 set -euo pipefail
 
-. /iso/snapshot-apt.sh
-snapshot=$(cat /iso/snapshot)
-main=http://snapshot.debian.org/archive/debian/$snapshot/
-security=http://snapshot.debian.org/archive/debian-security/$snapshot/
+. /iso/apt-sources.sh
 
 apt-get update -qq
 apt-get install -y -qq live-build debian-archive-keyring ca-certificates >/dev/null
 
-rm -rf /work/lb
+# live-build keeps the downloaded packages and the bootstrapped base in cache/, so everything else goes.
 mkdir -p /work/lb
+find /work/lb -mindepth 1 -maxdepth 1 ! -name cache -exec rm -rf {} +
 cd /work/lb
+
+if [ "$RELEASE" = 1 ]; then compression=xz; else compression=zstd; fi
 
 lb config \
 	--mode debian \
@@ -27,6 +27,8 @@ lb config \
 	--parent-mirror-chroot "$main" \
 	--parent-mirror-chroot-security "$security" \
 	--apt-options "--yes -o Acquire::Check-Valid-Until=false" \
+	--cache-packages true \
+	--chroot-squashfs-compression-type "$compression" \
 	--binary-image iso-hybrid \
 	--bootloaders "grub-efi syslinux" \
 	--uefi-secure-boot enable \

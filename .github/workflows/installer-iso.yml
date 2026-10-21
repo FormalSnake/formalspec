@@ -30,10 +30,25 @@ jobs:
             echo "tag $TAG does not match the workspace version $version" >&2
             exit 1
           fi
+      - name: Read the Debian snapshot
+        id: snapshot
+        run: echo "timestamp=$(cat installer/iso/snapshot)" >> "$GITHUB_OUTPUT"
+      # The .debs are fixed by the snapshot, so a cache keyed on it serves every release on the
+      # same snapshot; the package list in the key only adds what a new package brings.
+      - uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: |
+            installer/iso/work/apt
+            installer/iso/work/lb/cache
+          key: debs-${{ steps.snapshot.outputs.timestamp }}-${{ hashFiles('installer/iso/config/package-lists/*') }}
+          restore-keys: debs-${{ steps.snapshot.outputs.timestamp }}-
       - name: Build the ISO
         run: |
           set -o pipefail
-          SOURCE_DATE_EPOCH=$(git log -1 --format=%ct) bash installer/iso/build.sh 2>&1 | tee build.log
+          SOURCE_DATE_EPOCH=$(git log -1 --format=%ct) bash installer/iso/build.sh --release 2>&1 | tee build.log
+      # live-build runs as root in its container; the cache step saves as the runner user.
+      - name: Make the package cache readable for saving
+        run: sudo chown -R "$(id -u):$(id -g)" installer/iso/work/apt installer/iso/work/lb/cache
       - name: Install QEMU and OVMF
         run: |
           sudo apt-get update -qq
