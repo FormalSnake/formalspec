@@ -4,6 +4,7 @@
 
 pub mod backend;
 pub mod catalog;
+pub mod install;
 pub mod live;
 pub mod model;
 pub mod spec;
