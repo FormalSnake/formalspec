@@ -1003,7 +1003,10 @@ cannot satisfy is refused with the fix, usually a `fspec disk` command.
   the initrd still reaches `sshd`), `loader.conf` loses its `default`,
   and the `fspec-live` entry's `findiso=` and `fspec.overlay=` move to
   `/@fspec/live/`. After three failed boots systemd-boot falls through to
-  `fspec-live`; NixOS's `systemd-bless-boot` marks a good boot. Every step
+  `fspec-live`; NixOS's `systemd-bless-boot` marks a good boot. Once it has,
+  a `systemd.run=` on the entry drops those arguments again, so later boots
+  keep their emergency shells; `fspec disk unmask` does the same by hand.
+  Every step
   journals its undo, synced before the step runs, in `fspec/disk-journal` on
   the ESP: a failure, or the next run after a kill or a reset, runs
   `btrfs-convert -r` and puts the ESP's `loader`, `EFI/systemd` and
