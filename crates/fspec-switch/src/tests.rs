@@ -5,8 +5,8 @@ use fspec_core::runner::{Output, RecordingRunner};
 use serde_json::json;
 
 use crate::{
-    Btrfs, Facts, Firmware, Ids, Init, Kind, Layout, Leftovers, Machine, Part, Target, adopt_boot, assumed, classify,
-    forget, init, migrate, reset_var, switch_distro, to_image,
+    Beside, Btrfs, Facts, Firmware, Ids, Init, Kind, Layout, Leftovers, Machine, Part, Target, Tumbleweed, adopt_boot,
+    assumed, beside, classify, forget, init, migrate, reset_var, switch_distro, to_image, tumbleweed,
 };
 
 const UUID: &str = "1111-aaaa";
@@ -1021,6 +1021,241 @@ fn to_image_runs_bootc_from_the_image_itself() {
     );
 }
 
+/// NixOS as e1504g runs it: systemd-boot on an ESP at /boot, the root in @nixos, no shared
+/// subvolumes yet.
+fn nixos() -> Machine {
+    let l = lsblk("gpt", vec![esp("/dev/vda1", 1, 1024, &["/boot"]), btrfs_part("/dev/vda2", 2, &["/", "/home"])]);
+    let mut f = facts("/@nixos", l, true);
+    f.volumes = vec!["@nixos".into(), "@home".into()];
+    classify(&f, "nixos".into(), "init=/nix/store/x/init root=fstab console=ttyS0,115200 quiet".into()).unwrap()
+}
+
+fn fedora(image: &str) -> Beside<'_> {
+    Beside { image, distro: "fedora", inherit: None, users: vec!["kyan".into()], pull_from: None }
+}
+
+#[test]
+fn beside_installs_the_image_into_its_own_subvolume_without_a_bootloader() {
+    let plan = beside(&paths(), &nixos(), &fedora("ghcr.io/me/box@sha256:abc")).unwrap();
+    let lines = plan.lines();
+    let w = "/r/run/fspec/switch";
+    assert_eq!(lines[3], "test -e /r/boot/EFI/systemd/systemd-bootx64.efi");
+    let podman = position(&lines, "podman run");
+    assert_eq!(
+        lines[podman],
+        format!(
+            "podman run --rm --privileged --pid=host -v /dev:/dev -v /var/lib/containers:/var/lib/containers -v \
+             {w}/fedora:/target:rbind --security-opt label=type:unconfined_t ghcr.io/me/box@sha256:abc bootc install \
+             to-filesystem --bootloader=none --skip-finalize --root-mount-spec=UUID={UUID} \
+             --karg=rootflags=subvol=@fedora,noatime,compress=zstd:1 --karg=panic=10 --karg=rd.shell=0 \
+             --karg=rd.emergency=reboot --karg=console=ttyS0,115200 /target"
+        )
+    );
+    assert!(position(&lines, &format!("btrfs subvolume create {w}/top/@fedora")) < podman);
+    assert!(lines.contains(&format!("sh {w}/fedora-etc/fspec/esp-sync.sh {w}/fedora /r/boot fedora")));
+    assert!(lines.contains(&format!(
+        "ln -sf /etc/systemd/system/fspec-boot-guard.service \
+         {w}/fedora-etc/systemd/system/boot-complete.target.requires/fspec-boot-guard.service"
+    )));
+    // The other roots' boot setup is never touched.
+    assert!(!lines.iter().any(|l| l.contains("loader.conf") || l.contains("bootctl") || l.contains("efibootmgr")));
+    assert!(
+        stdin_of(&plan, &format!("tee {w}/fedora-etc/systemd/system/boot-efi.mount")).contains("PARTUUID=esp-guid")
+    );
+    let inherit = plan
+        .steps
+        .iter()
+        .find_map(|s| match s {
+            crate::Step::Run(c) if c.args.get(3).map(String::as_str) == Some(crate::beside::INHERIT) => Some(c),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        inherit.args[4..],
+        [
+            format!("{w}/top/@nixos"),
+            format!("{w}/fedora"),
+            "default".into(),
+            format!("UUID={UUID} /var/home btrfs subvol=@home,noatime,compress=zstd:1 0 0"),
+            "kyan".into()
+        ]
+    );
+    assert!(lines.iter().any(|l| l.contains("ghcr.io/me/box@sha256:abc sh -c") && l.contains("setfiles")));
+    let sync = stdin_of(&plan, &format!("tee {w}/fedora-etc/systemd/system/fspec-esp-sync.service"));
+    assert!(sync.contains("Before=basic.target final.target ostree-finalize-staged.service"));
+    assert!(sync.contains("ExecStop=/bin/sh /etc/fspec/esp-sync.sh /sysroot /boot/efi fedora"));
+    assert_eq!(plan.cleanup.last().unwrap().to_string(), format!("umount {w}"));
+}
+
+#[test]
+fn beside_pulls_from_a_plain_http_mirror_and_keeps_the_locked_origin() {
+    let b = Beside { pull_from: Some("100.64.0.1:5050/fspec-box"), ..fedora("ghcr.io/me/fspec-box@sha256:abc") };
+    let lines = beside(&paths(), &nixos(), &b).unwrap().lines();
+    let pull = position(&lines, "podman pull");
+    assert_eq!(lines[pull], "podman pull --tls-verify=false 100.64.0.1:5050/fspec-box@sha256:abc");
+    let install = position(&lines, "podman run");
+    assert!(pull < install);
+    assert!(lines[install].contains(
+        "100.64.0.1:5050/fspec-box@sha256:abc bootc install to-filesystem --bootloader=none \
+         --target-imgref=ghcr.io/me/fspec-box:latest --skip-fetch-check --skip-finalize"
+    ));
+    let tagged = Beside { pull_from: Some("m/x"), ..fedora("ghcr.io/me/box:latest") };
+    assert!(beside(&paths(), &nixos(), &tagged).unwrap_err().to_string().contains("digest"));
+}
+
+#[test]
+fn beside_needs_efi_btrfs_and_a_mounted_esp() {
+    let mut m = nixos();
+    m.firmware = Firmware::Bios;
+    assert!(beside(&paths(), &m, &fedora("img")).unwrap_err().to_string().contains("BIOS"));
+    let mut m = nixos();
+    m.parts.retain(|p| p.fstype != "vfat");
+    assert!(beside(&paths(), &m, &fedora("img")).unwrap_err().to_string().contains("no ESP"));
+    let mut m = nixos();
+    m.fstype = "ext4".into();
+    assert!(beside(&paths(), &m, &fedora("img")).is_err());
+    assert!(beside(&paths(), &nixos(), &Beside { distro: "../x", ..fedora("img") }).is_err());
+    assert!(beside(&paths(), &nixos(), &Beside { inherit: Some("@a/../b"), ..fedora("img") }).is_err());
+}
+
+fn ostree_entry(sysroot: &Path, n: u32, boot: &str, checksum: &str, kernel: &str) {
+    let link = sysroot.join(format!("ostree/boot.1/default/{boot}/0"));
+    std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+    let deploy = sysroot.join(format!("ostree/deploy/default/deploy/{checksum}.0"));
+    std::fs::create_dir_all(&deploy).unwrap();
+    std::os::unix::fs::symlink(format!("../../../deploy/default/deploy/{checksum}.0"), &link).unwrap();
+    let dir = sysroot.join(format!("boot/ostree/default-{boot}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(format!("vmlinuz-{kernel}")), kernel).unwrap();
+    std::fs::write(dir.join(format!("initramfs-{kernel}.img")), format!("initrd {kernel}")).unwrap();
+    let entries = sysroot.join("boot/loader/entries");
+    std::fs::create_dir_all(&entries).unwrap();
+    std::fs::write(
+        entries.join(format!("ostree-{n}.conf")),
+        format!(
+            "title Fedora Linux 44 (ostree:{n})\nversion {n}\noptions root=UUID=u rootflags=subvol=@fedora rw \
+             ostree=/ostree/boot.1/default/{boot}/0\nlinux /boot/ostree/default-{boot}/vmlinuz-{kernel}\n\
+             initrd /boot/ostree/default-{boot}/initramfs-{kernel}.img\n"
+        ),
+    )
+    .unwrap();
+}
+
+fn sync(sysroot: &Path, esp: &Path) -> Vec<String> {
+    let out = std::process::Command::new("sh")
+        .args(["-c", crate::beside::ESP_SYNC, "sh"])
+        .arg(sysroot)
+        .arg(esp)
+        .arg("fedora")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let mut names: Vec<String> = std::fs::read_dir(esp.join("loader/entries"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn esp_sync_copies_the_deployments_and_keeps_their_boot_counters() {
+    let dir = tempfile::tempdir().unwrap();
+    let (sysroot, esp) = (dir.path().join("sysroot"), dir.path().join("esp"));
+    std::fs::create_dir_all(esp.join("loader/entries")).unwrap();
+    let nixos = esp.join("loader/entries/nixos-abc.conf");
+    std::fs::write(&nixos, "title NixOS\nsort-key nixos\n").unwrap();
+    std::fs::write(esp.join("loader/loader.conf"), "default nixos-abc.conf\n").unwrap();
+    ostree_entry(&sysroot, 1, "b1", "c1", "7.1");
+
+    assert_eq!(sync(&sysroot, &esp), ["fedora-ostree-1+3.conf", "nixos-abc.conf"]);
+    let entry = std::fs::read_to_string(esp.join("loader/entries/fedora-ostree-1+3.conf")).unwrap();
+    assert_eq!(
+        entry,
+        "title Fedora Linux 44 (ostree:1)\nlinux /fedora/default-b1/vmlinuz\ninitrd /fedora/default-b1/initramfs.img\n\
+         options root=UUID=u rootflags=subvol=@fedora rw ostree=/ostree/boot.1/default/b1/0\n"
+    );
+    assert_eq!(std::fs::read_to_string(esp.join("fedora/default-b1/vmlinuz")).unwrap(), "7.1");
+
+    // systemd-boot counted one try; an update adds a deployment with a new kernel.
+    std::fs::rename(
+        esp.join("loader/entries/fedora-ostree-1+3.conf"),
+        esp.join("loader/entries/fedora-ostree-1+2-1.conf"),
+    )
+    .unwrap();
+    ostree_entry(&sysroot, 2, "b2", "c2", "7.2");
+    assert_eq!(sync(&sysroot, &esp), ["fedora-ostree-1+2-1.conf", "fedora-ostree-2+3.conf", "nixos-abc.conf"]);
+
+    // ostree drops the first deployment; its entry and kernel go, nothing else does.
+    std::fs::remove_file(sysroot.join("boot/loader/entries/ostree-1.conf")).unwrap();
+    assert_eq!(sync(&sysroot, &esp), ["fedora-ostree-2+3.conf", "nixos-abc.conf"]);
+    assert!(!esp.join("fedora/default-b1").exists() && esp.join("fedora/default-b2/initramfs.img").exists());
+    assert_eq!(std::fs::read_to_string(&nixos).unwrap(), "title NixOS\nsort-key nixos\n");
+    assert_eq!(std::fs::read_to_string(esp.join("loader/loader.conf")).unwrap(), "default nixos-abc.conf\n");
+}
+
+#[test]
+fn inherit_copies_the_identity_without_printing_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let w = |rel: &str, text: &str| {
+        let p = dir.path().join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, text).unwrap();
+    };
+    w("src/etc/ssh/ssh_host_ed25519_key", "PRIVATE");
+    w("src/etc/ssh/ssh_host_ed25519_key.pub", "PUBLIC");
+    w("src/etc/NetworkManager/system-connections/home.nmconnection", "[wifi]");
+    w("src/var/lib/tailscale/tailscaled.state", "node");
+    w(
+        "src/etc/passwd",
+        "root:x:0:0::/root:/run/current-system/sw/bin/bash\nkyan:x:1000:100:Kyan:/home/kyan:/run/current-system/sw/bin/fish\n",
+    );
+    w("src/etc/shadow", "root:!:1::::::\nkyan:$y$hash:20000::::::\n");
+    w("src/etc/group", "users:x:100:\nwheel:x:1:kyan\nvideo:x:26:kyan\ndocker:x:131:kyan\nkvm:x:302:\n");
+    let deploy = "sys/ostree/deploy/default/deploy/abc.0";
+    w(&format!("{deploy}/etc/passwd"), "root:x:0:0:root:/root:/bin/bash\n");
+    w(&format!("{deploy}/etc/shadow"), "root:!locked::0:99999:7:::\n");
+    w(&format!("{deploy}/etc/group"), "video:x:39:\n");
+    w(&format!("{deploy}/etc/gshadow"), "video:!::\n");
+    w(&format!("{deploy}/etc/fstab"), "UUID=x / btrfs ro 0 0\n");
+    w(&format!("{deploy}/usr/lib/group"), "root:x:0:\nwheel:x:10:\nusers:x:100:\n");
+    w(&format!("{deploy}/usr/bin/fish"), "");
+    std::fs::create_dir_all(dir.path().join(format!("{deploy}/etc/ssh"))).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(dir.path().join(format!("{deploy}/usr/bin/fish")), std::fs::Permissions::from_mode(0o755))
+        .unwrap();
+
+    // install -o root needs root, which a test does not have.
+    let script = crate::beside::INHERIT.replace(" -o root -g root", "");
+    let home = "UUID=u /var/home btrfs subvol=@home,noatime,compress=zstd:1 0 0";
+    let out = std::process::Command::new("sh")
+        .args(["-c", &script, "sh"])
+        .arg(dir.path().join("src"))
+        .arg(dir.path().join(deploy))
+        .arg(dir.path().join(format!("{deploy}/etc")))
+        .arg(dir.path().join("sys/ostree/deploy/default/var"))
+        .args([home, "kyan"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let printed = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(!printed.contains("hash") && !printed.contains("PRIVATE"), "{printed}");
+
+    let read = |rel: &str| std::fs::read_to_string(dir.path().join(format!("{deploy}/{rel}"))).unwrap();
+    let mode = |rel: &str| std::fs::metadata(dir.path().join(rel)).unwrap().permissions().mode() & 0o777;
+    assert_eq!(read("etc/ssh/ssh_host_ed25519_key"), "PRIVATE");
+    assert_eq!(mode(&format!("{deploy}/etc/ssh/ssh_host_ed25519_key")), 0o600);
+    assert_eq!(mode(&format!("{deploy}/etc/ssh/ssh_host_ed25519_key.pub")), 0o644);
+    assert_eq!(mode(&format!("{deploy}/etc/NetworkManager/system-connections/home.nmconnection")), 0o600);
+    assert_eq!(mode("sys/ostree/deploy/default/var/lib/tailscale"), 0o700);
+    assert_eq!(read("etc/passwd"), "root:x:0:0:root:/root:/bin/bash\nkyan:x:1000:100:Kyan:/home/kyan:/usr/bin/fish\n");
+    assert_eq!(read("etc/shadow"), "root:!locked::0:99999:7:::\nkyan:$y$hash:20000::::::\n");
+    // users exists in /usr/lib/group; wheel is copied over from there; docker and kvm are left out.
+    assert_eq!(read("etc/group"), "wheel:x:10:kyan\nvideo:x:39:kyan\n");
+    assert_eq!(read("etc/gshadow"), "wheel:!::kyan\nvideo:!::kyan\n");
+    assert_eq!(read("etc/fstab"), format!("UUID=x / btrfs ro 0 0\n{home}\n"));
+}
+
 #[test]
 fn populate_adds_the_update_and_security_pockets() {
     let dir = tempfile::tempdir().unwrap();
@@ -1134,4 +1369,196 @@ fn unmask_drops_the_trial_arguments_only_from_a_blessed_entry() {
     assert_eq!(std::fs::read_to_string(entries.join("nixos-aaa.conf")).unwrap(), plain);
     assert!(!dir.path().join("boot/loader/fspec-unmask").exists());
     assert!(crate::unmask(&paths, "/boot").unwrap().contains("no trial arguments"));
+}
+
+/// The disk as a live system sees it: nothing of it is mounted.
+fn nixos_from_live() -> Machine {
+    let l = lsblk("gpt", vec![esp("/dev/vda1", 1, 1024, &[]), btrfs_part("/dev/vda2", 2, &[])]);
+    let f = Facts { root_mount: "btrfs /dev/vda2 /@nixos".into(), lsblk: l, efi: true, ..Facts::default() };
+    classify(&f, String::new(), "BOOT_IMAGE=/live/vmlinuz boot=live console=tty0".into()).unwrap()
+}
+
+fn tw(snapshot: &str) -> Tumbleweed<'_> {
+    Tumbleweed { name: "tumbleweed", snapshot, inherit: "@nixos", users: vec!["kyan".into()] }
+}
+
+#[test]
+fn tumbleweed_bootstraps_beside_the_other_roots_from_a_live_system() {
+    let plan = tumbleweed(&paths(), &nixos_from_live(), &tw("20261020")).unwrap();
+    let lines = plan.lines();
+    let w = "/r/run/fspec/switch";
+    let root = format!("{w}/tumbleweed");
+    let mount = position(&lines, &format!("mount /dev/vda1 {w}/esp"));
+    assert_eq!(lines[mount + 1], format!("test -e {w}/esp/EFI/systemd/systemd-bootx64.efi"));
+    assert!(lines.contains(&format!("mount -o subvol=@tumbleweed,noatime,compress=zstd:1 UUID={UUID} {root}")));
+    let bootstrap = position(&lines, &format!("podman run --rm --privileged --network host -v {root}:/mnt"));
+    assert!(lines[bootstrap].contains(crate::TUMBLEWEED_IMAGE));
+    assert!(
+        lines[bootstrap].contains(
+            " 20261020 fspec_snapshot patterns-base-minimal_base zypper ca-certificates-mozilla kernel-default "
+        ),
+        "{}",
+        lines[bootstrap]
+    );
+    // The kernel options and the dracut config are in place before the kernel's scriptlets run.
+    assert!(position(&lines, &format!("tee {root}/etc/dracut.conf.d/50-fspec.conf")) < bootstrap);
+    let cmdline = lines.iter().position(|l| l.contains(&format!("{root}/etc/kernel/cmdline root="))).unwrap();
+    assert!(cmdline < bootstrap);
+    assert!(lines[cmdline].ends_with(&format!(
+        "{w}/esp @nixos {root}/etc/kernel/cmdline root=UUID={UUID} \
+         rootflags=subvol=@tumbleweed,noatime,compress=zstd:1 rw panic=10 rd.shell=0 rd.emergency=reboot"
+    )));
+    assert!(
+        stdin_of(&plan, &format!("tee {root}/etc/zypp/repos.d/fspec-non-oss.repo"))
+            .contains("baseurl=https://download.opensuse.org/history/${fspec_snapshot}/tumbleweed/repo/non-oss/")
+    );
+    assert_eq!(
+        stdin_of(&plan, &format!("tee {root}/etc/fstab")),
+        format!(
+            "UUID={UUID} / btrfs subvol=@tumbleweed,noatime,compress=zstd:1 0 0\n\
+             PARTUUID=esp-guid /boot/efi vfat umask=0077,shortname=winnt,nofail 0 2\n"
+        )
+    );
+    let inherit = plan
+        .steps
+        .iter()
+        .find_map(|s| match s {
+            crate::Step::Run(c) if c.args.get(3).map(String::as_str) == Some(crate::beside::INHERIT) => Some(c),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        inherit.args[4..],
+        [
+            format!("{w}/top"),
+            format!("UUID={UUID} /home btrfs subvol=@home,noatime,compress=zstd:1 0 0"),
+            format!("{w}/top/@nixos"),
+            root.clone(),
+            format!("{root}/etc"),
+            format!("{root}/var"),
+            "kyan".into()
+        ]
+    );
+    let sync = position(&lines, &format!("sh {root}/etc/fspec/esp-sync.sh {root} {w}/esp tumbleweed"));
+    assert!(position(&lines, &format!("podman run --rm --privileged --network none -v {root}:/mnt")) < sync);
+    assert!(!lines.iter().any(|l| l.contains("loader.conf") || l.contains("bootctl") || l.contains("efibootmgr")));
+    assert!(plan.cleanup.iter().any(|c| c.to_string() == format!("umount {w}/esp")));
+}
+
+#[test]
+fn tumbleweed_uses_the_mounted_esp_and_checks_its_input() {
+    let lines = tumbleweed(&paths(), &nixos(), &tw("20261020")).unwrap().lines();
+    assert!(lines.contains(&"test -e /r/boot/EFI/systemd/systemd-bootx64.efi".to_string()));
+    assert!(!lines.iter().any(|l| l.contains("switch/esp")));
+    let err = |t: &Tumbleweed| tumbleweed(&paths(), &nixos(), t).unwrap_err().to_string();
+    assert!(err(&tw("2026-10-20")).contains("snapshot date like 20261020"));
+    assert!(err(&Tumbleweed { inherit: "nixos", ..tw("20261020") }).contains("top-level subvolume"));
+}
+
+fn tw_kernel(root: &Path, k: &str) {
+    std::fs::create_dir_all(root.join(format!("usr/lib/modules/{k}"))).unwrap();
+    std::fs::write(root.join(format!("usr/lib/modules/{k}/vmlinuz")), format!("linux {k}")).unwrap();
+    std::fs::create_dir_all(root.join("boot")).unwrap();
+    std::fs::write(root.join(format!("boot/initrd-{k}")), format!("initrd {k}")).unwrap();
+}
+
+fn tw_sync(root: &Path, esp: &Path) -> Vec<String> {
+    let out = std::process::Command::new("sh")
+        .args(["-c", crate::tumbleweed::ESP_SYNC, "sh"])
+        .arg(root)
+        .arg(esp)
+        .arg("tumbleweed")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let mut names: Vec<String> = std::fs::read_dir(esp.join("loader/entries"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn tumbleweed_esp_sync_follows_the_installed_kernels_and_keeps_their_counters() {
+    let dir = tempfile::tempdir().unwrap();
+    let (root, esp) = (dir.path().join("root"), dir.path().join("esp"));
+    std::fs::create_dir_all(root.join("etc/kernel")).unwrap();
+    std::fs::create_dir_all(root.join("usr/lib")).unwrap();
+    std::fs::write(root.join("etc/kernel/cmdline"), "root=UUID=u rootflags=subvol=@tumbleweed rw\n").unwrap();
+    std::fs::write(
+        root.join("usr/lib/os-release"),
+        "NAME=\"openSUSE Tumbleweed\"\nPRETTY_NAME=\"openSUSE Tumbleweed\"\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(esp.join("loader/entries")).unwrap();
+    std::fs::write(esp.join("loader/entries/nixos-generation-1.conf"), "sort-key nixos\n").unwrap();
+    std::fs::write(esp.join("loader/loader.conf"), "default nixos-generation-1.conf\n").unwrap();
+    tw_kernel(&root, "6.17.1-1-default");
+    // A kernel whose initrd is not built yet waits for the next run.
+    std::fs::create_dir_all(root.join("usr/lib/modules/6.17.2-1-default")).unwrap();
+    std::fs::write(root.join("usr/lib/modules/6.17.2-1-default/vmlinuz"), "linux 6.17.2").unwrap();
+
+    assert_eq!(tw_sync(&root, &esp), ["nixos-generation-1.conf", "tumbleweed-6.17.1-1-default+3.conf"]);
+    let entry = std::fs::read_to_string(esp.join("loader/entries/tumbleweed-6.17.1-1-default+3.conf")).unwrap();
+    assert_eq!(
+        entry,
+        "title openSUSE Tumbleweed (6.17.1-1-default)\nversion 6.17.1-1-default\n\
+         linux /tumbleweed/6.17.1-1-default/linux\ninitrd /tumbleweed/6.17.1-1-default/initrd\n\
+         options root=UUID=u rootflags=subvol=@tumbleweed rw systemd.mask=emergency.target \
+         systemd.mask=emergency.service systemd.mask=rescue.target systemd.mask=rescue.service\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(esp.join("tumbleweed/6.17.1-1-default/initrd")).unwrap(),
+        "initrd 6.17.1-1-default"
+    );
+
+    // systemd-boot blessed the first; the second kernel gets its initrd; the first is removed.
+    std::fs::rename(
+        esp.join("loader/entries/tumbleweed-6.17.1-1-default+3.conf"),
+        esp.join("loader/entries/tumbleweed-6.17.1-1-default.conf"),
+    )
+    .unwrap();
+    tw_kernel(&root, "6.17.2-1-default");
+    assert_eq!(
+        tw_sync(&root, &esp),
+        ["nixos-generation-1.conf", "tumbleweed-6.17.1-1-default.conf", "tumbleweed-6.17.2-1-default+3.conf"]
+    );
+    let options = |entry: &str| {
+        let text = std::fs::read_to_string(esp.join("loader/entries").join(entry)).unwrap();
+        text.lines().find_map(|l| l.strip_prefix("options ")).unwrap().to_string()
+    };
+    assert_eq!(options("tumbleweed-6.17.1-1-default.conf"), "root=UUID=u rootflags=subvol=@tumbleweed rw");
+    assert!(options("tumbleweed-6.17.2-1-default+3.conf").ends_with("systemd.mask=rescue.service"));
+    std::fs::remove_dir_all(root.join("usr/lib/modules/6.17.1-1-default")).unwrap();
+    assert_eq!(tw_sync(&root, &esp), ["nixos-generation-1.conf", "tumbleweed-6.17.2-1-default+3.conf"]);
+    assert!(!esp.join("tumbleweed/6.17.1-1-default").exists());
+    assert_eq!(
+        std::fs::read_to_string(esp.join("loader/entries/nixos-generation-1.conf")).unwrap(),
+        "sort-key nixos\n"
+    );
+    assert_eq!(std::fs::read_to_string(esp.join("loader/loader.conf")).unwrap(), "default nixos-generation-1.conf\n");
+}
+
+#[test]
+fn the_zypp_plugin_acks_every_frame_and_syncs_after_the_commit() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("log");
+    let sync = dir.path().join("esp-sync.sh");
+    std::fs::write(&sync, format!("echo \"$@\" >>{}\n", log.display())).unwrap();
+    let plugin =
+        crate::tumbleweed::zypp_plugin("tumbleweed").replace("/etc/fspec/esp-sync.sh", &sync.display().to_string());
+    let frames = "PLUGINBEGIN\nuserdata:x\n\n\0COMMITBEGIN\n\n{}\0\nCOMMITEND\n\n{}\0PLUGINEND\n\n\0_DISCONNECT\n\n\0";
+    let mut child = std::process::Command::new("bash")
+        .args(["-c", &plugin])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    child.stdin.take().unwrap().write_all(frames.as_bytes()).unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success());
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), "ACK\n\n\0".repeat(5));
+    assert_eq!(std::fs::read_to_string(&log).unwrap(), "/ /boot/efi tumbleweed\n");
 }

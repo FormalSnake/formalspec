@@ -13,6 +13,7 @@ pub mod resource;
 pub mod runner;
 pub mod state;
 pub mod trash;
+pub mod zypp;
 
 pub use apply::{Backend, Cx, Op, Phase};
 pub use facts::Facts;

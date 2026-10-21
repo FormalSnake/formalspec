@@ -12,12 +12,8 @@ use fspec_core::runner::Cmd;
 
 use crate::family::zypper;
 
-pub(crate) const HISTORY: &str = "https://download.opensuse.org/history";
-/// The zypp repo variable (`/etc/zypp/vars.d/<name>`) the snapshot repos' URLs expand, so
-/// moving the pin rewrites one file and leaves the repo definitions alone.
-const VAR: &str = "fspec_snapshot";
-/// The snapshot repos: alias and path under `<HISTORY>/<snapshot>/tumbleweed/`.
-const SNAPSHOT_REPOS: [(&str, &str); 2] = [("fspec-oss", "repo/oss/"), ("fspec-non-oss", "repo/non-oss/")];
+use fspec_core::zypp::{SNAPSHOT_REPOS, SNAPSHOT_VAR as VAR, snapshot_repo};
+
 /// Rolling repos a pin disables, as paths on download.opensuse.org or cdn.opensuse.org.
 /// `update` has no snapshots and would pull packages newer than the pin.
 const ROLLING: [&str; 4] = ["/tumbleweed/", "/update/tumbleweed", "/debug/tumbleweed/", "/source/tumbleweed/"];
@@ -102,10 +98,7 @@ pub(crate) fn move_to(cx: &Cx, journal: &mut Journal, snapshot: &str) -> Result<
 
     for (alias, path) in SNAPSHOT_REPOS {
         let file = cx.paths.system(format!("/etc/zypp/repos.d/{alias}.repo"));
-        let body = format!(
-            "[{alias}]\nname=openSUSE Tumbleweed {path} at the fspec.lock snapshot\nenabled=1\nautorefresh=1\n\
-             baseurl={HISTORY}/${{{VAR}}}/tumbleweed/{path}\ntype=rpm-md\ngpgcheck=1\n"
-        );
+        let body = snapshot_repo(alias, path);
         if fs::read_to_string(&file).is_ok_and(|t| t == body) {
             continue;
         }

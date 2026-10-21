@@ -192,6 +192,24 @@ pub fn detect(runner: &dyn Runner, paths: &Paths) -> Result<Machine> {
     classify(&facts, running, cmdline)
 }
 
+/// Read the disk of the btrfs filesystem on `device` from a system that does not run from it, such
+/// as a live system, taking the subvolume `root` (`@nixos`) as its root.
+pub fn detect_device(runner: &dyn Runner, paths: &Paths, device: &str, root: &str) -> Result<Machine> {
+    // lsblk names devices by their /dev path, not by a /dev/disk/by-* link.
+    let device = std::fs::canonicalize(device).with_context(|| format!("{device} does not exist"))?;
+    let lsblk = probe(runner, Cmd::new(LSBLK[0]).args(LSBLK[1..].iter().copied()))?
+        .context("lsblk could not list the disks")?;
+    let facts = Facts {
+        efi: probe(runner, Cmd::new("test").arg("-d").arg(paths.system("/sys/firmware/efi").display().to_string()))?
+            .is_some(),
+        root_mount: format!("btrfs {} /{}", device.display(), root.trim_start_matches('/')),
+        lsblk,
+        ..Facts::default()
+    };
+    let cmdline = std::fs::read_to_string(paths.system("/proc/cmdline")).unwrap_or_default().trim().to_string();
+    classify(&facts, String::new(), cmdline)
+}
+
 /// Names of the subvolumes directly under the btrfs top level, from `btrfs subvolume list`.
 pub(crate) fn top_level_subvols(list: &str) -> Vec<String> {
     list.lines()
@@ -396,17 +414,18 @@ pub fn assumed(running: &str) -> Machine {
         parttype: ESP_TYPE.into(),
         fstype: "vfat".into(),
         size: 2 * GIB,
+        mounts: vec!["/efi".into()],
         ..Part::default()
     };
     let btrfs = Btrfs { uuid: "00000000-0000-0000-0000-000000000000".into(), luks: None, home: "/@home".into() };
     Machine {
+        parts: vec![esp.clone()],
         layout: Layout::Default { esp, btrfs },
         root: format!("/@{running}"),
         running: running.into(),
         firmware: Firmware::Efi,
         disk: "/dev/sda".into(),
         cmdline: String::new(),
-        parts: Vec::new(),
         root_part: Part::default(),
         fstype: "btrfs".into(),
         fs_uuid: "00000000-0000-0000-0000-000000000000".into(),
