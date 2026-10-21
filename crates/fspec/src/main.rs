@@ -242,6 +242,13 @@ enum DiskCommand {
         #[arg(long, default_value_t = 4)]
         swap: u64,
     },
+    /// After the first good boot of a NixOS generation a migration made, drop the trial arguments
+    /// (the emergency and rescue masks, panic on an initrd failure) from its blessed boot entry.
+    Unmask {
+        /// Where the running system mounts the ESP.
+        #[arg(long, default_value = "/boot")]
+        esp: String,
+    },
     /// Partition and format DEVICE from scratch.
     Init {
         device: String,
@@ -790,6 +797,10 @@ fn disk(paths: &Paths, spec_path: &Path, cmd: &DiskCommand) -> Result<()> {
     let runner = switch_runner(paths)?;
     let runner = runner.as_ref();
     match cmd {
+        DiskCommand::Unmask { esp } => {
+            println!("{}", fspec_switch::unmask(paths, esp)?);
+            Ok(())
+        }
         DiskCommand::Plan { device: Some(device), nixos_system }
         | DiskCommand::Migrate { device: Some(device), nixos_system, .. } => {
             // A NixOS migration journals on the ESP, which outlives a reboot of the live system.

@@ -1075,6 +1075,84 @@ pub fn mount_esp(runner: &dyn Runner, paths: &Paths, device: &str) -> Result<Opt
     Ok(Some((esp, at)))
 }
 
+/// What a migration appends to the options of the new NixOS entry while it is on trial.
+const TRIAL: &str = "boot.panic_on_fail panic=10 systemd.mask=emergency.target systemd.mask=emergency.service \
+                     systemd.mask=rescue.target systemd.mask=rescue.service";
+
+/// Drop the trial arguments from the blessed entry that booted this system, on the ESP mounted at
+/// `esp`, for an entry whose own `systemd.run=` did not, or one written before it had one. Refuses
+/// while the booted entry still counts tries, since only a blessed boot may lose them.
+pub fn unmask(paths: &Paths, esp: &str) -> Result<String> {
+    let var = paths.system("/sys/firmware/efi/efivars/LoaderEntrySelected-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f");
+    let raw =
+        std::fs::read(&var).with_context(|| format!("reading {}; was this booted by systemd-boot?", var.display()))?;
+    let utf16: Vec<u16> =
+        raw.get(4..).unwrap_or_default().as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect();
+    let id = String::from_utf16(&utf16)?.trim_end_matches('\0').to_string();
+    let entries = paths.system(format!("{esp}/loader/entries"));
+    let entry = entries.join(&id);
+    if !entry.exists() {
+        bail!(
+            "{} is not there, so the boot of {id} is not blessed yet; run this after boot-complete.target",
+            entry.display()
+        );
+    }
+    let text = std::fs::read_to_string(&entry)?;
+    let mut changed = false;
+    let lines: Vec<String> = text
+        .lines()
+        .map(|l| {
+            let run = l.find(" systemd.run=\"/bin/sh ").map(|i| &l[..i]).unwrap_or(l);
+            match run.strip_suffix(&format!(" {TRIAL}")) {
+                Some(kept) if l.starts_with("options ") => {
+                    changed = true;
+                    kept.to_string()
+                }
+                _ => l.to_string(),
+            }
+        })
+        .collect();
+    let script = paths.system(format!("{esp}/loader/fspec-unmask"));
+    if !changed {
+        return Ok(format!("{} has no trial arguments", entry.display()));
+    }
+    let tmp = entry.with_extension("conf.fspec-tmp");
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all((lines.join("\n") + "\n").as_bytes())?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, &entry)?;
+    if script.exists() {
+        std::fs::remove_file(&script)?;
+    }
+    // vfat does not persist a rename through an fsync of its directory.
+    let synced = std::process::Command::new("sync").arg("-f").arg(&entries).status()?;
+    if !synced.success() {
+        bail!("sync -f {} failed", entries.display());
+    }
+    Ok(format!("{} boots without the trial arguments now", entry.display()))
+}
+
+/// The script a trial NixOS entry starts through `systemd.run=`: it hands itself to a transient
+/// unit so the boot does not wait on it, then, once systemd-bless-boot has renamed the booted
+/// entry to its name without a counter, drops `trial` from the entry's options line. A boot that
+/// is never blessed leaves the entry as it is.
+fn unmask_script(trial: &str) -> String {
+    let trial = trial.replace('\'', r"'\''");
+    format!(
+        r#"PATH=/run/current-system/sw/bin:$PATH
+[ "$1" = wait ] || exec systemd-run --no-block --collect --unit=fspec-unmask sh "$0" wait
+id=$(tail -c +5 /sys/firmware/efi/efivars/LoaderEntrySelected-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f | tr -d '\0')
+e="${{0%/*}}/entries/$id"
+until [ -f "$e" ]; do sleep 5; done
+trial=' {trial}'
+while IFS= read -r l; do case $l in "options "*"$trial") l=${{l%"$trial"}};; esac; printf '%s\n' "$l"; done < "$e" > "$e.fspec-tmp"
+sync "$e.fspec-tmp"; mv "$e.fspec-tmp" "$e"; rm -f "$0"; sync -f "$e""#
+    )
+}
+
 /// The steps that move the NixOS root `r` onto btrfs, run from a live system with the ESP mounted
 /// at `esp_mnt`: boot the fspec-live entry by default meanwhile, convert the root, keeping
 /// ext2_saved, snapshot the top level into `@nixos` and add the shared subvolumes, then boot
@@ -1237,13 +1315,21 @@ sync "$1.fspec-tmp"; mv "$1.fspec-tmp" "$1"; sync -f "$1""#,
     // Only the new entry can boot the btrfs root, so it gets three tries, its initrd panics and
     // reboots on failure instead of waiting in emergency mode, the booted system goes on to sshd
     // past a failed mount, since `systemd.mask=` only applies after the initrd, and the ext4
-    // generations move out of systemd-boot's sight. Without a `default`, systemd-boot boots the first entry in its order,
-    // which puts entries out of tries last, so the fspec-live entry follows three failures.
+    // generations move out of systemd-boot's sight. Without a `default`, systemd-boot boots the
+    // first entry in its order, which puts entries out of tries last, so the fspec-live entry
+    // follows three failures. Once a boot is blessed the entry loses the suffix again, through
+    // `systemd.run=` since the NixOS root is not ours to add units to, so later boots get the
+    // emergency shells back and the entry's content matches the hash NixOS named it by.
+    let unmask = format!("{}/loader/fspec-unmask", r.esp_at.trim_end_matches('/'));
+    let trial = format!(
+        "{TRIAL} systemd.run=\"/bin/sh {unmask}\" systemd.run_success_action=none systemd.run_failure_action=none"
+    );
     plan.run(Cmd::new("sh").args([
         "-c",
         r#"set -e; e="$1/loader/entries"; new=$(grep -ls "init=$2/init" "$e"/*.conf | head -n 1)
 base=${new##*/}; base=${base%.conf}; base=${base%%+*}
-sed -i 's|^options .*|& boot.panic_on_fail panic=10 systemd.mask=emergency.target systemd.mask=emergency.service systemd.mask=rescue.target systemd.mask=rescue.service|' "$new"
+printf '%s\n' "$4" > "$1/loader/fspec-unmask"
+sed -i "s|^options .*|& $3|" "$new"
 mv "$new" "$e/$base+3.conf"
 mkdir -p "$1/loader/entries.ext4"
 for f in "$e"/nixos-*.conf; do if [ "${f##*/}" != "$base+3.conf" ]; then mv "$f" "$1/loader/entries.ext4/"; fi; done
@@ -1252,6 +1338,8 @@ sync -f "$1/loader""#,
         "sh",
         &esp,
         sys,
+        &trial,
+        &unmask_script(&trial),
     ]));
     mount_top(&mut plan, &top, dev.into());
     plan.run(Cmd::new("sh").args([

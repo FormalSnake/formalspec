@@ -736,7 +736,7 @@ fn a_nixos_root_converts_snapshots_and_boots_its_new_system() {
 /// Runs the ESP scripts of the NixOS boot step against a fake ESP. They use GNU sed.
 #[cfg(target_os = "linux")]
 #[test]
-fn the_new_generation_gets_tries_and_the_live_entry_moves_into_at_fspec() {
+fn the_new_generation_gets_tries_until_blessed_and_the_live_entry_moves_into_at_fspec() {
     let dir = tempfile::tempdir().unwrap();
     let (esp, top) = (dir.path().join("esp"), dir.path().join("top"));
     let entries = esp.join("loader/entries");
@@ -751,17 +751,18 @@ fn the_new_generation_gets_tries_and_the_live_entry_moves_into_at_fspec() {
     w(esp.join("loader/loader.conf"), "timeout 3\ndefault nixos-aaa.conf\nconsole-mode keep\n");
     let steps =
         crate::nixos_migrate(&paths(), &nixos_root(), "/r/run/fspec/esp", "/r/run/fspec/esp/fspec/disk-journal");
-    let script = |marker: &str| {
+    let cmd = |marker: &str| {
         steps[3]
             .plan
             .steps
             .iter()
             .find_map(|s| match s {
-                crate::Step::Run(c) if c.program == "sh" && c.args[1].contains(marker) => Some(c.args[1].clone()),
+                crate::Step::Run(c) if c.program == "sh" && c.args[1].contains(marker) => Some(c.clone()),
                 _ => None,
             })
             .unwrap()
     };
+    let script = |marker: &str| cmd(marker).args[1].clone();
     let run = |script: String, args: &[&std::path::Path]| {
         let out = std::process::Command::new("sh").arg("-c").arg(script).arg("sh").args(args).output().unwrap();
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
@@ -772,17 +773,23 @@ fn the_new_generation_gets_tries_and_the_live_entry_moves_into_at_fspec() {
         v.sort();
         v
     };
-    run(script("panic_on_fail"), &[&esp, Path::new(sys)]);
+    let count = cmd("entries.ext4");
+    let (trial, unmask) = (&count.args[5], &count.args[6]);
+    run(count.args[1].clone(), &[&esp, Path::new(sys), Path::new(trial), Path::new(unmask)]);
     assert_eq!(ls(&entries), ["fspec-live+3.conf", "nixos-aaa+3.conf"]);
     assert_eq!(ls(&esp.join("loader/entries.ext4")), ["nixos-bbb.conf"]);
     let new = std::fs::read_to_string(entries.join("nixos-aaa+3.conf")).unwrap();
     assert!(
         new.contains(&format!(
             "options init={sys}/init loglevel=4 boot.panic_on_fail panic=10 systemd.mask=emergency.target \
-         systemd.mask=emergency.service systemd.mask=rescue.target systemd.mask=rescue.service\n"
+             systemd.mask=emergency.service systemd.mask=rescue.target systemd.mask=rescue.service \
+             systemd.run=\"/bin/sh /boot/loader/fspec-unmask\" systemd.run_success_action=none \
+             systemd.run_failure_action=none\n"
         )),
         "{new}"
     );
+    assert_eq!(std::fs::read_to_string(esp.join("loader/fspec-unmask")).unwrap(), format!("{unmask}\n"));
+    assert!(unmask.contains(&format!("trial=' {trial}'")), "{unmask}");
     assert_eq!(std::fs::read_to_string(esp.join("loader/loader.conf")).unwrap(), "timeout 3\nconsole-mode keep\n");
 
     let move_live = script("fspec-live*.conf");
@@ -798,6 +805,29 @@ fn the_new_generation_gets_tries_and_the_live_entry_moves_into_at_fspec() {
         live.replace("=/var/lib/fspec-live/", "=/@fspec/live/")
     );
     assert_eq!(ls(&entries), ["fspec-live+3.conf", "nixos-aaa+3.conf"]);
+
+    // An unblessed boot leaves the entry alone; the bless rename lets the script restore it.
+    let efivar = dir.path().join("LoaderEntrySelected");
+    let id: Vec<u8> = "nixos-aaa.conf\0".encode_utf16().flat_map(u16::to_le_bytes).collect();
+    std::fs::write(&efivar, [&[6, 0, 0, 0][..], &id].concat()).unwrap();
+    let script = esp.join("loader/fspec-unmask");
+    w(
+        script.clone(),
+        &unmask.replace(
+            "/sys/firmware/efi/efivars/LoaderEntrySelected-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f",
+            efivar.to_str().unwrap(),
+        ),
+    );
+    let mut waiting = std::process::Command::new("sh").arg(&script).arg("wait").spawn().unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    assert!(waiting.try_wait().unwrap().is_none());
+    std::fs::rename(entries.join("nixos-aaa+3.conf"), entries.join("nixos-aaa.conf")).unwrap();
+    assert!(waiting.wait().unwrap().success());
+    assert_eq!(
+        std::fs::read_to_string(entries.join("nixos-aaa.conf")).unwrap(),
+        format!("title NixOS\noptions init={sys}/init loglevel=4\n")
+    );
+    assert!(!script.exists());
 }
 
 #[test]
@@ -1064,4 +1094,42 @@ fn the_boot_owner_reads_the_default_blsforme_writes() {
     assert_eq!(owner("timeout 3\ndefault fedora-*\n").as_deref(), Some("fedora"));
     assert_eq!(owner("default \"aerynos*\"\n").as_deref(), Some("aerynos"));
     assert_eq!(owner("timeout 3\n"), None);
+}
+
+#[test]
+fn unmask_drops_the_trial_arguments_only_from_a_blessed_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = Paths::new(dir.path().into(), dir.path().join("home"));
+    let entries = dir.path().join("boot/loader/entries");
+    std::fs::create_dir_all(&entries).unwrap();
+    let efivars = dir.path().join("sys/firmware/efi/efivars");
+    std::fs::create_dir_all(&efivars).unwrap();
+    let id: Vec<u8> = "nixos-aaa.conf\0".encode_utf16().flat_map(u16::to_le_bytes).collect();
+    std::fs::write(
+        efivars.join("LoaderEntrySelected-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f"),
+        [&[6, 0, 0, 0][..], &id].concat(),
+    )
+    .unwrap();
+    let plain = "title NixOS\noptions init=/nix/store/x/init loglevel=4\n";
+    let old = plain.replace(
+        "loglevel=4",
+        "loglevel=4 boot.panic_on_fail panic=10 systemd.mask=emergency.target systemd.mask=emergency.service \
+         systemd.mask=rescue.target systemd.mask=rescue.service",
+    );
+    std::fs::write(entries.join("nixos-aaa+2-1.conf"), &old).unwrap();
+    assert!(crate::unmask(&paths, "/boot").unwrap_err().to_string().contains("not blessed yet"));
+    std::fs::rename(entries.join("nixos-aaa+2-1.conf"), entries.join("nixos-aaa.conf")).unwrap();
+    crate::unmask(&paths, "/boot").unwrap();
+    assert_eq!(std::fs::read_to_string(entries.join("nixos-aaa.conf")).unwrap(), plain);
+    let new = old.replace(
+        "rescue.service",
+        "rescue.service systemd.run=\"/bin/sh /boot/loader/fspec-unmask\" systemd.run_success_action=none \
+         systemd.run_failure_action=none",
+    );
+    std::fs::write(entries.join("nixos-aaa.conf"), &new).unwrap();
+    std::fs::write(dir.path().join("boot/loader/fspec-unmask"), "").unwrap();
+    crate::unmask(&paths, "/boot").unwrap();
+    assert_eq!(std::fs::read_to_string(entries.join("nixos-aaa.conf")).unwrap(), plain);
+    assert!(!dir.path().join("boot/loader/fspec-unmask").exists());
+    assert!(crate::unmask(&paths, "/boot").unwrap().contains("no trial arguments"));
 }
