@@ -27,9 +27,15 @@ impl Runner for Fake {
                 fs::write(src.join(name), text).unwrap();
             }
         }
-        if matches!(cmd.program.as_str(), "cargo" | "sh") {
+        let in_podman = cmd.program == "podman" && cmd.args[0] == "run";
+        let builds = cmd.program == "cargo" || (cmd.program == "sh" && !cmd.env.is_empty()) || in_podman;
+        if builds {
             let dir = match cmd.program.as_str() {
                 "cargo" => PathBuf::from(arg("--target-dir").unwrap()).join("release"),
+                "podman" => {
+                    let out = cmd.args.iter().find_map(|a| a.strip_prefix("FSPEC_OUT=")).unwrap();
+                    PathBuf::from(out).join("bin")
+                }
                 _ => PathBuf::from(&cmd.env.iter().find(|(k, _)| k == "FSPEC_OUT").unwrap().1).join("bin"),
             };
             fs::create_dir_all(&dir).unwrap();
@@ -110,7 +116,61 @@ fn explicit_build_and_named_bins() {
     };
     let built = build(&fake, &job(&p, spec.path(), out.path())).unwrap();
     assert!(fake.calls.lock().unwrap().last().unwrap().starts_with("sh -c 'make && cp x"));
-    assert_eq!(names(&built.archive), ["b", "a"]);
+    assert_eq!(names(&built.archive), ["bin", "bin/a", "bin/b", "bin/c"]);
+}
+
+#[test]
+fn a_prefix_build_packs_its_whole_tree() {
+    let spec = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let p = pkg(serde_json::json!({"build": ["sh", "-c", "./install.sh"]}));
+    let fake = Fake {
+        checkout: BTreeMap::from([("install.sh", "")]),
+        produce: vec![("exe", "formalshell"), ("data", "VERSION")],
+        ..Default::default()
+    };
+    let built = build(&fake, &job(&p, spec.path(), out.path())).unwrap();
+    assert_eq!(names(&built.archive), ["bin", "bin/VERSION", "bin/formalshell"]);
+}
+
+#[test]
+fn deps_install_in_the_image_before_the_recipe_runs_there() {
+    let spec = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let mut p = pkg(serde_json::json!({"build": ["sh", "-c", "make install"]}));
+    p.source = serde_json::from_value(serde_json::json!({
+        "kind": "git", "url": "https://example/tool", "rev": "main",
+        "image": "registry.opensuse.org/opensuse/tumbleweed", "deps": ["cmake", "pkgconfig(gtk4)"],
+    }))
+    .unwrap();
+    let fake =
+        Fake { checkout: BTreeMap::from([("Makefile", "")]), produce: vec![("exe", "tool")], ..Default::default() };
+    let built = build(&fake, &job(&p, spec.path(), out.path())).unwrap();
+    let calls = fake.calls.lock().unwrap();
+    let run = calls.iter().find(|c| c.starts_with("podman run")).unwrap();
+    assert!(run.contains(" -w ") && run.contains(":Z "), "{run}");
+    assert!(run.contains(" -e FSPEC_SRC=") && run.contains(" -e FSPEC_OUT="), "{run}");
+    assert!(run.contains(" registry.opensuse.org/opensuse/tumbleweed sh -c "), "{run}");
+    assert!(
+        run.contains("zypper --non-interactive --gpg-auto-import-keys install --no-recommends cmake 'pkgconfig(gtk4)'"),
+        "{run}"
+    );
+    assert!(run.contains("\nsh -c 'make install'"), "{run}");
+    assert!(!calls.iter().any(|c| c.starts_with("sh -c 'make")), "{calls:?}");
+    assert_eq!(names(&built.archive), ["bin", "bin/tool"]);
+}
+
+#[test]
+fn deps_without_an_image_fail() {
+    let spec = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let mut p = pkg(serde_json::json!({}));
+    p.source =
+        serde_json::from_value(serde_json::json!({"kind": "git", "url": "https://example/tool", "deps": ["cmake"]}))
+            .unwrap();
+    let fake = Fake { checkout: BTreeMap::from([("Cargo.toml", "")]), ..Default::default() };
+    let err = build(&fake, &job(&p, spec.path(), out.path())).unwrap_err();
+    assert!(err.to_string().contains("no image"), "{err}");
 }
 
 #[test]

@@ -158,7 +158,31 @@ them.
 | explicit | the `build` command, with `FSPEC_SRC` (the patched checkout) and `FSPEC_OUT` (put executables in `$FSPEC_OUT/bin`) in its environment; `build_flags` do not apply |
 
 Every command goes through the `Runner`. Non-Cargo recipes install into
-`<out>`, so executables are read from `<out>/bin`.
+`<out>`, a prefix, and the artifact is that whole tree (directories, modes and
+symlinks kept), so data in `share/` and helpers in `lib/` ship with the
+executables in `bin/`. A Cargo build ships the executables of `<build>/release`
+at the top.
+
+**Build dependencies.** A runner has only what its image ships, and the
+binary has to load on the host, so a `git` source can name the image its build
+runs in and the packages the build needs there:
+
+```python
+pkg("librepods", source = git("https://github.com/…/omarchy-pods", rev = "…",
+    image = "registry.opensuse.org/opensuse/tumbleweed",
+    deps = ["cmake", "gcc-c++", "qt6-base-devel", "libpulse-devel"]))
+```
+
+With `image` set, `fspec build` still checks out and patches on the build
+machine, then runs the whole recipe as one `podman run --rm` (`docker run`
+where podman is missing) of that image, with the work directory mounted at its
+own path and `FSPEC_SRC` and `FSPEC_OUT` passed in. `deps` install first, by
+whichever of zypper, dnf, apt-get, pacman, xbps-install or apk the image has,
+so they are named the way that distro names them (`pkgconfig(gtk4)` works on
+zypper and dnf). Building in the host's own distro links against the same
+sonames the host has. `deps` without `image` fails the plan. Pin the image by
+digest (`…@sha256:…`) for builds that repeat exactly. The CI workflow needs no
+change: GitHub's Ubuntu runners have podman.
 
 **Commands.**
 

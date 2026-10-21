@@ -40,6 +40,55 @@ pub fn executables(dirs: &[PathBuf], names: &[String]) -> Result<Vec<(String, Pa
     Ok(found)
 }
 
+/// `.tar.zst` of the whole tree under `dir`: directories, files with their modes, and links as
+/// links. Paths are sorted and owners and times zeroed, like [`tar_zst`].
+pub fn tree_zst(dir: &Path) -> Result<Vec<u8>> {
+    let mut paths = Vec::new();
+    walk(dir, Path::new(""), &mut paths)?;
+    if paths.is_empty() {
+        bail!("the build installed nothing into {}", dir.display());
+    }
+    let mut tar = tar::Builder::new(Vec::new());
+    for rel in paths {
+        let path = dir.join(&rel);
+        let meta = fs::symlink_metadata(&path)?;
+        let mut h = tar::Header::new_gnu();
+        h.set_mtime(0);
+        h.set_uid(0);
+        h.set_gid(0);
+        h.set_mode(meta.permissions().mode() & 0o7777);
+        if meta.file_type().is_symlink() {
+            h.set_entry_type(tar::EntryType::Symlink);
+            h.set_size(0);
+            tar.append_link(&mut h, &rel, fs::read_link(&path)?)?;
+        } else if meta.is_dir() {
+            h.set_entry_type(tar::EntryType::Directory);
+            h.set_size(0);
+            tar.append_data(&mut h, &rel, std::io::empty())?;
+        } else {
+            let body = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+            h.set_size(body.len() as u64);
+            tar.append_data(&mut h, &rel, body.as_slice())?;
+        }
+    }
+    let tar = tar.into_inner()?;
+    Ok(ruzstd::encoding::compress_to_vec(tar.as_slice(), ruzstd::encoding::CompressionLevel::Fastest))
+}
+
+/// Every path under `dir`, parents before children, siblings sorted.
+fn walk(dir: &Path, rel: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    let mut entries: Vec<_> = fs::read_dir(dir.join(rel))?.flatten().map(|e| e.file_name()).collect();
+    entries.sort();
+    for name in entries {
+        let child = rel.join(name);
+        out.push(child.clone());
+        if fs::symlink_metadata(dir.join(&child))?.is_dir() {
+            walk(dir, &child, out)?;
+        }
+    }
+    Ok(())
+}
+
 /// `.tar.zst` with the executables at the top. Names are sorted and owners and times zeroed, so
 /// the same build packs to the same bytes.
 pub fn tar_zst(files: &[(String, PathBuf)]) -> Result<Vec<u8>> {

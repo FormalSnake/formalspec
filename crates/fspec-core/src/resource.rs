@@ -75,6 +75,7 @@ impl Host {
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
 pub enum System {
     Image(Image),
     Distro(Distro),
@@ -108,6 +109,8 @@ pub struct Repo {
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+// A host holds a few hundred resources at most; boxing Pkg would buy nothing measurable.
+#[allow(clippy::large_enum_variant)]
 pub enum Resource {
     Pkg(Pkg),
     File(File),
@@ -307,6 +310,13 @@ pub enum Source {
         url: String,
         #[serde(default = "main")]
         rev: String,
+        /// Packages the build needs, installed with the image's package manager before the
+        /// recipe runs in it.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        deps: Vec<String>,
+        /// The OCI image the build runs in. Unset: on the build machine itself.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        image: Option<String>,
     },
     Nix {
         attr: String,
@@ -380,7 +390,7 @@ impl fmt::Display for Source {
             | Source::Zypper(d) => {
                 write!(f, "{kind}:{}", d.names.join(","))
             }
-            Source::Git { url, rev } => write!(f, "{kind}:{url}@{rev}"),
+            Source::Git { url, rev, .. } => write!(f, "{kind}:{url}@{rev}"),
             Source::Nix { attr } => write!(f, "{kind}:{attr}"),
         }
     }
