@@ -1,12 +1,13 @@
 //! runit (Void) services.
 //!
 //! A system service is `/etc/sv/fspec-<name>/run` (plus `finish` when it must not restart),
-//! linked into `/var/service`. A user service lives directly in `~/.local/service/fspec-<name>`,
-//! scanned by a `runsvdir` that fspec runs as the system service `fspec-runsvdir-<user>`; the
-//! first user service on a host creates it, which needs the privileges to write `/etc/sv` and
-//! `/var/service`. runsvdir starts a newly linked service within five seconds, so an add runs no
-//! `sv` command. `after = ["network"]` is ignored (runit has no such state); another service name
-//! becomes an `sv check` guard in `run`.
+//! linked into the default runlevel `/etc/runit/runsvdir/default`. `/var/service` resolves to it
+//! once booted, but through `/run`, so a chroot has no `/var/service` to link into. A user service
+//! lives directly in `~/.local/service/fspec-<name>`, scanned by a `runsvdir` that fspec runs as
+//! the system service `fspec-runsvdir-<user>`; the first user service on a host creates it, which
+//! needs the privileges to write `/etc/sv` and `/etc/runit`. runsvdir starts a newly linked
+//! service within five seconds, so an add runs no `sv` command. `after = ["network"]` is ignored
+//! (runit has no such state); another service name becomes an `sv check` guard in `run`.
 
 use std::path::Path;
 
@@ -61,9 +62,11 @@ fn dir(s: &Service) -> String {
     if s.user { format!("~/.local/service/fspec-{}", s.name) } else { format!("/etc/sv/fspec-{}", s.name) }
 }
 
+const RUNLEVEL: &str = "/etc/runit/runsvdir/default";
+
 /// Where runsvdir sees the service.
 fn scanned(s: &Service) -> String {
-    if s.user { dir(s) } else { format!("/var/service/fspec-{}", s.name) }
+    if s.user { dir(s) } else { format!("{RUNLEVEL}/fspec-{}", s.name) }
 }
 
 fn sv(cx: &Cx, verb: &str, spec_path: &str) -> Result<Cmd> {
@@ -155,7 +158,7 @@ fn ensure_runsvdir(cx: &Cx, journal: &mut Journal) -> Result<()> {
     if read_or_empty(&cx.resolve(&run)?).as_deref() == Some(content.as_str()) {
         return Ok(());
     }
-    let live = format!("/var/service/{name}");
+    let live = format!("{RUNLEVEL}/{name}");
     initsvc::reset_dir(cx, journal, &format!("/etc/sv/{name}"))?;
     let part = [Part::script(&run, &content)];
     initsvc::write_direct(cx, journal, &part)?;

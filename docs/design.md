@@ -464,7 +464,7 @@ service("syncthing", exec = "syncthing serve --no-browser",
 | Init | Rendered as |
 | --- | --- |
 | systemd | unit files, user units under `~/.config/systemd/user` |
-| runit (Void) | `/etc/sv/fspec-<name>/run`, linked into `/var/service`; user services under a per-user `runsvdir ~/.local/service` |
+| runit (Void) | `/etc/sv/fspec-<name>/run`, linked into `/etc/runit/runsvdir/default`; user services under a per-user `runsvdir ~/.local/service` |
 | OpenRC | `/etc/init.d/fspec-<name>` with `supervise-daemon`; no user services |
 | dinit | `/etc/dinit.d/fspec-<name>`, user services in `~/.config/dinit.d` |
 | s6 | an s6-rc longrun source directory under `/etc/s6/sv`, recompiled on every change; no user services |
@@ -504,7 +504,10 @@ and dinit get an argument vector: shell syntax runs as `/bin/sh -c`, a bare
 command name goes through `/usr/bin/env`, and dinit sets `env` through a leading
 `/usr/bin/env K=V`.
 
-runit services are `/etc/sv/fspec-<name>/run`, linked into `/var/service`.
+runit services are `/etc/sv/fspec-<name>/run`, linked into the default runlevel
+`/etc/runit/runsvdir/default`, which `/var/service` resolves to once booted. The
+link cannot go through `/var/service` itself: that points into `/run`, which a
+chroot (`switch --distro`) does not have.
 runsvdir starts a new link within five seconds, so an add runs no `sv` command;
 an update runs `sv restart` and a removal `sv down` before unlinking. runit
 always restarts, so `restart = "no"` adds a `finish` running `sv down .` and
@@ -513,7 +516,7 @@ always restarts, so `restart = "no"` adds a `finish` running `sv down .` and
 directories in `~/.local/service`, scanned by `runsvdir` running as the system
 service `fspec-runsvdir-<user>` (`/etc/sv/fspec-runsvdir-<user>/run`, started
 with `chpst -u <user>`). The first user service creates it, so that first apply
-needs the privileges to write `/etc/sv` and `/var/service`; the runsvdir service
+needs the privileges to write `/etc/sv` and `/etc/runit`; the runsvdir service
 is not part of the user state and stays when the last user service goes.
 
 OpenRC services are `/etc/init.d/fspec-<name>` (`#!/sbin/openrc-run`) with
@@ -663,33 +666,79 @@ or void). The host's `system` must already declare the target distro, so edit
 `system =` to `void(...)` first and pass `--host` for that host; the command
 refuses any other host. Nothing is built from a second declaration. The root
 must be btrfs and `/home` must be its own subvolume, else the command stops
-before touching anything. It reads the bootloader through the runner
-(`bootctl is-installed`, else `/boot/grub2` or `/boot/grub`) and refuses a
-GRUB setup whose `/boot` is a separate filesystem. Then it:
+before touching anything. It reads the machine through the runner: the
+filesystems mounted at `/boot`, `/efi` and `/boot/efi`, the bootloader
+(systemd-boot when a mounted ESP holds `EFI/systemd`, else GRUB when
+`/boot/grub2`, `/boot/grub`, `grub2-mkconfig` or `grub-mkconfig` exists), and
+the firmware (EFI when `/sys/firmware/efi` exists, else BIOS and the disk under
+the root filesystem). Then it:
 
-1. Mounts the btrfs top level and refuses if `@<distro>` already exists.
+1. Mounts the btrfs top level and refuses if `@<distro>` already exists. Under
+   GRUB it also refuses unless the running root owns boot (see below). The
+   first switch on a machine records the running root as the owner.
 2. Creates the subvolume `@<distro>` and mounts it under `/run/fspec/switch/`.
 3. Bootstraps the base system from the running OS: `dnf --installroot` (needs
    `--release <n>`), `pacstrap -K`, `debootstrap` (`--release` is the suite,
-   default `stable`) or `xbps-install -r`.
-4. Writes the new root's `fstab` with `/` on `@<distro>` and `/home` on the
-   shared home subvolume, and copies `resolv.conf`.
+   default `stable`) or `xbps-install -r` (answering its repository key
+   prompt). Under GRUB the bootstrap includes the distro's GRUB packages for
+   the firmware (`grub-pc` or `grub-efi-amd64` on Debian, `grub2-pc` or
+   `grub2-efi-x64` with `grub2-tools` on Fedora, `grub` plus `efibootmgr` on
+   Arch, `grub` or `grub-x86_64-efi` on Void), so the new root can take boot
+   over later.
+4. Writes the new root's `fstab`: `/` on `@<distro>`, `/home` on the shared
+   home subvolume, and every filesystem mounted at `/boot`, `/efi` or
+   `/boot/efi`, whatever the bootloader. It copies `resolv.conf`.
 5. Applies the spec inside it. `--root` only logs commands, so the apply runs as
    `chroot <new root> fspec --spec <copy of the spec> apply --local --scope
    system --host <host>` with the running `fspec` and the spec directory copied
-   in, and the new distro's backends do the work. The binary must run in the
-   new root, so a glibc build does not suit a musl Void. The user scope applies
-   at first login there.
+   in, the shared `/home` bound in (so a declared user's home lands in it), and
+   a `PATH` with the `sbin` directories, which Arch's lacks. The new distro's
+   backends do the work. The binary must run in the new root, so it has to be
+   static: a glibc or nix-store build does not run in a fresh root. systemd
+   units are enabled without `--now`, which `systemctl` refuses in a chroot,
+   and then started, which it ignores there. The user scope applies at first
+   login.
 6. Copies the newest kernel and initramfs into `fspec/<distro>/` on the ESP
    (systemd-boot, with a `loader/entries/fspec-<distro>.conf`) or in `/boot`
    (GRUB, with an executable `/etc/grub.d/42_fspec_<distro>` and a regenerated
-   config). The kernel is copied once; a later kernel update inside the new
-   distro needs the copy repeated by hand.
-7. Unmounts, also after a failure.
+   config). The GRUB entry searches the filesystem that holds `/boot`: a
+   separate `/boot`, or the btrfs root with `/boot` under the running
+   subvolume. The kernel is copied once; a later kernel update inside the new
+   distro needs the copy repeated by hand. The entry keeps the running kernel's options
+   (`console=`, `net.ifnames=0`, extra `rootflags=`) with only the root
+   swapped, since the machine's serial and network setup can depend on them.
+7. Unmounts, also after a failure, and says to run `fspec switch --adopt-boot`
+   from the new root before forgetting the old one.
 
-Under `--root` the btrfs and bootloader probes are skipped and btrfs with
-systemd-boot on `/boot` is assumed, so the plan is logged to
+Under `--root` the probes are skipped and btrfs with systemd-boot on an ESP at
+`/boot` is assumed, with the rooted system owning boot, so the plan is logged to
 `<root>/var/log/fspec-commands.log` without running anything.
+
+### Who owns boot
+
+Exactly one root owns boot: its bootloader is the one the firmware starts. The
+owner is recorded as its subvolume (`/@void`, or `/` for the top level) and
+its kernel command line in `.fspec-boot-owner` on the btrfs top level, which
+every root can mount. `fspec
+plan`, run as root on a classic distro, prints which root owns boot.
+
+`fspec switch --adopt-boot`, run from the new root, makes it the owner and
+then records it:
+
+- systemd-boot: writes this root's entry on the ESP (kernel copied from its own
+  `/boot`), sets `default fspec-<distro>.conf` in `loader/loader.conf`, and runs
+  `bootctl set-default` where `bootctl` exists, since that EFI variable outranks
+  `loader.conf`. The previous owner's own entries stay as the fallback.
+- GRUB: `grub-install` (`grub2-install` on Fedora) to the ESP with
+  `--bootloader-id=fspec-<distro>` under EFI (Fedora's also gets `--force`,
+  since it bypasses shim), or to the boot sector of the root's disk under BIOS.
+  The previous owner's newest kernel is copied into this root's
+  `/boot/fspec/<distro>/` with a `42_fspec_<distro>` fallback entry booting its
+  subvolume with the kernel options recorded for it, and `grub-mkconfig`
+  writes this root's config.
+
+bootc roots keep bootupd as their bootloader owner; `--adopt-boot` refuses them
+for now and says so.
 
 `fspec switch --to-image` turns a classic machine into the host's bootc image
 with `podman run ... <locked image> bootc install to-existing-root
@@ -699,8 +748,14 @@ because the install reinitialises `/boot`.
 
 The old root stays bootable until `fspec forget <distro>` deletes it. It
 refuses the running distro and a root booted from `@<distro>`, and stops when
-that subvolume does not exist. It removes the boot entry and kernel copy, then
-runs `btrfs subvolume delete --recursive` on the subvolume, which takes every
+that subvolume does not exist. It is a hard refusal, not a warning, whenever
+the running root does not own boot, nothing records an owner, or the default
+systemd-boot entry boots `@<distro>`; the message says to run `fspec switch
+--adopt-boot` from the running root first. That way the bootloader never goes
+with a deleted root. It removes the boot entry and kernel copy (under GRUB,
+also from every other root, which keeps its own `grub.d` scripts and would list
+the deleted root once it adopts boot), then runs
+`btrfs subvolume delete --recursive` on the subvolume, which takes every
 leftover system file with it. All of these need root; every step is a pure
 planning function in `fspec-switch` that returns the command list.
 
@@ -727,9 +782,10 @@ distro, so the `system` block is where those names live.
 | `fspec orphans` | Unattributed app data |
 | `fspec watch` | Report drift live |
 | `fspec switch --distro d [--release r]` | Install another distro beside this one |
+| `fspec switch --adopt-boot` | Make the running root own boot, so the old one can be forgotten |
 | `fspec switch --reset-var` | Stage a reset of `/etc` and `/var` for the next boot of a bootc host |
 | `fspec switch --to-image --yes` | Convert a classic machine to the host's bootc image |
-| `fspec forget <distro>` | Delete an old distro root |
+| `fspec forget <distro>` | Delete an old distro root, from the root that owns boot |
 
 ## Remote hosts
 
@@ -789,7 +845,7 @@ A cargo workspace under `crates/`:
 | `fspec-pkgmgr` | Flatpak, Homebrew and the distro package backends (dnf, pacman, apt, xbps), and the base packages of a classic distro |
 | `fspec-os` | Services and timers per init (systemd, launchd, runit, OpenRC, dinit, s6, cron), users, macOS `defaults` |
 | `fspec-remote` | Remote hosts: ssh and tar command lines, the spec shipment, the probe check, `--all` ordering |
-| `fspec-switch` | `fspec switch` and `forget`: btrfs and bootloader detection, the command plans per distro, the `--reset-var` staging |
+| `fspec-switch` | `fspec switch` and `forget`: btrfs and bootloader detection, the boot owner record, the command plans per distro and for `--adopt-boot`, the `--reset-var` staging |
 | `fspec-build` | Source builds: recipe detection, the `.tar.zst` packer, the `ci packages` workflow, `update --cache` |
 | `fspec` | The CLI |
 

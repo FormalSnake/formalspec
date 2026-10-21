@@ -83,7 +83,7 @@ fn void_host() {
     assert!(read(&run, "etc/sv/fspec-oneshot/finish").contains("sv down ."));
     assert!(read(&run, "etc/sv/fspec-worker/run").contains("sv check ../fspec-web"));
     assert_eq!(
-        fs::read_link(run.root.path().join("var/service/fspec-web")).unwrap().to_str(),
+        fs::read_link(run.root.path().join("etc/runit/runsvdir/default/fspec-web")).unwrap().to_str(),
         Some("/etc/sv/fspec-web")
     );
     assert!(read(&run, "etc/sv/fspec-runsvdir-u/run").contains("runsvdir /home/u/.local/service"));

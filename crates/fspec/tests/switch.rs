@@ -90,6 +90,17 @@ fn to_image_needs_a_locked_image_and_then_runs_bootc() {
 }
 
 #[test]
+fn adopt_boot_logs_the_new_default_entry() {
+    let dir = setup();
+    let out = fspec(dir.path(), &["switch", "--adopt-boot", "--host", "void"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let lines = log(dir.path());
+    assert!(lines.iter().any(|l| l.ends_with("loader/entries/fspec-void.conf")), "{lines:?}");
+    assert!(lines.last().unwrap().ends_with("/run/fspec/switch/top"));
+    assert!(!fspec(dir.path(), &["switch", "--adopt-boot", "--host", "box"]).status.success());
+}
+
+#[test]
 fn forget_logs_the_delete_and_rejects_unknown_distros() {
     let dir = setup();
     assert!(fspec(dir.path(), &["forget", "arch"]).status.success());

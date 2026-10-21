@@ -124,8 +124,12 @@ enum Command {
     Switch {
         /// Bootstrap this distro into a new btrfs root subvolume. The host's `system` must already
         /// declare it.
-        #[arg(long, value_parser = fspec_switch::DISTROS, conflicts_with_all = ["reset_var", "to_image"])]
+        #[arg(long, value_parser = fspec_switch::DISTROS, conflicts_with_all = ["reset_var", "to_image", "adopt_boot"])]
         distro: Option<String>,
+        /// Make this root own boot: its entry becomes the default, or under GRUB it installs its
+        /// own GRUB with the previous owner as a fallback. `forget` needs it.
+        #[arg(long, conflicts_with_all = ["reset_var", "to_image"])]
+        adopt_boot: bool,
         /// Stage a reset of /etc and /var to the staged image's defaults for the next boot, keeping
         /// the host's `persist` paths.
         #[arg(long, conflicts_with = "to_image")]
@@ -243,7 +247,9 @@ fn main() -> Result<()> {
                 return plan_all(&spec, &paths, &spec_path, *dirty);
             }
             let host = named(&spec, host.as_deref())?;
-            let plan = match remote_alias(host, &local_hostname(), &paths, *local) {
+            let alias = remote_alias(host, &local_hostname(), &paths, *local);
+            let here = alias.is_none();
+            let plan = match alias {
                 Some(alias) => {
                     let remote = Remote {
                         runner: &LiveRunner,
@@ -262,6 +268,9 @@ fn main() -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&plan)?);
             } else {
                 println!("{plan}");
+                if let Some(line) = boot_line(&paths, host).filter(|_| here) {
+                    println!("{line}");
+                }
             }
             Ok(())
         }
@@ -432,8 +441,13 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
-        Command::Switch { distro, reset_var, to_image, host, release, yes } => {
-            let opts = Switch { distro: distro.as_deref(), reset_var: *reset_var, to_image: *to_image };
+        Command::Switch { distro, adopt_boot, reset_var, to_image, host, release, yes } => {
+            let opts = Switch {
+                distro: distro.as_deref(),
+                adopt_boot: *adopt_boot,
+                reset_var: *reset_var,
+                to_image: *to_image,
+            };
             let spec = fspec_eval::evaluate(&spec_path)?;
             let name = host.clone().unwrap_or_else(local_hostname);
             let host = spec.host(&name)?;
@@ -493,6 +507,7 @@ fn main() -> Result<()> {
 
 struct Switch<'a> {
     distro: Option<&'a str>,
+    adopt_boot: bool,
     reset_var: bool,
     to_image: bool,
 }
@@ -521,6 +536,18 @@ fn machine(paths: &Paths, runner: &dyn Runner) -> Result<fspec_switch::Machine> 
     if is_live(paths) { fspec_switch::detect(runner, paths) } else { Ok(fspec_switch::assumed()) }
 }
 
+/// A `--root` run cannot read the record, so it assumes the rooted system owns boot.
+fn owner(paths: &Paths, runner: &dyn Runner, m: &fspec_switch::Machine) -> Result<Option<fspec_switch::Owner>> {
+    if is_live(paths) {
+        return fspec_switch::boot_owner(runner, paths, m);
+    }
+    Ok(Some(fspec_switch::Owner {
+        subvol: m.root_subvol.clone(),
+        distro: m.running.clone(),
+        cmdline: m.cmdline.clone(),
+    }))
+}
+
 fn switch(paths: &Paths, spec_path: &Path, host: &Host, opts: &Switch, release: Option<&str>, yes: bool) -> Result<()> {
     let runner = switch_runner(paths)?;
     let spec_dir = spec_path.parent().context("spec has no parent directory")?;
@@ -545,13 +572,35 @@ fn switch(paths: &Paths, spec_path: &Path, host: &Host, opts: &Switch, release: 
             spec_file: &file_name(spec_path)?,
             exe: &exe,
         };
-        let plan = fspec_switch::switch_distro(paths, &machine(paths, runner.as_ref())?, &target)?;
+        let m = machine(paths, runner.as_ref())?;
+        let plan = fspec_switch::switch_distro(paths, &m, owner(paths, runner.as_ref(), &m)?.as_ref(), &target)?;
         run_plan(paths, runner.as_ref(), &plan)?;
         if live {
             println!(
-                "{distro} is installed in @{distro}: reboot and pick \"{}\" from the boot menu",
+                "{distro} is installed in @{distro}: reboot and pick \"{}\" from the boot menu. Run `fspec switch \
+                 --adopt-boot` there to hand boot over before you `fspec forget` this root",
                 fspec_switch::title(distro)
             );
+        }
+    } else if opts.adopt_boot {
+        if live && fspec_switch::is_bootc(runner.as_ref())? {
+            bail!(
+                "this is a bootc deployment, where bootupd owns the bootloader; switch --adopt-boot does not handle \
+                 bootc roots yet"
+            );
+        }
+        let m = machine(paths, runner.as_ref())?;
+        let arch = host.platform.split('-').next().unwrap_or_default();
+        // A rooted run has no os-release to read, so it names the root after the declared distro.
+        let here = match &host.system {
+            _ if !m.running.is_empty() => m.running.clone(),
+            Some(System::Distro(d)) => d.distro.clone(),
+            _ => bail!("could not tell which distro this root is from /etc/os-release or the host's system"),
+        };
+        let plan = fspec_switch::adopt_boot(paths, &m, owner(paths, runner.as_ref(), &m)?.as_ref(), &here, arch)?;
+        run_plan(paths, runner.as_ref(), &plan)?;
+        if live {
+            println!("this root ({}) owns boot now", m.root_subvol);
         }
     } else if opts.reset_var {
         let Some(System::Image(_)) = &host.system else { bail!("host {} has no image(...) system layer", host.name) };
@@ -584,14 +633,27 @@ fn switch(paths: &Paths, spec_path: &Path, host: &Host, opts: &Switch, release: 
         }
         run_plan(paths, runner.as_ref(), &fspec_switch::to_image(paths, &locked.image))?;
     } else {
-        bail!("pick one of --distro <distro>, --reset-var or --to-image");
+        bail!("pick one of --distro <distro>, --adopt-boot, --reset-var or --to-image");
     }
     Ok(())
 }
 
+/// Which root owns boot, for `plan` on a classic distro that `switch --distro` has run on. Reading
+/// the record mounts the btrfs top level, so only root sees it.
+fn boot_line(paths: &Paths, host: &Host) -> Option<String> {
+    if !is_live(paths) || !matches!(host.system, Some(System::Distro(_))) || !is_root(&LiveRunner).ok()? {
+        return None;
+    }
+    let m = fspec_switch::detect(&LiveRunner, paths).ok()?;
+    let o = fspec_switch::boot_owner(&LiveRunner, paths, &m).ok()??;
+    let here = if o.subvol == m.root_subvol { ", this root" } else { "" };
+    Some(format!("boot is owned by {} ({}{here})", o.subvol, o.distro))
+}
+
 fn forget(paths: &Paths, distro: &str) -> Result<()> {
     let runner = switch_runner(paths)?;
-    let plan = fspec_switch::forget(paths, &machine(paths, runner.as_ref())?, distro)?;
+    let m = machine(paths, runner.as_ref())?;
+    let plan = fspec_switch::forget(paths, &m, owner(paths, runner.as_ref(), &m)?.as_ref(), distro)?;
     run_plan(paths, runner.as_ref(), &plan)?;
     if is_live(paths) {
         println!("{distro} and its boot entry are deleted");

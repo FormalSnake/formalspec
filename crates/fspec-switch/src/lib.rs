@@ -1,6 +1,7 @@
 //! `fspec switch` and `fspec forget`. Each operation is a pure function that returns a [`Plan`]
 //! of commands; the CLI hands the plan to a [`Runner`], which under `--root` only logs it.
 
+mod adopt;
 mod bootc;
 mod classic;
 mod forget;
@@ -11,13 +12,19 @@ mod tests;
 use anyhow::{Result, bail};
 use fspec_core::runner::{Cmd, Runner};
 
+pub use adopt::adopt_boot;
 pub use bootc::{ResetVar, has_staged, is_bootc, reset_var, to_image};
 pub use classic::{Target, switch_distro, title};
 pub use forget::forget;
-pub use machine::{Bootloader, Machine, assumed, detect};
+pub use machine::{BootMount, Bootloader, Firmware, Machine, Owner, assumed, boot_owner, detect};
 
 /// The distros `fspec switch --distro` can bootstrap.
 pub const DISTROS: [&str; 4] = ["fedora", "arch", "debian", "void"];
+
+/// The runner could not start the program because it is not installed.
+pub(crate) fn not_installed(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<std::io::Error>().is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+}
 
 pub(crate) fn subvol(distro: &str) -> String {
     format!("@{distro}")

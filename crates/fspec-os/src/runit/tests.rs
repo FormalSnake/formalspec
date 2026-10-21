@@ -82,7 +82,7 @@ fn add_update_remove_command_sequences() {
     let w = World::linux(Init::Runit);
     let backends: &[&dyn Backend] = &[&RunitBackend];
     let dir = w.paths.root.join("etc/sv/fspec-web");
-    let link = w.paths.root.join("var/service/fspec-web");
+    let link = w.paths.root.join("etc/runit/runsvdir/default/fspec-web");
 
     apply_scope(&w.cx(Scope::System), backends, &[desired(web("no"))]).unwrap();
     assert!(dir.join("finish").exists());
@@ -92,11 +92,14 @@ fn add_update_remove_command_sequences() {
 
     apply_scope(&w.cx(Scope::System), backends, &[desired(web("always"))]).unwrap();
     assert!(!dir.join("finish").exists());
-    assert_eq!(w.runner.lines(), [sv(&w, "restart var/service/fspec-web")]);
+    assert_eq!(w.runner.lines(), [sv(&w, "restart etc/runit/runsvdir/default/fspec-web")]);
 
     w.runner.calls.lock().unwrap().clear();
     apply_scope(&w.cx(Scope::System), backends, &[]).unwrap();
-    assert_eq!(w.runner.lines(), [sv(&w, "down var/service/fspec-web"), format!("sv -v exit {}", dir.display())]);
+    assert_eq!(
+        w.runner.lines(),
+        [sv(&w, "down etc/runit/runsvdir/default/fspec-web"), format!("sv -v exit {}", dir.display())]
+    );
     assert!(!dir.exists() && fs::symlink_metadata(&link).is_err());
 }
 
@@ -108,7 +111,7 @@ fn first_user_service_declares_the_runsvdir_service() {
 
     let run = fs::read_to_string(w.paths.root.join("etc/sv/fspec-runsvdir-u/run")).unwrap();
     assert_eq!(run, "#!/bin/sh\nexec 2>&1\nexec chpst -u u env HOME=/home/u runsvdir /home/u/.local/service\n");
-    assert!(fs::symlink_metadata(w.paths.root.join("var/service/fspec-runsvdir-u")).is_ok());
+    assert!(fs::symlink_metadata(w.paths.root.join("etc/runit/runsvdir/default/fspec-runsvdir-u")).is_ok());
     assert!(w.paths.home.join(".local/service/fspec-syncthing/run").exists());
     assert_eq!(w.runner.lines(), ["id -un"]);
 

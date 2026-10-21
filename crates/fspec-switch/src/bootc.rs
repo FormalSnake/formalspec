@@ -100,7 +100,11 @@ pub fn reset_var(paths: &Paths, persist: &[String]) -> Result<ResetVar> {
 }
 
 fn bootc_status(runner: &dyn Runner) -> Result<Option<Value>> {
-    let out = runner.run(&Cmd::new("bootc").args(["status", "--json"]))?;
+    let out = match runner.run(&Cmd::new("bootc").args(["status", "--json"])) {
+        Ok(out) => out,
+        Err(e) if crate::not_installed(&e) => return Ok(None),
+        Err(e) => return Err(e),
+    };
     let text = out.stdout.trim();
     if out.status != 0 || text.is_empty() {
         return Ok(None);
