@@ -292,11 +292,13 @@ pub fn populate(distro: &str, arch: &str, boot: Boot, luks: bool) -> String {
         ));
         sh.push("export DEBIAN_FRONTEND=noninteractive".into());
         sh.push("apt-get update".into());
-        sh.push("apt-get full-upgrade -y".into());
+        // ukify and its kernel-install plugin come first: a kernel the upgrade installs without
+        // them gets 90-uki-copy.install's "missing .efi suffix" failure.
         sh.push(format!(
             "apt-get install -y --no-install-recommends {}",
             apt_packages(distro, arch, boot, luks).join(" ")
         ));
+        sh.push("apt-get full-upgrade -y".into());
         // debootstrap installs the kernel before initramfs-tools, so there may be no initramfs
         // to update yet.
         sh.push(each(
