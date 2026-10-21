@@ -1,6 +1,7 @@
 {
   lib,
   rustPlatform,
+  gitMinimal,
 }:
 
 let
@@ -21,6 +22,9 @@ rustPlatform.buildRustPackage {
   };
 
   cargoLock.lockFile = ../Cargo.lock;
+
+  # The installer's tests write the new system's spec repo with git.
+  nativeCheckInputs = [ gitMinimal ];
 
   meta = {
     description = "Declare your machines in Starlark and keep them identical";
