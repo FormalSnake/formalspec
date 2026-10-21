@@ -139,8 +139,9 @@ run fspec update"), at `apply` and as a drift note in `plan`.
 
 Fields on `pkg` for source builds: `patches`, `build_flags` (appended to the
 recipe's configure or build command), `build = ["sh", "-c", "…"]` (replaces
-recipe detection) and `bins = ["name", …]` (the executables to ship, by file
-name; default is every executable the recipe produced).
+recipe detection) and `bins = ["name", …]` (the executables to ship and link,
+by file name; default is every executable the recipe produced). `bins` works the
+same on prebuilt archives: it picks among the executables the store finds.
 
 **Recipes.** `fspec build` checks out the locked commit, applies the patches
 with `git apply`, then picks the first match: `Cargo.toml`, `meson.build`,
@@ -289,9 +290,17 @@ A generation is `generations/<n>/bin/`, symlinks into the store (relative, so a
 rooted tree stays movable). Each apply starts from the links of the generation
 `current` points at, applies only the changed packages, and renames a temp
 symlink over `current` last; the journal restores the old link if anything
-fails. Which executables get linked: the lock artifact's `bins` when set, else
-every executable regular file in the top two levels of the unpacked tree; for
-npm, the package's `bin` entries. Store directories are named
+fails. Which executables get linked: the lock artifact's `bins` when set; else,
+for a tree laid out as an install prefix (`bin/` at its root or in its single
+top-level directory, as FormalShell's `formalshell/bin/` and terminal-browser's
+`terminal-browser/bin/`), the executables in that `bin/`; else every executable
+regular file in the top two levels of the unpacked tree; for npm, the package's
+`bin` entries. A prefix keeps its private helpers in `lib/` or `libexec/`
+(FormalShell ships its own `matugen` there), so searching it deeper would link
+them over the real commands; `bin/` is where a prefix puts what it means to
+expose. `bins = ["name", …]` on the `pkg` then keeps only those commands, for an
+archive whose top levels hold more executables than commands (Discord's
+`files/` also holds `chrome_crashpad_handler`). Store directories are named
 `<hash8>-<name>-<version>`, never rewritten, and reused when present. An
 artifact is verified against its `sha256-` or `sha512-` SRI hash before
 anything is unpacked (`.tar.gz`, `.tar.xz`, `.tar.zst`, `.zip`, or a bare

@@ -369,6 +369,17 @@ fn bins_of(p: &Pkg, artifact: &Artifact, dir: &Path) -> Result<BTreeMap<String, 
         }
         bins
     };
+    if !p.bins.is_empty() {
+        let missing: Vec<&String> = p.bins.iter().filter(|b| !bins.contains_key(*b)).collect();
+        if !missing.is_empty() {
+            bail!(
+                "bins: {} not among its executables ({})",
+                missing.iter().map(|b| format!("`{b}`")).collect::<Vec<_>>().join(", "),
+                bins.keys().cloned().collect::<Vec<_>>().join(", ")
+            );
+        }
+        bins.retain(|name, _| p.bins.contains(name));
+    }
     for (name, target) in &p.links {
         let rel = bins.get(target).cloned().with_context(|| {
             format!(
@@ -381,8 +392,24 @@ fn bins_of(p: &Pkg, artifact: &Artifact, dir: &Path) -> Result<BTreeMap<String, 
     Ok(bins)
 }
 
-/// Every executable regular file in the top two levels, shallower ones winning name clashes.
+/// The executables of a tree the lock names none for. A tree laid out as an install prefix, with
+/// `bin/` at its root or in its single top-level directory, links what that `bin/` holds, so
+/// helpers under `lib/` or `libexec/` stay private. Any other tree links every executable regular
+/// file in its top two levels, shallower ones winning name clashes.
 fn discover(dir: &Path) -> BTreeMap<String, String> {
+    if let Some((bin, prefix)) = prefix_bin(dir) {
+        let mut bins = BTreeMap::new();
+        for entry in fs::read_dir(&bin).into_iter().flatten().flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') {
+                continue;
+            }
+            if fs::metadata(entry.path()).is_ok_and(|m| m.is_file() && is_executable(&m)) {
+                bins.insert(name.clone(), format!("{prefix}bin/{name}"));
+            }
+        }
+        return bins;
+    }
     let mut bins = BTreeMap::new();
     let mut level = vec![(dir.to_path_buf(), String::new())];
     for depth in 0..2 {
@@ -403,6 +430,18 @@ fn discover(dir: &Path) -> BTreeMap<String, String> {
         level = subdirs;
     }
     bins
+}
+
+/// `bin/` at the root of the tree or inside its only entry, with the path prefix that leads to it.
+fn prefix_bin(dir: &Path) -> Option<(PathBuf, String)> {
+    let is_dir = |p: &Path| fs::symlink_metadata(p).is_ok_and(|m| m.is_dir());
+    if is_dir(&dir.join("bin")) {
+        return Some((dir.join("bin"), String::new()));
+    }
+    let mut entries = fs::read_dir(dir).ok()?.flatten();
+    let (Some(only), None) = (entries.next(), entries.next()) else { return None };
+    let bin = only.path().join("bin");
+    is_dir(&bin).then(|| (bin, format!("{}/", only.file_name().to_string_lossy())))
 }
 
 fn is_executable(meta: &fs::Metadata) -> bool {

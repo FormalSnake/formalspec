@@ -273,6 +273,54 @@ fn artifact_bins_pick_the_links() {
     assert!(!w.root().join("current/bin/helper").exists());
 }
 
+fn with_fields(d: Desired, fields: serde_json::Value) -> Desired {
+    let mut v = serde_json::to_value(&d.resource).unwrap();
+    v.as_object_mut().unwrap().extend(fields.as_object().unwrap().clone());
+    Desired { resource: serde_json::from_value(v).unwrap(), owner: None }
+}
+
+fn lock_tool(w: &mut World, body: Vec<u8>) {
+    w.lock.upsert(locked("tool", "aqua:tool", "1.0.0", "https://example/tool.tar.gz", &body));
+    w.fetch = MapFetch::default().with("https://example/tool.tar.gz", body);
+}
+
+#[test]
+fn a_prefix_tree_links_its_bin_and_keeps_lib_private() {
+    let mut w = World::new();
+    lock_tool(
+        &mut w,
+        tgz(&[
+            ("formalshell/bin/formalshell", "#!/bin/sh\necho shell\n", 0o755),
+            ("formalshell/lib/formalshell/bin/matugen", "#!/bin/sh\necho private\n", 0o755),
+            ("formalshell/lib/formalshell/formalshell-rs", "#!/bin/sh\n", 0o755),
+            ("formalshell/share/formalshell/VERSION", "0.2.0", 0o644),
+        ]),
+    );
+    w.apply(&[aqua("tool")]).unwrap();
+    assert_eq!(w.run("formalshell"), "shell");
+    let linked: Vec<_> = fs::read_dir(w.root().join("current/bin")).unwrap().flatten().map(|e| e.file_name()).collect();
+    assert_eq!(linked, ["formalshell"]);
+}
+
+#[test]
+fn pkg_bins_pick_among_the_executables() {
+    let mut w = World::new();
+    lock_tool(
+        &mut w,
+        tgz(&[
+            ("files/Discord", "#!/bin/sh\necho discord\n", 0o755),
+            ("files/chrome_crashpad_handler", "#!/bin/sh\n", 0o755),
+            ("files/libffmpeg.so", "elf", 0o755),
+        ]),
+    );
+    w.apply(&[with_fields(aqua("tool"), json!({"bins": ["Discord"]}))]).unwrap();
+    assert_eq!(w.run("Discord"), "discord");
+    assert!(!w.root().join("current/bin/libffmpeg.so").exists());
+
+    let err = w.apply(&[with_fields(aqua("tool"), json!({"bins": ["discord"]}))]).unwrap_err();
+    assert!(format!("{err:#}").contains("bins: `discord` not among its executables (Discord, "), "{err:#}");
+}
+
 #[test]
 fn npm_without_dependencies_links_its_bin() {
     let mut w = World::new();

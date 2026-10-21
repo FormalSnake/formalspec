@@ -224,8 +224,8 @@ pub struct Pkg {
     /// `$FSPEC_OUT`, run with `$FSPEC_SRC` set to the patched checkout.
     #[serde(default)]
     pub build: Vec<String>,
-    /// Executables a source build packs at the top of its artifact, by file name. Empty: every
-    /// executable the recipe produced.
+    /// The commands to link, by file name: a source build packs only these, and any store
+    /// package links only these of the executables it found. Empty: all of them.
     #[serde(default)]
     pub bins: Vec<String>,
     /// More command names for one of the package's executables, for tools that act on the name
