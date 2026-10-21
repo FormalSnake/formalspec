@@ -1,0 +1,55 @@
+name: installer-iso
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to build (vX.Y.Z)
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ github.event.release.tag_name || inputs.tag }}
+
+jobs:
+  iso:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ env.TAG }}
+      - name: Check the tag against the workspace version
+        run: |
+          version=$(sed -n '/^\[workspace.package\]/,/^$/s/^version = "\(.*\)"/\1/p' Cargo.toml)
+          if [ "v$version" != "$TAG" ]; then
+            echo "tag $TAG does not match the workspace version $version" >&2
+            exit 1
+          fi
+      - name: Build the ISO
+        run: |
+          set -o pipefail
+          SOURCE_DATE_EPOCH=$(git log -1 --format=%ct) bash installer/iso/build.sh 2>&1 | tee build.log
+      - name: Install QEMU and OVMF
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-system-x86 qemu-utils ovmf
+      - name: Boot the ISO under Secure Boot
+        run: python3 installer/iso/boot-check.py installer/iso/out/*.iso serial.log
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: serial-log
+          path: serial.log
+          if-no-files-found: ignore
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd installer/iso/out
+          sha256sum *.iso > SHA256SUMS
+          gh release upload "$TAG" ./*.iso SHA256SUMS "$GITHUB_WORKSPACE/build.log" --clobber --repo "$GITHUB_REPOSITORY"
