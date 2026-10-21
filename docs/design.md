@@ -393,8 +393,9 @@ the lock.
 A name ending in `.so` is a shared object under the library directory instead:
 `lib("gstreamer-1.0/libgstlibav.so")` for a plugin that is loaded at runtime
 and ships no pkg-config module. dnf installs it by path (`/usr/lib64/...`),
-zypper, apt, pacman and xbps find it in their file index, and moss, which
-installs by provider only, records a miss.
+zypper by the soname every RPM provides (`libgstlibav.so()(64bit)`, since its
+file index lists only bin and etc), apt, pacman and xbps find it in their file
+index, and moss, which installs by provider only, records a miss.
 
 dnf, zypper and moss resolve capabilities themselves, so the lock holds the
 capability. The file-index lookups run in a container of that distro (debian,

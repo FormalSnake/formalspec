@@ -180,8 +180,7 @@ pub fn resolve(devs: &BTreeMap<String, Dev>, old: &Lock, r: &Resolver) -> Result
                 })
                 .collect(),
             "zypper" => {
-                let (libs, bins): (Vec<&Want>, Vec<&Want>) =
-                    ws.iter().partition(|w| w.kind == Kind::Lib && !is_so(&w.native.name));
+                let (libs, bins): (Vec<&Want>, Vec<&Want>) = ws.iter().partition(|w| w.kind == Kind::Lib);
                 let mut a: BTreeMap<String, Answer> = BTreeMap::new();
                 for w in libs {
                     a.insert(id(w), Answer::Pkg(capability(manager, w)));
@@ -261,6 +260,8 @@ fn id(w: &Want) -> String {
 fn capability(manager: &str, w: &Want) -> String {
     let n = &w.native.name;
     match (manager, w.kind) {
+        // openSUSE's file index lists only bin and etc paths; every package provides its sonames.
+        ("zypper", Kind::Lib) if is_so(n) => format!("{}()(64bit)", n.rsplit('/').next().unwrap_or(n)),
         (_, Kind::Lib) if is_so(n) => format!("{}/{n}", libdir(manager)),
         (_, Kind::Lib) => format!("pkgconfig({n})"),
         ("moss", Kind::Bin) => format!("binary({n})"),
@@ -299,8 +300,7 @@ fn query(manager: &str, w: &Want) -> String {
         (_, Kind::Lib) if is_so(n) => match manager {
             "apt" => format!("apt-file search -x '/{e}$'"),
             "pacman" => format!("pacman -F --machinereadable '{base}'"),
-            "xbps" => format!("xlocate '/usr/lib/{n}'"),
-            _ => format!("zypper -n -q se --file-list --match-exact '/usr/lib64/{n}'"),
+            _ => format!("xlocate '/usr/lib/{n}'"),
         },
         ("apt", Kind::Lib) => format!("apt-file search -x '/pkgconfig/{e}\\.pc$'"),
         ("apt", Kind::Bin) => format!("apt-file search -x '^/(usr/)?s?bin/{e}$'"),
