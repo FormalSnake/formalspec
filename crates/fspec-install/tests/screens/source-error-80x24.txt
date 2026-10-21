@@ -1,0 +1,24 @@
+  FormalSpec      Language · Source · Host · Disk · Account · Review · Install
+  ────────────────────────────────────────────────────────────────────────────
+
+  Where is your spec?
+
+  Spec repository
+  ▌ git@example.com:fail/spec.git
+
+  Sign in with
+   Nothing   SSH key   Access token
+
+
+    Clone
+
+  Unable to clone.
+  Check the URL and how you signed in, then try again.
+  fatal: repository 'git@example.com:fail/spec.git' not found
+
+
+
+
+
+
+  Tab Next field  ←→ Sign-in method  Enter Clone  Esc Back

@@ -1,0 +1,40 @@
+  FormalSpec installer                                    Language · Source · Host · Disk · Account · Review · Install
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+  Where is your spec?                                                 ╭─ spec.star ──────────────────────────────────╮
+                                                                      │  # This machine's spec. `fspec plan` shows   │
+  Spec repository                                                     │      what a change would do, `fspec apply`   │
+    git@github.com:you/spec.git                                       │      makes it so.                            │
+                                                                      │                                              │
+  Sign in with                                                        │  hosts = [                                   │
+   Nothing   SSH key   Access token                                   │      host(                                   │
+                                                                      │          platform = "x86_64-linux",          │
+  Key file                                                            │          locale = "en_US.UTF-8",             │
+    /root/.ssh/id_ed25519                                             │          keymap = "us",                      │
+                                                                      │          timezone = "UTC",                   │
+                                                                      │          protect = ["/home"],                │
+    Clone                                                             │      ),                                      │
+                                                                      │  ]                                           │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      ╰──────────────────────────────────────────────╯
+  Tab Next field  ←→ Sign-in method  Enter Clone  Esc Back

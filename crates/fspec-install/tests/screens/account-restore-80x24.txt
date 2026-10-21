@@ -1,0 +1,24 @@
+  FormalSpec      Language · Source · Host · Disk · Account · Review · Install
+  ────────────────────────────────────────────────────────────────────────────
+
+  Set a password for kyan
+  Passwords are never stored in your spec.
+
+  Password
+  ▌
+
+  Confirm password
+
+
+
+
+
+
+
+
+
+
+
+
+
+  Tab Next field  Enter Continue  Esc Back

@@ -1,0 +1,24 @@
+  FormalSpec    Language · Disk · System · Preset · Account · Review · Install
+  ────────────────────────────────────────────────────────────────────────────
+
+  ✓ Fedora is installed.
+  Remove the installer USB, then restart.
+
+    Restart now      Open a shell
+
+  ✓ Configure locale and time zone
+  ✓ Install the FormalSpec tools
+  ✓ Apply your spec
+  ✓ Set your password
+  ✓ Build the kernels
+  ✓ Install the bootloader
+
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Step 12 of 12                                                          00:00
+
+  Log
+
+  [12/12] install the bootloader (1/3)
+  [12/12] install the bootloader (2/3)
+  [12/12] install the bootloader (3/3)
+  ←→ Choose  Enter Select

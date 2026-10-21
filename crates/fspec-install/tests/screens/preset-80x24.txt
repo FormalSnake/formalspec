@@ -1,0 +1,24 @@
+  FormalSpec    Language · Disk · System · Preset · Account · Review · Install
+  ────────────────────────────────────────────────────────────────────────────
+
+  Choose a preset for Fedora
+
+    Minimal
+    A console system with networking and sudo. Add the rest in your spec.
+
+  ▌ Desktop
+  ▌ GNOME or KDE Plasma with a browser, audio, printing and Flatpak.
+
+    Gaming
+    The desktop plus Steam, Proton, GameMode and MangoHud.
+
+    Server
+    SSH, a firewall and automatic security updates. No desktop.
+
+    Desktop   GNOME   KDE Plasma
+
+
+
+
+
+  ↑↓ Move  ←→ Desktop  Enter Continue  Esc Back  ? Keys  s Spec

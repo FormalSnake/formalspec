@@ -1,0 +1,24 @@
+  FormalSpec      Language · Source · Host · Disk · Account · Review · Install
+  ────────────────────────────────────────────────────────────────────────────
+
+  Where is your spec?
+
+  Spec repository
+  ▌ git@github.com:you/spec.git
+
+  Sign in with
+   Nothing   SSH key   Access token
+
+
+    Clone
+
+
+
+
+
+
+
+
+
+
+  Tab Next field  ←→ Sign-in method  Enter Clone  Esc Back

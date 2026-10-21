@@ -1,0 +1,24 @@
+  FormalSpec    Language · Disk · System · Preset · Account · Review · Install
+  ────────────────────────────────────────────────────────────────────────────
+
+  Create your account
+
+  Your name
+    Kyan de Sutter
+
+  Login name
+    kyan
+
+  Computer name
+    kyan-fedora
+
+  Password
+  ▌ •••••
+    Use at least 8 characters.
+  Confirm password
+
+    The passwords do not match.
+
+
+
+  Tab Next field  Enter Continue  Esc Back

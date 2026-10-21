@@ -1,0 +1,40 @@
+  FormalSpec installer                                  Language · Disk · System · Preset · Account · Review · Install
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+  Choose a preset for Fedora                                          ╭─ spec.star ──────────────────────────────────╮
+                                                                      │  # This machine's spec. `fspec plan` shows   │
+    Minimal                                                           │      what a change would do, `fspec apply`   │
+    A console system with networking and sudo. Add the rest in        │      makes it so.                            │
+    your spec.                                                        │  load("//modules/desktop.star", "modules",   │
+                                                                      │      "system")                               │
+  ▌ Desktop                                                           │                                              │
+  ▌ GNOME or KDE Plasma with a browser, audio, printing and           │  hosts = [                                   │
+  ▌ Flatpak.                                                          │      host(                                   │
+                                                                      │          platform = "x86_64-linux",          │
+    Gaming                                                            │          locale = "en_US.UTF-8",             │
+    The desktop plus Steam, Proton, GameMode and MangoHud.            │          keymap = "us",                      │
+                                                                      │          timezone = "UTC",                   │
+    Server                                                            │          system = system("fedora", desktop = │
+    SSH, a firewall and automatic security updates. No desktop.       │              "gnome"),                       │
+                                                                      │          modules = modules("fedora", desktop │
+    Desktop   GNOME   KDE Plasma                                      │              = "gnome"),                     │
+                                                                      │          protect = ["/home"],                │
+                                                                      │      ),                                      │
+                                                                      │  ]                                           │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      ╰──────────────────────────────────────────────╯
+  ↑↓ Move  ←→ Desktop  Enter Continue  Esc Back  ? Keys

@@ -37,12 +37,11 @@ fn admin_group(distro: &str) -> &'static str {
     }
 }
 
-/// `spec.star` for `draft`, with the parts not chosen yet left out.
+/// `spec.star` for `draft`, with the parts not chosen yet left out. A restore shows the cloned one.
 pub fn preview(d: &Draft) -> String {
     let mut out = String::from(HEADER);
-    if let Some(SystemChoice::Restore { url, host, .. }) = &d.system {
-        out.push_str(&format!("# Installing host {host} from {url}, as that repo declares it.\n"));
-        return out;
+    if let Some(SystemChoice::Restore { checkout, .. }) = &d.system {
+        return std::fs::read_to_string(checkout.join("spec.star")).unwrap_or(out);
     }
     let fresh = match &d.system {
         Some(SystemChoice::Fresh { distro, preset, desktop }) => Some((*distro, preset.id(), desktop.map(|d| d.id()))),

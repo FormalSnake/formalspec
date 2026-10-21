@@ -1,0 +1,40 @@
+  FormalSpec installer                                  Language · Disk · System · Preset · Account · Review · Install
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+  Choose a system                                                     ╭─ spec.star ──────────────────────────────────╮
+                                                                      │  # This machine's spec. `fspec plan` shows   │
+  ▌ Fedora              fixed    systemd  signed kernel    classic    │      what a change would do, `fspec apply`   │
+    Bazzite             fixed    systemd  signed kernel    image      │      makes it so.                            │
+    Fedora Atomic       fixed    systemd  signed kernel    image      │  load("//modules/minimal.star", "modules",   │
+    Aurora              fixed    systemd  signed kernel    image      │      "system")                               │
+    Arch Linux          rolling  systemd  unsigned kernel  classic    │                                              │
+    CachyOS             rolling  systemd  unsigned kernel  classic    │  hosts = [                                   │
+    Ubuntu              fixed╭────────────────────────────────────────────────────────────╮                          │
+    Debian              fixed│                                                            │ "x86_64-linux",          │
+    Void Linux          rolli│  Keys                                                      │en_US.UTF-8",             │
+    Void Linux (musl)   rolli│                                                            │us",                      │
+                             │  ↑↓  j k           Move in a list                          │ "UTC",                   │
+  Fedora                     │  PgUp PgDn         Move by a page                          │ystem("fedora"),          │
+  Current software every six │  Home End          First or last row                       │modules("fedora"),        │
+  Secure Boot and anti-cheat │  Tab  Shift+Tab    Move between fields                     │["/home"],                │
+                             │  Space             Toggle a switch                         │                          │
+  fixed            New versio│  ←→                Change a choice or a number             │                          │
+                   upgrade to│  Enter             Continue                                │                          │
+  systemd          Services s│  Esc               Back                                    │                          │
+  signed kernel    Boots with│  s                 Show or hide the spec                   │                          │
+                   checks ker│  Ctrl+C            Quit                                    │                          │
+  classic          The packag│                                                            │                          │
+                   btrfs snap│                                                            │                          │
+                             ╰────────────────────────────────────────────────────────────╯                          │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      ╰──────────────────────────────────────────────╯
+  ↑↓ Move  Enter Continue  Esc Back  ? Keys

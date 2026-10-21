@@ -1,0 +1,40 @@
+  FormalSpec installer                                  Language · Disk · System · Preset · Account · Review · Install
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+  Create your account                                                 ╭─ spec.star ──────────────────────────────────╮
+                                                                      │  # This machine's spec. `fspec plan` shows   │
+  Your name                                                           │      what a change would do, `fspec apply`   │
+    Kyan de Sutter                                                    │      makes it so.                            │
+                                                                      │  load("//modules/minimal.star", "modules",   │
+                                                                      │      "system")                               │
+  Login name                                                          │                                              │
+    kyan                                                              │  hosts = [                                   │
+                                                                      │      host(                                   │
+                                                                      │          name = "kyan-fedora",               │
+  Computer name                                                       │          platform = "x86_64-linux",          │
+    kyan-fedora                                                       │          locale = "en_US.UTF-8",             │
+                                                                      │          keymap = "us",                      │
+                                                                      │          timezone = "UTC",                   │
+  Password                                                            │          system = system("fedora"),          │
+  ▌ •••••                                                             │          modules = modules("fedora"),        │
+    Use at least 8 characters.                                        │          users = [user("kyan", uid = 1000,   │
+                                                                      │              groups = ["wheel"])],           │
+  Confirm password                                                    │          protect = ["/home"],                │
+                                                                      │      ),                                      │
+    The passwords do not match.                                       │  ]                                           │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      ╰──────────────────────────────────────────────╯
+  Tab Next field  Enter Continue  Esc Back

@@ -1,0 +1,40 @@
+  FormalSpec installer                                  Language · Disk · System · Preset · Account · Review · Install
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+  Review                                                              ╭─ spec.star ──────────────────────────────────╮
+                                                                      │  # This machine's spec. `fspec plan` shows   │
+  1  Language   English (United States) · us · UTC           Change   │      what a change would do, `fspec apply`   │
+  2  Disk       Samsung SSD 980 PRO (1 TB) · 4 GB swap       Change   │      makes it so.                            │
+  3  System     Fedora · Minimal                             Change   │  load("//modules/minimal.star", "modules",   │
+  4  Account    Kyan de Sutter (kyan) on kyan-fedora         Change   │      "system")                               │
+                                                                      │                                              │
+    ●━━  Use Secure Boot with your own keys                           │  hosts = [                                   │
+                                                                      │      host(                                   │
+    Erase /dev/nvme0n1 and install                                    │          name = "kyan-fedora",               │
+                             ╭────────────────────────────────────────────────────────────╮ "x86_64-linux",          │
+                             │                                                            │en_US.UTF-8",             │
+                             │  Erase Samsung SSD 980 PRO?                                │us",                      │
+                             │                                                            │ "UTC",                   │
+                             │  Everything on /dev/nvme0n1 will be deleted. Type          │ystem("fedora"),          │
+                             │  /dev/nvme0n1 to confirm.                                  │modules("fedora"),        │
+                             │                                                            │ser("kyan", uid = 1000,   │
+                             │  Device                                                    │ = ["wheel"])],           │
+                             │  ▌ /dev/nvme                                               │["/home"],                │
+                             │                                                            │                          │
+                             │                                                            │                          │
+                             │    Erase and install      Cancel                           │                          │
+                             │                                                            │                          │
+                             ╰────────────────────────────────────────────────────────────╯                          │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      ╰──────────────────────────────────────────────╯
+  1-4 Change  Space Toggle  Tab Next  Enter Install  Esc Back

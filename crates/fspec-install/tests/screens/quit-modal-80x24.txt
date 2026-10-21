@@ -1,0 +1,24 @@
+  FormalSpec    Language · Disk · System · Preset · Account · Review · Install
+  ────────────────────────────────────────────────────────────────────────────
+
+  Choose a disk
+
+  ▌ Samsung SSD 980 PRO    1 TB   nvme  Windows (ntfs), EFI (vfat)
+    WD Blue SA510        500 GB   sata  Empty
+    SanDi╭────────────────────────────────────────────────────────────╮
+         │                                                            │
+         │  Quit the installer?                                       │
+   EFI 2 │                                                            │
+         │  Nothing has been written to the disk yet.                 │
+    Every│                                                            │
+         │    Quit      Keep installing                               │
+    ●━━  │                                                            │
+    Swap ╰────────────────────────────────────────────────────────────╯
+
+
+
+
+
+
+
+  ↑↓ Move  Space Encrypt  r Rescan  Enter Continue  Esc Back  ? Keys  s Spec

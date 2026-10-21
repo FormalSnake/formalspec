@@ -1,0 +1,24 @@
+  FormalSpec      Language · Source · Host · Disk · Account · Review · Install
+  ────────────────────────────────────────────────────────────────────────────
+
+  Choose a host
+
+  ▌ framework           x86_64-linux       fedora   kyan
+    macbook             macOS hosts are not installed from this ISO
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ↑↓ Move  Enter Continue  Esc Back  ? Keys  s Spec

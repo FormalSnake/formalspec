@@ -1,0 +1,24 @@
+  FormalSpec    Language · Disk · System · Preset · Account · Review · Install
+  ────────────────────────────────────────────────────────────────────────────
+
+  Language                        Keyboard           Time zone
+  Type to filter                  Type to filter     Type to filter
+
+  ▌ English (United States)       ▌ us               ▌ UTC
+    English (United Kingdom)        uk                 Europe/Amsterdam
+    Deutsch (Deutschland)           de                 Europe/Berlin
+    Français (France)               de-latin1          Europe/Brussels
+    Español (España)                fr                 Europe/Copenhagen
+    Italiano (Italia)               fr-latin9          Europe/Dublin
+    Nederlands (Nederland)          es                 Europe/Helsinki
+    Português (Brasil)              it                 Europe/Lisbon
+    Polski (Polska)                 nl                 Europe/London
+    Svenska (Sverige)               pt-latin1          Europe/Madrid
+    日本語 (日本)                   br-abnt2           Europe/Paris
+    Русский (Россия)                pl2                Europe/Rome
+                                    se-lat6            Europe/Stockholm
+
+  Test your keyboard
+    Type here
+
+  ↑↓ Move  Tab Next column  Enter Continue  Esc Back  ? Keys

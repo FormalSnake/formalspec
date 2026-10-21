@@ -1,0 +1,40 @@
+  FormalSpec installer                                  Language · Disk · System · Preset · Account · Review · Install
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+  Language                   Keyboard        Time zone                ╭─ spec.star ──────────────────────────────────╮
+  Type to filter             Type to filter  Type to filter           │  # This machine's spec. `fspec plan` shows   │
+                                                                      │      what a change would do, `fspec apply`   │
+  ▌ English (United States)  ▌ us            ▌ UTC                    │      makes it so.                            │
+    English (United Kingdo…    uk              Europe/Amsterdam       │                                              │
+    Deutsch (Deutschland)      de              Europe/Berlin          │  hosts = [                                   │
+    Français (France)          de-latin1       Europe/Brussels        │      host(                                   │
+    Español (España)           fr              Europe/Copenhagen      │          platform = "x86_64-linux",          │
+    Italiano (Italia)          fr-latin9       Europe/Dublin          │          locale = "en_US.UTF-8",             │
+    Nederlands (Nederland)     es              Europe/Helsinki        │          keymap = "us",                      │
+    Português (Brasil)         it              Europe/Lisbon          │          timezone = "UTC",                   │
+    Polski (Polska)            nl              Europe/London          │          protect = ["/home"],                │
+    Svenska (Sverige)          pt-latin1       Europe/Madrid          │      ),                                      │
+    日本語 (日本)              br-abnt2        Europe/Paris           │  ]                                           │
+    Русский (Россия)           pl2             Europe/Rome            │                                              │
+                               se-lat6         Europe/Stockholm       │                                              │
+                               no              Europe/Warsaw          │                                              │
+                               dk              Europe/Moscow          │                                              │
+                               fi              America/New_York       │                                              │
+                               ru              America/Chicago        │                                              │
+                               cz              America/Denver         │                                              │
+                               us-dvorak       America/Los_Angeles    │                                              │
+                               us-colemak      America/Sao_Paulo      │                                              │
+                                               America/Toronto        │                                              │
+                                               Asia/Tokyo             │                                              │
+                                               Asia/Seoul             │                                              │
+                                               Asia/Shanghai          │                                              │
+                                               Asia/Singapore         │                                              │
+                                               Asia/Kolkata           │                                              │
+                                               Asia/Dubai             │                                              │
+                                               Australia/Sydney       │                                              │
+                                               Pacific/Auckland       │                                              │
+                                                                      │                                              │
+  Test your keyboard                                                  │                                              │
+    Type here                                                         │                                              │
+                                                                      ╰──────────────────────────────────────────────╯
+  ↑↓ Move  Tab Next column  Enter Continue  Esc Back  ? Keys

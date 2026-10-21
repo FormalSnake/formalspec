@@ -1,0 +1,40 @@
+  FormalSpec installer                                    Language · Source · Host · Disk · Account · Review · Install
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+  Set a password for kyan                                             ╭─ spec.star ──────────────────────────────────╮
+  Passwords are never stored in your spec.                            │  load("//modules/cli.star", "cli")           │
+                                                                      │  load("//modules/desktop.star", "desktop")   │
+  Password                                                            │                                              │
+  ▌                                                                   │  def machine(name, platform, system, extra = │
+                                                                      │      []):                                    │
+                                                                      │      return host(                            │
+  Confirm password                                                    │          name = name,                        │
+                                                                      │          platform = platform,                │
+                                                                      │          system = system,                    │
+                                                                      │          users = [user("kyan", uid = 1000,   │
+                                                                      │              shell = "fish")],               │
+                                                                      │          modules = [cli] + extra,            │
+                                                                      │      )                                       │
+                                                                      │                                              │
+                                                                      │  hosts = [                                   │
+                                                                      │      machine("framework", "x86_64-linux",    │
+                                                                      │          fedora(packages =                   │
+                                                                      │          ["NetworkManager"]), [desktop]),    │
+                                                                      │      machine("macbook", "aarch64-darwin",    │
+                                                                      │          None),                              │
+                                                                      │  ]                                           │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      ╰──────────────────────────────────────────────╯
+  Tab Next field  Enter Continue  Esc Back

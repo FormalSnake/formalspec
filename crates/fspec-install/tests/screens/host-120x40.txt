@@ -1,0 +1,40 @@
+  FormalSpec installer                                    Language · Source · Host · Disk · Account · Review · Install
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+  Choose a host                                                       ╭─ spec.star ──────────────────────────────────╮
+                                                                      │  # This machine's spec. `fspec plan` shows   │
+  ▌ framework           x86_64-linux       fedora   kyan              │      what a change would do, `fspec apply`   │
+    macbook             macOS hosts are not installed from this ISO   │      makes it so.                            │
+                                                                      │                                              │
+                                                                      │  hosts = [                                   │
+                                                                      │      host(                                   │
+                                                                      │          platform = "x86_64-linux",          │
+                                                                      │          locale = "en_US.UTF-8",             │
+                                                                      │          keymap = "us",                      │
+                                                                      │          timezone = "UTC",                   │
+                                                                      │          protect = ["/home"],                │
+                                                                      │      ),                                      │
+                                                                      │  ]                                           │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      ╰──────────────────────────────────────────────╯
+  ↑↓ Move  Enter Continue  Esc Back  ? Keys

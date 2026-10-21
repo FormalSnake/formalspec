@@ -1,0 +1,40 @@
+  FormalSpec installer                                  Language · Disk · System · Preset · Account · Review · Install
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+  Installing Fedora                                          Log
+  Keep the machine powered on.
+                                                             sgdisk --new=1:0:0 /dev/nvme0n1
+  ✓ Partition the disk                                       The operation has completed successfully.
+  ✓ Format the partitions                                    sgdisk --new=2:0:0 /dev/nvme0n1
+  ⠧ Set up LUKS2                                             The operation has completed successfully.
+    9 more steps                                             sgdisk --new=3:0:0 /dev/nvme0n1
+                                                             The operation has completed successfully.
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Step 3 of 12                                       01:23
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  Installing. This cannot be interrupted.

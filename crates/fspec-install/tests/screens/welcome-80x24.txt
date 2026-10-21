@@ -1,0 +1,24 @@
+  FormalSpec    Language · Disk · System · Preset · Account · Review · Install
+  ────────────────────────────────────────────────────────────────────────────
+
+      ▄▄▄▄▄▄                             ▀▀█     ▄▄▄▄
+      █       ▄▄▄    ▄ ▄▄  ▄▄▄▄▄   ▄▄▄     █    █▀   ▀ ▄▄▄▄    ▄▄▄    ▄▄▄
+      █▄▄▄▄▄ █▀ ▀█   █▀  ▀ █ █ █  ▀   █    █    ▀█▄▄▄  █▀ ▀█  █▀  █  █▀  ▀
+      █      █   █   █     █ █ █  ▄▀▀▀█    █        ▀█ █   █  █▀▀▀▀  █
+      █      ▀█▄█▀   █     █ █ █  ▀▄▄▀█    ▀▄▄  ▀▄▄▄█▀ ██▄█▀  ▀█▄▄▀  ▀█▄▄▀
+                                                       █
+                                                       ▀
+
+
+      Install a Linux system that FormalSpec manages from its first boot.
+
+
+        ▌
+        ▌  Install a new system
+        ▌  Pick a distro and a preset. The installer writes the spec
+        ▌  for you.
+
+
+           Restore from git
+           Install a machine exactly as an existing spec declares it.
+  ←→ Choose  Enter Continue  Esc Quit  ? Keys

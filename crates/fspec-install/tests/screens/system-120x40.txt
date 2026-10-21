@@ -1,0 +1,40 @@
+  FormalSpec installer                                  Language · Disk · System · Preset · Account · Review · Install
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+  Choose a system                                                     ╭─ spec.star ──────────────────────────────────╮
+                                                                      │  # This machine's spec. `fspec plan` shows   │
+    Fedora              fixed    systemd  signed kernel    classic    │      what a change would do, `fspec apply`   │
+    Bazzite             fixed    systemd  signed kernel    image      │      makes it so.                            │
+  ▌ Fedora Atomic       fixed    systemd  signed kernel    image      │  load("//modules/desktop.star", "modules",   │
+    Aurora              fixed    systemd  signed kernel    image      │      "system")                               │
+    Arch Linux          rolling  systemd  unsigned kernel  classic    │                                              │
+    CachyOS             rolling  systemd  unsigned kernel  classic    │  hosts = [                                   │
+    Ubuntu              fixed    systemd  signed kernel    classic    │      host(                                   │
+    Debian              fixed    systemd  signed kernel    classic    │          platform = "x86_64-linux",          │
+    Void Linux          rolling  runit    unsigned kernel  classic    │          locale = "en_US.UTF-8",             │
+    Void Linux (musl)   rolling  runit    unsigned kernel  classic    │          keymap = "us",                      │
+                                                                      │          timezone = "UTC",                   │
+  Fedora Atomic                                                       │          system = system("fedora-atomic",    │
+  Fedora as an image: updates land whole and the previous one stays   │              desktop = "gnome"),             │
+  in the boot menu.                                                   │          modules = modules("fedora-atomic",  │
+                                                                      │              desktop = "gnome"),             │
+  fixed            New versions arrive in scheduled releases you      │          protect = ["/home"],                │
+                   upgrade to.                                        │      ),                                      │
+  systemd          Services start with systemd, as on most distros.   │  ]                                           │
+  signed kernel    Boots with Secure Boot on, and anti-cheat that     │                                              │
+                   checks kernel signatures trusts it.                │                                              │
+  image            The system is a bootc image: updates apply         │                                              │
+                   whole, and the previous image stays bootable.      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      │                                              │
+                                                                      ╰──────────────────────────────────────────────╯
+  ↑↓ Move  Enter Continue  Esc Back  ? Keys

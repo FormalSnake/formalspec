@@ -1,0 +1,40 @@
+  FormalSpec installer                                  Language · Disk · System · Preset · Account · Review · Install
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+  The install stopped during set up LUKS2.                   Log
+  cryptsetup luksFormat exited with status 1: Device
+  /dev/nvme0n1p2 is still in use.                            sgdisk --new=1:0:0 /dev/nvme0n1
+  The full log is at /var/log/fspec-install.log.             The operation has completed successfully.
+                                                             sgdisk --new=2:0:0 /dev/nvme0n1
+    Try again      Open a shell                              The operation has completed successfully.
+                                                             sgdisk --new=3:0:0 /dev/nvme0n1
+  ✓ Partition the disk                                       The operation has completed successfully.
+  ✓ Format the partitions
+  ✗ Set up LUKS2
+
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Step 3 of 12                                       00:00
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ←→ Choose  Enter Select
