@@ -204,10 +204,18 @@ pub struct DiskInfo {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Progress {
     /// A new stage started. `index` counts from 0 up to `total`.
-    Stage { index: usize, total: usize, title: String },
+    Stage {
+        index: usize,
+        total: usize,
+        title: String,
+    },
     /// A line a command printed.
     Output(String),
     Done,
     /// The install stopped. `log` holds every command and its output.
-    Failed { stage: String, error: String, log: PathBuf },
+    Failed {
+        stage: String,
+        error: String,
+        log: PathBuf,
+    },
 }
