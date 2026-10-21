@@ -10,7 +10,7 @@ use std::io::stdout;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind, MouseEventKind};
@@ -42,6 +42,10 @@ pub fn run(be: Arc<dyn Backend>, checkout: PathBuf) -> Result<Exit> {
     result
 }
 
+/// How long after start the size is polled, while the session settles into its final size.
+const SETTLE: Duration = Duration::from_secs(3);
+const SETTLE_POLL: Duration = Duration::from_millis(100);
+
 fn event_loop(
     term: &mut ratatui::DefaultTerminal,
     be: Arc<dyn Backend>,
@@ -67,14 +71,28 @@ fn event_loop(
     let size = term.size()?;
     let mut app = App::new(be.clone(), theme, !reduced_motion(), checkout, (size.width, size.height), Instant::now());
     let mut drawn = false;
+    let started = Instant::now();
+    let mut seen = size;
     loop {
         let now = Instant::now();
+        // foot goes fullscreen after the installer has started, and that first resize can land
+        // before the event thread listens, so the size is also compared on every wake.
+        let size = term.size()?;
+        if size != seen {
+            seen = size;
+            app.handle(Input::Resize(size.width, size.height), now);
+        }
         term.draw(|f| app.render(f.buffer_mut(), now))?;
         if !drawn {
             drawn = true;
             be.shown();
         }
-        let first = match app.next_wake(now) {
+        let settling = (now.duration_since(started) < SETTLE).then_some(SETTLE_POLL);
+        let wake = match (app.next_wake(now), settling) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        let first = match wake {
             Some(d) => match rx.recv_timeout(d) {
                 Ok(i) => i,
                 Err(RecvTimeoutError::Timeout) => Input::Tick,
