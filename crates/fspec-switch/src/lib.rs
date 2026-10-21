@@ -11,6 +11,7 @@ mod machine;
 mod recipe;
 #[cfg(test)]
 mod tests;
+mod tumbleweed;
 
 use anyhow::{Result, bail};
 use fspec_core::runner::{Cmd, Runner};
@@ -21,8 +22,11 @@ pub use bootc::{ResetVar, has_staged, is_bootc, reset_var, to_image};
 pub use classic::{Target, switch_distro, title};
 pub use disk::*;
 pub use forget::forget;
-pub use machine::{Btrfs, Facts, Firmware, Layout, Machine, Part, assumed, boot_owner, classify, detect};
+pub use machine::{
+    Btrfs, Facts, Firmware, Layout, Machine, Part, assumed, boot_owner, classify, detect, detect_device,
+};
 pub use recipe::{Recipe, caveats, misfit, recipe};
+pub use tumbleweed::{TUMBLEWEED_IMAGE, Tumbleweed, tumbleweed};
 
 /// The distros `fspec switch --distro` can bootstrap.
 pub const DISTROS: [&str; 6] = ["fedora", "arch", "debian", "ubuntu", "void", "aerynos"];

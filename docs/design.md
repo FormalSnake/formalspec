@@ -1172,6 +1172,55 @@ Making the new root the default is a separate step. Use `preferred
 which skip an entry with no tries left. `default` does not skip it, so a bad
 entry there boots again and again.
 
+For a host that declares `tumbleweed()`, `fspec switch --beside <name>`
+without `--to-image` bootstraps openSUSE Tumbleweed into `@<name>` the same
+way, at the snapshot `fspec.lock` pins (`[zypper.<host>]`). From a live
+system, `--device <btrfs partition> --inherit @<root>` names the filesystem
+and the root whose identity it keeps, and an ESP that is not mounted is
+mounted for the run. zypper runs from the official
+`registry.opensuse.org/opensuse/tumbleweed` container, pinned by digest, as
+`zypper --root /mnt --gpg-auto-import-keys install --no-recommends` against
+the mounted subvolume, so Tumbleweed's own rpm writes the rpmdb; the live
+system needs only podman and the network; zypper runs at idle CPU and I/O
+priority. The root gets the same
+`fspec-oss` and `fspec-non-oss` repos and `fspec_snapshot` variable that
+`fspec apply` keeps, so its first apply sees no drift. It gets the minimal
+base pattern with zypper itself (the pattern leaves it to recommends, which
+the bootstrap skips), `kernel-default`, `kernel-firmware-all`, NetworkManager,
+openssh, sudo, the `wheel` group, tailscale, power-profiles-daemon, snapper
+with its zypp plugin and zram-generator. `fspec-power-saver.service` picks
+the power-saver profile on the first boot.
+Swap is zram, not the other root's swapfile, which a Tumbleweed boot would
+overwrite while that root is hibernated. `snapper create-config /` puts
+`.snapshots` in a subvolume nested in `@<name>`, so the snapshots stay with
+the root and every zypper transaction takes a pre and post snapshot. Booting
+a snapshot (`snapper rollback`) needs the root to be the btrfs default
+subvolume, which stays the top level here, so snapshots are for diffing and
+undoing changes, not for booting.
+
+The initrd is dracut's generic one with the btrfs module, built in the
+container where host-only detection would see the wrong machine, from the
+options in `/etc/kernel/cmdline`: `root=UUID=<fs>
+rootflags=subvol=@<name>,noatime,compress=zstd:1 rw panic=10 rd.shell=0
+rd.emergency=reboot` and the `console=` options of the inherited root's
+entries. `/etc/fspec/esp-sync.sh` copies each installed kernel to
+`<esp>/<name>/<kernel version>/linux` and its initrd to `initrd` beside it,
+and writes `<esp>/loader/entries/<name>-<kernel version>+3.conf`; a rewrite
+keeps the counter, and the kernels zypper removed go. While an entry still
+counts tries, its options mask `emergency.target`, `emergency.service`,
+`rescue.target` and `rescue.service`, so a trial boot that fails a mount goes
+on to sshd degraded instead of waiting offline at a shell. A drop-in runs the
+sync right after `systemd-bless-boot`, which rewrites the now blessed entry
+without them, so a blessed root gets its emergency shell back. sdbootutil is not used:
+it unlinks entries it cannot parse and manages the default entry and the EFI
+boot order. A libzypp commit plugin runs the sync after every transaction,
+once the kernel scriptlets have rebuilt the initrds, and
+`fspec-esp-sync.service` runs it at boot. The guard, the deadline timer and
+the watchdog are the bootc root's, except that the guard waits for tailscale
+only when the inherited root had tailscale state: tailscaled writes a state
+file of its own before anyone logs in, so the install leaves
+`/etc/fspec/needs-tailscale` instead.
+
 The old root stays bootable until `fspec forget <distro>` deletes it. It
 refuses the running distro and the root it booted from, and stops when that
 root does not exist. It is a hard refusal, not a warning, whenever the running
@@ -1269,6 +1318,7 @@ shim are unverified.
 | `fspec switch --reset-var` | Stage a reset of `/etc` and `/var` for the next boot of a bootc host |
 | `fspec switch --to-image --yes` | Convert a classic machine to the host's bootc image |
 | `fspec switch --to-image --beside <name> [--inherit @<root>]` | Install the host's bootc image into `@<name>` beside this root |
+| `fspec switch --beside <name> [--device <part>] [--inherit @<root>]` | Bootstrap the host's `tumbleweed()` into `@<name>` beside the other roots |
 | `fspec forget <distro>` | Delete an old distro root, from the root that owns boot |
 | `fspec disk plan [device]` | Steps that bring a disk onto a supported layout |
 | `fspec disk migrate [device]` | Run the in-place steps of `disk plan` |

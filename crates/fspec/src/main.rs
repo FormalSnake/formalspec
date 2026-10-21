@@ -138,9 +138,10 @@ enum Command {
         /// Convert this classic system to the bootc image the host declares (destructive).
         #[arg(long)]
         to_image: bool,
-        /// With --to-image, install the image into a new subvolume @<NAME> beside this root
-        /// instead, booted by the systemd-boot already on the ESP. Nothing else on the disk changes.
-        #[arg(long, value_name = "NAME", requires = "to_image")]
+        /// Install into a new subvolume @<NAME> beside the other roots, booted by the systemd-boot
+        /// already on the ESP: the host's image with --to-image, else the host's tumbleweed() at
+        /// the snapshot fspec.lock pins. Nothing else on the disk changes.
+        #[arg(long, value_name = "NAME")]
         beside: Option<String>,
         /// With --beside, the subvolume whose ssh host keys, network connections, tailscale state
         /// and users the new root keeps, default the running root.
@@ -148,8 +149,13 @@ enum Command {
         inherit: Option<String>,
         /// With --beside, pull the locked digest from this plain-HTTP registry repository instead.
         /// The new root still updates from the locked repository's `:latest`.
-        #[arg(long, value_name = "REPOSITORY", requires = "beside")]
+        #[arg(long, value_name = "REPOSITORY", requires_all = ["beside", "to_image"])]
         pull_from: Option<String>,
+        /// With --beside and no --to-image, the btrfs partition to install on when this system
+        /// does not run from it, as from a live system. --inherit then names the root to take the
+        /// identity from.
+        #[arg(long, value_name = "DEVICE", requires = "inherit", conflicts_with = "to_image")]
+        device: Option<String>,
         #[arg(long)]
         host: Option<String>,
         /// Fedora release number or Debian suite to bootstrap.
@@ -523,7 +529,19 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
-        Command::Switch { distro, adopt_boot, reset_var, to_image, beside, inherit, pull_from, host, release, yes } => {
+        Command::Switch {
+            distro,
+            adopt_boot,
+            reset_var,
+            to_image,
+            beside,
+            inherit,
+            pull_from,
+            device,
+            host,
+            release,
+            yes,
+        } => {
             let opts = Switch {
                 distro: distro.as_deref(),
                 adopt_boot: *adopt_boot,
@@ -532,6 +550,7 @@ fn main() -> Result<()> {
                 beside: beside.as_deref(),
                 inherit: inherit.as_deref(),
                 pull_from: pull_from.as_deref(),
+                device: device.as_deref(),
             };
             let spec = fspec_eval::evaluate(&spec_path)?;
             let name = host.clone().unwrap_or_else(local_hostname);
@@ -590,6 +609,7 @@ struct Switch<'a> {
     beside: Option<&'a str>,
     inherit: Option<&'a str>,
     pull_from: Option<&'a str>,
+    device: Option<&'a str>,
 }
 
 /// Commands run for real only on a live root; under `--root` they are logged.
@@ -675,6 +695,40 @@ fn switch(paths: &Paths, spec_path: &Path, host: &Host, opts: &Switch, release: 
         run_plan(paths, runner.as_ref(), &reset.plan)?;
         if live {
             println!("/etc and /var reset at the next boot; remove /var/lib/fspec/reset-var/pending to cancel");
+        }
+    } else if let (Some(name), false) = (opts.beside, opts.to_image) {
+        let tumbleweed = matches!(&host.system, Some(System::Distro(d)) if d.distro == "opensuse-tumbleweed");
+        if !tumbleweed {
+            bail!("--beside installs the host's image with --to-image, or a host that declares tumbleweed()");
+        }
+        let lock = Lock::load(&spec_dir.join("fspec.lock"))?;
+        let Some(snapshot) = lock.zypper.get(&host.name).map(|z| z.snapshot.as_str()) else {
+            bail!("fspec.lock pins no Tumbleweed snapshot for host {}; run `fspec update`", host.name)
+        };
+        let m = match opts.device {
+            Some(device) if live => {
+                fspec_switch::detect_device(runner.as_ref(), paths, device, opts.inherit.unwrap_or_default())?
+            }
+            None if live => fspec_switch::detect(runner.as_ref(), paths)?,
+            _ => fspec_switch::assumed(&host.name),
+        };
+        let inherit = match opts.inherit {
+            Some(i) => i.to_string(),
+            None => m.root.trim_start_matches('/').to_string(),
+        };
+        let t = fspec_switch::Tumbleweed {
+            name,
+            snapshot,
+            inherit: &inherit,
+            users: host.users.iter().map(|u| u.name.clone()).collect(),
+        };
+        run_plan(paths, runner.as_ref(), &fspec_switch::tumbleweed(paths, &m, &t)?)?;
+        if live {
+            println!(
+                "openSUSE Tumbleweed {snapshot} is installed in @{name} beside {inherit}. Boot it once with \
+                 `bootctl set-oneshot {name}-<kernel>.conf` (`bootctl list` shows the entry); it is blessed only once \
+                 sshd, and tailscale when it has state, are up, and otherwise the next boot is the default again"
+            );
         }
     } else if opts.to_image {
         let Some(System::Image(_)) = &host.system else { bail!("host {} has no image(...) system layer", host.name) };

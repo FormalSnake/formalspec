@@ -122,9 +122,9 @@ done
 "#;
 
 /// systemd-boot sets it when it boots an entry that still counts tries.
-const COUNTING: &str = "/sys/firmware/efi/efivars/LoaderBootCountPath-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f";
+pub(crate) const COUNTING: &str = "/sys/firmware/efi/efivars/LoaderBootCountPath-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f";
 
-fn esp_mount(esp: &Part) -> String {
+pub(crate) fn esp_mount(esp: &Part) -> String {
     let what =
         if esp.partuuid.is_empty() { format!("UUID={}", esp.uuid) } else { format!("PARTUUID={}", esp.partuuid) };
     format!(
@@ -169,7 +169,7 @@ WantedBy=multi-user.target
     )
 }
 
-fn guard_service() -> String {
+pub(crate) fn guard_service() -> String {
     format!(
         "[Unit]
 Description=Hold the boot blessing until sshd and tailscale are up (fspec)
@@ -190,7 +190,7 @@ RequiredBy=boot-complete.target
     )
 }
 
-fn deadline_timer() -> String {
+pub(crate) fn deadline_timer() -> String {
     format!(
         "[Unit]
 Description=Reboot a boot that is not blessed in ten minutes (fspec)
@@ -221,7 +221,7 @@ ExecStart=/bin/sh -c 'exec /usr/lib/systemd/systemd-bless-boot good'
     )
 }
 
-const DEADLINE_SERVICE: &str = "[Unit]
+pub(crate) const DEADLINE_SERVICE: &str = "[Unit]
 Description=Reboot a boot that is not blessed in ten minutes (fspec)
 
 [Service]
@@ -230,25 +230,21 @@ ExecStart=/bin/sh -c 'systemctl is-active -q systemd-bless-boot.service || syste
 ";
 
 /// The mount options of every btrfs subvolume the new root mounts.
-const BTRFS_OPTS: &str = "noatime,compress=zstd:1";
+pub(crate) const BTRFS_OPTS: &str = "noatime,compress=zstd:1";
 
-const WATCHDOG: &str = "[Manager]
+pub(crate) const WATCHDOG: &str = "[Manager]
 RuntimeWatchdogSec=60s
 ";
 
 /// Gives the new root the identity of the root at `$1`: its ssh host keys, NetworkManager
-/// connections and tailscale state, and the users named after `$5` with their uid, gid, gecos,
+/// connections and tailscale state, and the users named after `$6` with their uid, gid, gecos,
 /// home and password hash, their shell found again in the new root, and their memberships of the
-/// groups the new root has. `$2` is the new root's sysroot, `$3` its stateroot, `$4` an fstab line
-/// for the shared home or empty. Nothing it copies is printed.
+/// groups the new root has. `$2` is the new root's `/usr` parent, `$3` and `$4` its `/etc` and
+/// `/var`, `$5` an fstab line for the shared home or empty. Nothing it copies is printed.
 pub(crate) const INHERIT: &str = r#"set -eu
 umask 077
-src=$1 sysroot=$2 stateroot=$3 home=$4
-shift 4
-set -- "$sysroot/ostree/deploy/$stateroot"/deploy/*/etc "$@"
-deploy=${1%/etc}
-shift
-etc=$deploy/etc var=$sysroot/ostree/deploy/$stateroot/var
+src=$1 root=$2 etc=$3 var=$4 home=$5
+shift 5
 
 for k in "$src"/etc/ssh/ssh_host_*; do
 	[ -f "$k" ] || continue
@@ -270,7 +266,8 @@ if [ -d "$src/var/lib/tailscale" ]; then
 fi
 if [ -n "$home" ]; then
 	touch "$etc/fstab"
-	grep -q '[[:space:]]/var/home[[:space:]]' "$etc/fstab" || printf '%s\n' "$home" >>"$etc/fstab"
+	at=$(printf '%s\n' "$home" | cut -d' ' -f2)
+	grep -q "[[:space:]]$at[[:space:]]" "$etc/fstab" || printf '%s\n' "$home" >>"$etc/fstab"
 fi
 
 # The line of $1 in the colon-separated file $2, or nothing.
@@ -312,7 +309,7 @@ for u in "$@"; do
 	EOF
 	login=/bin/bash
 	for d in /usr/bin /usr/sbin /bin; do
-		if [ -x "$deploy$d/${shell##*/}" ]; then login=$d/${shell##*/}; break; fi
+		if [ -x "$root$d/${shell##*/}" ]; then login=$d/${shell##*/}; break; fi
 	done
 	put "$u" "$etc/passwd" "$name:x:$uid:$gid:$gecos:$dir:$login"
 	sh=$(line "$u" "$src/etc/shadow")
@@ -321,7 +318,7 @@ for u in "$@"; do
 		if [ "$id" = "$gid" ]; then primary=$g; else primary=; fi
 		case ",$members," in *",$u,"*) ;; *) [ -n "$primary" ] || continue ;; esac
 		have=$(line "$g" "$etc/group")
-		[ -n "$have" ] || have=$(line "$g" "$deploy/usr/lib/group")
+		[ -n "$have" ] || have=$(line "$g" "$root/usr/lib/group")
 		if [ -n "$primary" ]; then
 			# The primary group only has to exist, under the source's gid.
 			[ -n "$have" ] || put "$g" "$etc/group" "$g:x:$gid:"
@@ -339,6 +336,18 @@ for u in "$@"; do
 		fi
 	done <"$src/etc/group"
 done
+"#;
+
+/// Runs [`INHERIT`], given as `$1`, on the one ostree deployment in the stateroot `$4` of the
+/// sysroot `$3`, whose directory is named after its commit and so only exists once bootc ran.
+const OSTREE_INHERIT: &str = r#"set -eu
+script=$1 src=$2 sysroot=$3 stateroot=$4 home=$5
+shift 5
+state=$sysroot/ostree/deploy/$stateroot
+set -- "$state"/deploy/*/etc "$@"
+etc=$1
+shift
+exec sh -c "$script" sh "$src" "${etc%/etc}" "$etc" "$state/var" "$home" "$@"
 "#;
 
 /// Labels what the install wrote with the image's own SELinux policy, since the running root may
@@ -364,10 +373,17 @@ fn carried(cmdline: &str) -> Vec<&str> {
 }
 
 /// The mounted ESP systemd-boot reads its entries from, and where it is mounted.
-fn esp(m: &Machine) -> Option<(&Part, &str)> {
+pub(crate) fn esp(m: &Machine) -> Option<(&Part, &str)> {
     m.parts.iter().filter(|p| p.parttype == ESP_TYPE).find_map(|p| {
         ["/efi", "/boot/efi", "/boot"].into_iter().find(|t| p.mounts.iter().any(|at| at == t)).map(|t| (p, t))
     })
+}
+
+pub(crate) fn valid_name(name: &str) -> Result<()> {
+    if name.is_empty() || !name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()) {
+        bail!("`{name}` cannot name a root; use lowercase letters and digits");
+    }
+    Ok(())
 }
 
 /// What `switch --to-image --beside` installs.
@@ -407,9 +423,7 @@ fn in_image(root: &str, image: &str) -> Cmd {
 /// the EFI variables stay as they are.
 pub fn beside(paths: &Paths, m: &Machine, b: &Beside) -> Result<Plan> {
     let distro = b.distro;
-    if distro.is_empty() || !distro.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()) {
-        bail!("`{distro}` cannot name a root; use lowercase letters and digits");
-    }
+    valid_name(distro)?;
     if m.firmware != Firmware::Efi {
         bail!("this machine booted through BIOS; --beside boots the image through systemd-boot on the ESP");
     }
@@ -536,7 +550,7 @@ pub fn beside(paths: &Paths, m: &Machine, b: &Beside) -> Result<Plan> {
     };
     plan.run(
         Cmd::new("sh")
-            .args(["-c", INHERIT, "sh", &source, &root, STATEROOT, &fstab])
+            .args(["-c", OSTREE_INHERIT, "sh", INHERIT, &source, &root, STATEROOT, &fstab])
             .args(b.users.iter().map(String::as_str)),
     );
     if home.starts_with('@') {

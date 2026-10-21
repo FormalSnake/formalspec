@@ -3,7 +3,7 @@ use std::path::Path;
 use std::process::{Command, Output};
 
 use fspec_core::Lock;
-use fspec_core::lock::LockedSystem;
+use fspec_core::lock::{LockedSystem, LockedZypper};
 
 const SPEC: &str = r#"
 hosts = [
@@ -17,6 +17,12 @@ hosts = [
         name = "void",
         platform = "x86_64-linux",
         system = void(packages = ["base-system"]),
+    ),
+    host(
+        name = "tw",
+        platform = "x86_64-linux",
+        system = tumbleweed(),
+        users = [user("kyan", uid = 1000)],
     ),
 ]
 "#;
@@ -103,6 +109,23 @@ fn to_image_beside_installs_into_a_new_subvolume() {
     assert!(lines.iter().any(|l| l.ends_with("/run/fspec/switch/top/@fedora")));
     assert!(!lines.iter().any(|l| l.contains("to-existing-root") || l.contains("loader.conf")));
     assert!(!fspec(dir.path(), &["switch", "--to-image", "--inherit", "@nixos", "--host", "box"]).status.success());
+}
+
+#[test]
+fn beside_bootstraps_tumbleweed_at_the_locked_snapshot() {
+    let dir = setup();
+    let args = ["switch", "--beside", "tumbleweed", "--inherit", "@nixos", "--host", "tw"];
+    let out = fspec(dir.path(), &args);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("pins no Tumbleweed snapshot for host tw"));
+    let mut lock = Lock::default();
+    lock.zypper.insert("tw".into(), LockedZypper { snapshot: "20261020".into() });
+    lock.save(&dir.path().join("fspec.lock")).unwrap();
+    let out = fspec(dir.path(), &args);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let lines = log(dir.path());
+    assert!(lines.iter().any(|l| l.contains(" 20261020 fspec_snapshot patterns-base-minimal_base ")), "{lines:?}");
+    assert!(lines.iter().any(|l| l.ends_with("/run/fspec/switch/top/@tumbleweed")));
+    assert!(!lines.iter().any(|l| l.contains("loader.conf")));
 }
 
 #[test]
