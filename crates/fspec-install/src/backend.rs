@@ -23,4 +23,6 @@ pub trait Backend: Send + Sync {
     fn preview(&self, draft: &Draft) -> String;
     /// Run the install, reporting on `tx` until `Progress::Done` or `Progress::Failed`. Blocks.
     fn install(&self, choices: &Choices, tx: Sender<Progress>);
+    /// The first screen is on the terminal.
+    fn shown(&self) {}
 }

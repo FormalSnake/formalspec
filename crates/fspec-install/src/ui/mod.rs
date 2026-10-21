@@ -65,10 +65,15 @@ fn event_loop(
         }
     });
     let size = term.size()?;
-    let mut app = App::new(be, theme, !reduced_motion(), checkout, (size.width, size.height), Instant::now());
+    let mut app = App::new(be.clone(), theme, !reduced_motion(), checkout, (size.width, size.height), Instant::now());
+    let mut drawn = false;
     loop {
         let now = Instant::now();
         term.draw(|f| app.render(f.buffer_mut(), now))?;
+        if !drawn {
+            drawn = true;
+            be.shown();
+        }
         let first = match app.next_wake(now) {
             Some(d) => match rx.recv_timeout(d) {
                 Ok(i) => i,

@@ -285,6 +285,11 @@ impl Backend for Live {
         spec::preview(draft)
     }
 
+    /// The ISO's boot check waits for this line on the serial console.
+    fn shown(&self) {
+        let _ = std::fs::write("/dev/kmsg", "<6>fspec-install: first screen\n");
+    }
+
     fn install(&self, c: &Choices, tx: Sender<Progress>) {
         let log = install::log_path();
         let planned = fspec_switch::new_ids().and_then(|ids| self.plan(c, &ids));
