@@ -128,11 +128,18 @@ fn bootstrap_line(distro: &str, grub: bool) -> String {
     let root = format!("/r/run/fspec/switch/{distro}");
     let pkgs = |p: &str| if grub { format!(" {p}") } else { String::new() };
     match distro {
-        "fedora" => format!(
-            "dnf --installroot {root} --releasever 42 -y --setopt=install_weak_deps=False install systemd dnf \
-             fedora-release passwd btrfs-progs kernel{}",
-            pkgs("grub2-tools grub2-pc")
-        ),
+        "fedora" => {
+            let mirror = "https://download.fedoraproject.org/pub/fedora/linux";
+            let key = "https://src.fedoraproject.org/rpms/fedora-repos/raw/rawhide/f/RPM-GPG-KEY-fedora-42-primary";
+            format!(
+                "dnf --installroot {root} --releasever 42 -y --setopt=install_weak_deps=False \
+                 --repofrompath=fedora,{mirror}/releases/42/Everything/x86_64/os --setopt=fedora.gpgcheck=1 \
+                 --setopt=fedora.gpgkey={key} --repofrompath=updates,{mirror}/updates/42/Everything/x86_64 \
+                 --setopt=updates.gpgcheck=1 --setopt=updates.gpgkey={key} install systemd dnf fedora-release \
+                 fedora-repos passwd btrfs-progs kernel{}",
+                pkgs("grub2-tools grub2-pc")
+            )
+        }
         "arch" => format!("pacstrap -K {root} base linux linux-firmware btrfs-progs{}", pkgs("grub")),
         "debian" => format!(
             "debootstrap --arch amd64 --include=systemd-sysv,btrfs-progs,linux-image-amd64{} 42 {root}",

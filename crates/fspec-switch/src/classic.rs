@@ -84,11 +84,41 @@ fn bootstrap(t: &Target, m: &Machine, root: &str) -> Result<Vec<Cmd>> {
     Ok(match t.distro {
         "fedora" => {
             let Some(rel) = t.release else { bail!("fedora needs --release <number>, the Fedora release to install") };
+            // dnf reads repositories from the installroot, which has none yet, so they are named here.
+            // Arch's dnf is dnf 4 and Fedora's is dnf5; both take these options.
+            let mirror = "https://download.fedoraproject.org/pub/fedora/linux";
+            let key = format!(
+                "https://src.fedoraproject.org/rpms/fedora-repos/raw/rawhide/f/RPM-GPG-KEY-fedora-{rel}-primary"
+            );
+            let mut dnf = Cmd::new("dnf").args([
+                "--installroot",
+                root,
+                "--releasever",
+                rel,
+                "-y",
+                "--setopt=install_weak_deps=False",
+            ]);
+            for (id, path) in [
+                ("fedora", format!("releases/{rel}/Everything/{arch}/os")),
+                ("updates", format!("updates/{rel}/Everything/{arch}")),
+            ] {
+                dnf = dnf
+                    .arg(format!("--repofrompath={id},{mirror}/{path}"))
+                    .arg(format!("--setopt={id}.gpgcheck=1"))
+                    .arg(format!("--setopt={id}.gpgkey={key}"));
+            }
             vec![
-                Cmd::new("dnf")
-                    .args(["--installroot", root, "--releasever", rel, "-y", "--setopt=install_weak_deps=False"])
-                    .args(["install", "systemd", "dnf", "fedora-release", "passwd", "btrfs-progs", "kernel"])
-                    .args(&grub),
+                dnf.args([
+                    "install",
+                    "systemd",
+                    "dnf",
+                    "fedora-release",
+                    "fedora-repos",
+                    "passwd",
+                    "btrfs-progs",
+                    "kernel",
+                ])
+                .args(&grub),
             ]
         }
         "arch" => {
