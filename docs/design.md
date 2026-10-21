@@ -1002,3 +1002,54 @@ distros; bootc and `fspec switch` have not.
 
 Steps 1 to 4 replace a home-manager setup on a single machine and are the
 point where FormalSpec becomes usable day to day.
+
+## First release
+
+v0.1 is the release that replaces NixOS on the g815 and the e1504g. The design
+session decides when it is ready, and every item below is required.
+
+Both hosts boot through UEFI with Secure Boot off, from an ext4 root
+(`/dev/nvme0n1p5` on the g815, `/dev/nvme0n1p2` on the e1504g) and a 1 GB EFI
+partition mounted at `/boot`. The g815 also dual-boots Windows: NTFS partitions
+p3, p4 and p6 share the NVMe, and Windows' boot entry lives on the same EFI
+partition. The current configuration is `~/.config/nix`, which the port reads
+and never edits.
+
+1. **Parity port.** `examples/kyan/` holds a spec that reproduces both Linux
+   hosts from `~/.config/nix`:
+   - Bazzite: nvidia on the g815, plain on the e1504g;
+   - Hyprland with its Lua config, FormalShell built from git, and the matugen
+     templates;
+   - user autostart services, Flatpaks and Steam;
+   - asusd, tuned and the gpu-mux service;
+   - syncthing, docker, tailscale and nordvpn;
+   - the agenix secrets as `secret()`;
+   - the qylock greeter, and librepods with its patches;
+   - the fish, ssh and herdr configs, and the sudo mesh (`pam_ssh_agent_auth`);
+   - the Windows boot entry, kept.
+
+   Every gap is listed in the example, and none is left unexplained.
+2. **In-place migration from NixOS on ext4.** Tested in a VM on a NixOS ext4
+   disk image laid out like these hosts. The g815 case adds NTFS neighbours and
+   a Windows EFI entry. Booted once from the ISO, since a mounted root cannot be
+   converted:
+   - `btrfs-convert` turns the root into btrfs;
+   - NixOS moves into `@nixos`;
+   - Bazzite is installed beside it;
+   - NixOS and Windows stay working boot entries.
+
+   The 1 GB EFI partition is accepted with a warning, not refused.
+3. **Rollback, proven in the VM.** A bad apply rolls back, a bad image boots the
+   previous deployment, and NixOS still boots from the menu.
+4. **Remote convergence.** `fspec apply --all` from the macbook converges both
+   Linux hosts over ssh, and `fspec plan --all` shows no drift afterwards.
+5. **CI is green.** It runs the tests, builds the ISO on release, opens a nightly
+   `fspec update` PR, and keeps the OCI cache for patched packages (librepods,
+   FormalShell).
+6. **A recovery page** in the docs covers how to boot back into NixOS and how to
+   undo the migration.
+
+Rollout starts once 1 to 6 pass. The e1504g goes first, keeping NixOS as a
+fallback boot entry, for two weeks of daily use. The g815 follows. `fspec forget
+nixos` runs only after Kyan says so. Neither host's real disks are touched
+before the design session gives the go.
