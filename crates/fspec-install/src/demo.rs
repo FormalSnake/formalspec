@@ -29,6 +29,7 @@ pub struct DemoBackend {
     clone_delay: Duration,
     stage_delay: Duration,
     fail_at: Option<usize>,
+    efi: bool,
 }
 
 impl DemoBackend {
@@ -40,16 +41,23 @@ impl DemoBackend {
             clone_delay: Duration::from_millis(1500),
             stage_delay: Duration::from_millis(1700),
             fail_at: fail.then_some(5),
+            efi: true,
         }
     }
 
     /// No delays, for tests.
     pub fn instant() -> Self {
-        DemoBackend { clone_delay: Duration::ZERO, stage_delay: Duration::ZERO, fail_at: None }
+        DemoBackend { clone_delay: Duration::ZERO, stage_delay: Duration::ZERO, fail_at: None, efi: true }
     }
 
     pub fn with_stage_delay(mut self, d: Duration) -> Self {
         self.stage_delay = d;
+        self
+    }
+
+    /// A machine that booted with BIOS.
+    pub fn bios(mut self) -> Self {
+        self.efi = false;
         self
     }
 
@@ -121,7 +129,7 @@ impl Backend for DemoBackend {
     }
 
     fn firmware(&self) -> Firmware {
-        Firmware { efi: true, setup_mode: true, secure_boot_on: false }
+        Firmware { efi: self.efi, setup_mode: self.efi, secure_boot_on: false }
     }
 
     fn locales(&self) -> Vec<(String, String)> {

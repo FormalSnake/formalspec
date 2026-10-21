@@ -85,6 +85,8 @@ pub struct Distro {
     pub based_on: Option<&'static str>,
     /// Its developers call it alpha: not ready for a machine you depend on.
     pub alpha: bool,
+    /// Installs only on the UEFI layouts, never the BIOS one.
+    pub needs_efi: bool,
     pub presets: &'static [Preset],
     /// The desktops its desktop and gaming presets come in. The first is the default.
     pub desktops: &'static [Desktop],

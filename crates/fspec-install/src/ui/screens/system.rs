@@ -58,6 +58,8 @@ fn origin(d: &Distro) -> Vec<(String, String)> {
 pub struct System {
     list: FilterList,
     height: usize,
+    /// The machine booted with UEFI, so distros that need it can be picked.
+    efi: bool,
 }
 
 impl Default for System {
@@ -68,7 +70,7 @@ impl Default for System {
 
 impl System {
     pub fn new() -> Self {
-        System { list: FilterList::new(DISTROS.len()), height: 6 }
+        System { list: FilterList::new(DISTROS.len()), height: 6, efi: true }
     }
 
     pub fn current(&self) -> Option<&'static Distro> {
@@ -79,19 +81,26 @@ impl System {
         false
     }
 
-    pub fn key(&mut self, k: &KeyEvent, _sh: &mut Shared) -> Flow {
+    fn usable(&self, i: usize) -> bool {
+        self.efi || !DISTROS[i].needs_efi
+    }
+
+    pub fn key(&mut self, k: &KeyEvent, sh: &mut Shared) -> Flow {
+        self.efi = sh.firmware.efi;
         match k.code {
-            KeyCode::Enter => Flow::Next,
+            KeyCode::Enter if self.list.selected().is_some_and(|i| self.usable(i)) => Flow::Next,
+            KeyCode::Enter => Flow::Stay,
             KeyCode::Esc => Flow::Back,
             _ => {
-                self.list.nav(k, self.height, true, &|_| true);
+                let efi = self.efi;
+                self.list.nav(k, self.height, true, &|i| efi || !DISTROS[i].needs_efi);
                 Flow::Stay
             }
         }
     }
 
     pub fn click(&mut self, h: Hit) -> Flow {
-        if h.w != W_LIST {
+        if h.w != W_LIST || !self.usable(h.i) {
             return Flow::Stay;
         }
         if self.list.selected() == Some(h.i) {
@@ -109,7 +118,8 @@ impl System {
         hints(&[("↑↓", "Move"), ("Enter", "Continue"), ("Esc", "Back"), ("?", "Keys")])
     }
 
-    pub fn render(&mut self, c: &mut Canvas, a: Rect, _sh: &Shared) {
+    pub fn render(&mut self, c: &mut Canvas, a: Rect, sh: &Shared) {
+        self.efi = sh.firmware.efi;
         let th = *c.th;
         let side = a.width >= 100;
         let Some(d) = self.current() else { return };
@@ -127,6 +137,10 @@ impl System {
             .iter()
             .map(|(t, e)| (t.to_string(), explain(e)))
             .chain(origin(d).into_iter().map(|(t, e)| (t, explain(&e))))
+            .chain(d.needs_efi.then(|| {
+                let e = "Installs only on machines that boot with UEFI; this one booted with BIOS.";
+                ("needs UEFI".to_string(), explain(e))
+            }).filter(|_| !self.efi))
             .collect();
         let detail_h = 1 + reason.len() + 1 + tag_lines.iter().map(|(_, l)| l.len()).sum::<usize>();
         let list_h = if side {
@@ -142,7 +156,11 @@ impl System {
             let row = Rect { y: a.y + 2 + n as u16, height: 1, width: list_w, ..a };
             let sel = self.list.selected() == Some(idx);
             row_chrome(c, row, sel, true);
-            let st = if sel { Style::new().fg(th.ink).add_modifier(Modifier::BOLD) } else { fg(th.ink) };
+            let st = match (sel, self.usable(idx)) {
+                (_, false) => fg(th.faint),
+                (true, true) => Style::new().fg(th.ink).add_modifier(Modifier::BOLD),
+                (false, true) => fg(th.ink),
+            };
             let used = c.text(row, 2, 0, dd.name, st);
             if dd.alpha {
                 c.text(row, 2 + used + 1, 0, " alpha ", fg(th.amber).bg(th.surface));

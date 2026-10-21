@@ -264,6 +264,27 @@ fn new_system_flow_reaches_install_done() {
 }
 
 #[test]
+fn a_bios_machine_cannot_pick_the_distros_that_need_uefi() {
+    let mut r = Rig::new(Arc::new(DemoBackend::instant().bios()), (120, 40), false);
+    for _ in 0..3 {
+        r.press(KeyCode::Enter);
+    }
+    assert_eq!(r.app.step(), Step::System);
+    r.press(KeyCode::End);
+    r.press(KeyCode::Enter);
+    let Some(SystemChoice::Fresh { distro, .. }) = r.app.draft().system else { panic!("no system chosen") };
+    assert_eq!(distro, "void-musl");
+    r.press(KeyCode::Esc);
+    let screen = r.text((120, 40));
+    let y = screen.lines().position(|l| l.contains("AerynOS")).unwrap() as u16;
+    r.click(4, y);
+    r.click(4, y);
+    assert_eq!(r.app.step(), Step::System);
+    let Some(SystemChoice::Fresh { distro, .. }) = r.app.draft().system else { panic!("no system chosen") };
+    assert_eq!(distro, "void-musl");
+}
+
+#[test]
 fn install_done_can_open_a_shell() {
     let mut r = Rig::demo();
     r.to(Step::Review);
