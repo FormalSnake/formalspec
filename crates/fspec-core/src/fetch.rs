@@ -1,6 +1,7 @@
 use std::collections::HashMap;
+use std::fmt;
 use std::io::Read;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 use anyhow::{Context, Result, anyhow};
 
@@ -33,16 +34,55 @@ impl Response {
     }
 }
 
+/// A response outside 2xx. `rate_limited` is GitHub's API refusing for the hour, which a caller
+/// must not read as "no such release".
+#[derive(Debug)]
+pub struct HttpError {
+    pub url: String,
+    pub status: u16,
+    pub rate_limited: Option<String>,
+}
+
+impl fmt::Display for HttpError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match &self.rate_limited {
+            Some(note) => write!(f, "GET {}: GitHub API rate limit reached ({note})", self.url),
+            None => write!(f, "GET {}: HTTP {}", self.url, self.status),
+        }
+    }
+}
+
+impl std::error::Error for HttpError {}
+
+/// Whether `err` is an HTTP 404, the one failure that means "not there".
+pub fn is_not_found(err: &anyhow::Error) -> bool {
+    err.chain().any(|e| e.downcast_ref::<HttpError>().is_some_and(|h| h.status == 404))
+}
+
 /// HTTP(S) through ureq; `file://` URLs read the local file, for fixtures.
 pub struct LiveFetch {
     agent: ureq::Agent,
-    /// Sent as a bearer token to api.github.com when set (`GITHUB_TOKEN`).
-    github_token: Option<String>,
+    /// Sent as a bearer token to api.github.com: `GITHUB_TOKEN`, else what `gh auth token` prints,
+    /// looked up on the first API request.
+    github_token: OnceLock<Option<String>>,
 }
 
 impl LiveFetch {
     pub fn new() -> LiveFetch {
-        LiveFetch { agent: ureq::Agent::new_with_defaults(), github_token: std::env::var("GITHUB_TOKEN").ok() }
+        let config = ureq::Agent::config_builder().http_status_as_error(false).build();
+        LiveFetch { agent: ureq::Agent::new_with_config(config), github_token: OnceLock::new() }
+    }
+
+    fn github_token(&self) -> Option<&str> {
+        self.github_token
+            .get_or_init(|| {
+                std::env::var("GITHUB_TOKEN").ok().filter(|t| !t.is_empty()).or_else(|| {
+                    let out = std::process::Command::new("gh").args(["auth", "token"]).output().ok()?;
+                    let token = String::from_utf8(out.stdout).ok()?.trim().to_string();
+                    (out.status.success() && !token.is_empty()).then_some(token)
+                })
+            })
+            .as_deref()
     }
 }
 
@@ -62,23 +102,41 @@ impl Fetch for LiveFetch {
             let body = std::fs::read(path).with_context(|| format!("reading {url}"))?;
             return Ok(Response { headers: vec![], body });
         }
+        let github = url.starts_with("https://api.github.com/");
+        let token = if github { self.github_token() } else { None };
         let mut req = self.agent.get(url).header("User-Agent", "fspec");
-        if let (Some(token), true) = (&self.github_token, url.starts_with("https://api.github.com/")) {
+        if let Some(token) = token {
             req = req.header("Authorization", &format!("Bearer {token}"));
         }
         for (k, v) in headers {
             req = req.header(*k, *v);
         }
         let resp = req.call().with_context(|| format!("GET {url}"))?;
-        let headers = resp
+        let headers: Vec<(String, String)> = resp
             .headers()
             .iter()
             .filter_map(|(k, v)| Some((k.as_str().to_ascii_lowercase(), v.to_str().ok()?.to_string())))
             .collect();
+        let status = resp.status().as_u16();
+        if !(200..300).contains(&status) {
+            let header = |name: &str| headers.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str());
+            let rate_limited = (github && matches!(status, 403 | 429) && header("x-ratelimit-remaining") == Some("0"))
+                .then(|| rate_limit_note(header("x-ratelimit-reset"), token.is_some()));
+            return Err(HttpError { url: url.into(), status, rate_limited }.into());
+        }
         let mut body = Vec::new();
         resp.into_body().into_reader().read_to_end(&mut body).with_context(|| format!("reading {url}"))?;
         Ok(Response { headers, body })
     }
+}
+
+fn rate_limit_note(reset: Option<&str>, authenticated: bool) -> String {
+    let when = reset
+        .and_then(|r| r.parse::<u64>().ok())
+        .and_then(|r| r.checked_sub(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_secs()))
+        .map(|secs| format!("resets in {} min", secs.div_ceil(60)))
+        .unwrap_or_else(|| "resets within the hour".into());
+    if authenticated { when } else { format!("{when}; set GITHUB_TOKEN or run `gh auth login` for a higher limit") }
 }
 
 /// A recorded request: the URL and the headers it carried.
@@ -108,7 +166,10 @@ impl MapFetch {
 
 impl Fetch for MapFetch {
     fn get(&self, url: &str) -> Result<Vec<u8>> {
-        self.bodies.get(url).cloned().ok_or_else(|| anyhow!("MapFetch has no body for {url}"))
+        self.bodies
+            .get(url)
+            .cloned()
+            .ok_or_else(|| anyhow!(HttpError { url: url.into(), status: 404, rate_limited: None }))
     }
 
     fn request(&self, url: &str, headers: &[(&str, &str)]) -> Result<Response> {

@@ -372,3 +372,31 @@ fn update_pins_tumbleweed_hosts_to_the_newest_snapshot_old_enough() {
     let text = toml::to_string(&got.lock).unwrap();
     assert!(text.contains("[zypper.laptop]\nsnapshot = \"20251008\""), "{text}");
 }
+
+/// GitHub's API out of requests for the hour.
+struct RateLimited;
+
+impl fspec_core::fetch::Fetch for RateLimited {
+    fn get(&self, url: &str) -> anyhow::Result<Vec<u8>> {
+        let note = Some("resets in 12 min".to_string());
+        Err(fspec_core::fetch::HttpError { url: url.into(), status: 403, rate_limited: note }.into())
+    }
+}
+
+#[test]
+fn a_rate_limit_is_reported_as_one_not_as_a_missing_release() {
+    let runner = RecordingRunner::default();
+    let mut limited = Cx::new(&RateLimited, &runner);
+    limited.now = NOW;
+    let p = pkg(json!({"name": "fd", "version": "10.2.0", "source": {"kind": "github", "repo": "sharkdp/fd"}}));
+    let err = format!("{:#}", resolve(&p, &platforms(&["x86_64-linux"]), None, &limited).unwrap_err());
+    assert!(err.contains("GitHub API rate limit reached (resets in 12 min)"), "{err}");
+    assert!(!err.contains("has no release"), "{err}");
+
+    let fetch = MapFetch::default().with(
+        "https://api.github.com/repos/sharkdp/fd/releases/tags/10.2.0",
+        release("10.2.0", "2025-10-01T00:00:00Z", &["fd-10.2.0-x86_64-unknown-linux-musl.tar.gz"]).to_string(),
+    );
+    let locked = resolve(&p, &platforms(&["x86_64-linux"]), None, &cx(&fetch, &runner)).unwrap();
+    assert_eq!(locked.version.as_deref(), Some("10.2.0"));
+}

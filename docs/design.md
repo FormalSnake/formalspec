@@ -105,6 +105,11 @@ package name or service name fail the plan.
 `rev = "main"` and `"latest"` are resolved by `fspec update`, never at apply,
 so the lock always holds an exact commit or version.
 
+Resolvers read GitHub's API with a token when one is available: `GITHUB_TOKEN`,
+else what `gh auth token` prints. Without one GitHub allows 60 requests an hour,
+and a refusal for that reason is reported as the rate limit (with when it
+resets), never as a missing release.
+
 ### Modes
 
 - `pinned` (default): exact version and hash from the lock.
