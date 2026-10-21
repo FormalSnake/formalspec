@@ -138,6 +138,16 @@ pub struct Resolved {
     pub changes: Vec<String>,
     /// One line per manager a dependency has no package for, with why.
     pub misses: Vec<String>,
+    /// Lookups that could not run; their dependencies keep what the old lock said.
+    pub errors: Vec<String>,
+}
+
+/// A lookup's answer for one dependency: its package, a miss (the manager has none), or a
+/// lookup that failed, which says nothing about the manager and must not be locked as a miss.
+enum Answer {
+    Pkg(String),
+    Miss(String),
+    Failed(String),
 }
 
 /// Resolve every `lib(...)` and `bin(...)` the project declares on any platform.
@@ -156,40 +166,58 @@ pub fn resolve(devs: &BTreeMap<String, Dev>, old: &Lock, r: &Resolver) -> Result
             }
         }
     }
+    let mut errors = Vec::new();
     for (manager, ws) in by_manager {
-        let answers: Vec<Result<String, String>> = match manager {
-            "dnf" => ws.iter().map(|w| Ok(capability(manager, w))).collect(),
+        let answers: Vec<Answer> = match manager {
+            "dnf" => ws.iter().map(|w| Answer::Pkg(capability(manager, w))).collect(),
             "moss" => ws
                 .iter()
                 .map(|w| match w.kind {
                     Kind::Lib if is_so(&w.native.name) => {
-                        Err("moss installs by provider and has no file lookup".into())
+                        Answer::Miss("moss installs by provider and has no file lookup".into())
                     }
-                    _ => Ok(capability(manager, w)),
+                    _ => Answer::Pkg(capability(manager, w)),
                 })
                 .collect(),
             "zypper" => {
                 let (libs, bins): (Vec<&Want>, Vec<&Want>) =
                     ws.iter().partition(|w| w.kind == Kind::Lib && !is_so(&w.native.name));
-                let mut a: BTreeMap<String, Result<String, String>> = BTreeMap::new();
+                let mut a: BTreeMap<String, Answer> = BTreeMap::new();
                 for w in libs {
-                    a.insert(id(w), Ok(capability(manager, w)));
+                    a.insert(id(w), Answer::Pkg(capability(manager, w)));
                 }
                 for (w, ans) in bins.iter().zip(search(r, manager, &bins)) {
                     a.insert(id(w), ans);
                 }
-                ws.iter().map(|w| a.remove(&id(w)).unwrap_or_else(|| Err("not looked up".into()))).collect()
+                ws.iter().map(|w| a.remove(&id(w)).unwrap_or_else(|| Answer::Failed("not looked up".into()))).collect()
             }
             "brew" => brew(r.fetch, &ws),
             _ => search(r, manager, &ws),
         };
+        let mut failed = BTreeSet::new();
         for (w, answer) in ws.iter().zip(answers) {
             let slot = found.entry((w.kind, w.native.name.clone())).or_default();
             match answer {
-                Ok(pkg) => slot.0.insert(manager.to_string(), pkg),
-                Err(why) => slot.1.insert(manager.to_string(), why),
-            };
+                Answer::Pkg(pkg) => {
+                    slot.0.insert(manager.to_string(), pkg);
+                }
+                Answer::Miss(why) => {
+                    slot.1.insert(manager.to_string(), why);
+                }
+                Answer::Failed(why) => {
+                    failed.insert(why);
+                    if let Some(before) = old.native(w.kind.key(), &w.native.name) {
+                        if let Some(p) = before.provides.get(manager) {
+                            slot.0.insert(manager.to_string(), p.clone());
+                        }
+                        if let Some(m) = before.miss.get(manager) {
+                            slot.1.insert(manager.to_string(), m.clone());
+                        }
+                    }
+                }
+            }
         }
+        errors.extend(failed.into_iter().map(|why| format!("{manager}: {why}; kept what fspec.lock had")));
     }
 
     let (mut changes, mut misses) = (Vec::new(), Vec::new());
@@ -222,7 +250,7 @@ pub fn resolve(devs: &BTreeMap<String, Dev>, old: &Lock, r: &Resolver) -> Result
             changes.push(format!("- {} {}", gone.kind, gone.name));
         }
     }
-    Ok(Resolved { native, changes, misses })
+    Ok(Resolved { native, changes, misses, errors })
 }
 
 fn id(w: &Want) -> String {
@@ -279,16 +307,22 @@ fn query(manager: &str, w: &Want) -> String {
         ("pacman", Kind::Lib) => format!("pacman -F --machinereadable '{n}.pc'"),
         ("pacman", Kind::Bin) => format!("pacman -F --machinereadable '{n}'"),
         ("xbps", Kind::Lib) => format!("xlocate '/pkgconfig/{n}.pc'"),
-        ("xbps", Kind::Bin) => format!("xlocate '/usr/bin/{n}'"),
+        // xlocate's index misses some packages; the package named like the command is then
+        // checked against its own file list, printed in xlocate's format.
+        ("xbps", Kind::Bin) => {
+            format!("xlocate '/usr/bin/{n}' | grep . || xbps-query -Rf '{n}' | sed 's|^|{n}-0_0  |'")
+        }
         ("zypper", _) => format!("zypper -n -q se --file-list --match-exact '/usr/bin/{n}'"),
         _ => "true".into(),
     }
 }
 
 /// Look every dependency up in one container run of `manager`'s distro.
-fn search(r: &Resolver, manager: &str, ws: &[&Want]) -> Vec<Result<String, String>> {
-    let fail = |why: String| ws.iter().map(|_| Err(why.clone())).collect();
-    let Some((image, platform)) = query_image(manager) else { return fail(format!("{manager} has no lookup")) };
+fn search(r: &Resolver, manager: &str, ws: &[&Want]) -> Vec<Answer> {
+    let fail = |why: String| ws.iter().map(|_| Answer::Failed(why.clone())).collect();
+    let Some((image, platform)) = query_image(manager) else {
+        return ws.iter().map(|_| Answer::Miss(format!("{manager} has no lookup"))).collect();
+    };
     let Some(runtime) = &r.runtime else { return fail("looking it up needs docker or podman".into()) };
     let mut script = format!("{} || exit 3\n", setup(manager));
     for (i, w) in ws.iter().enumerate() {
@@ -300,7 +334,14 @@ fn search(r: &Resolver, manager: &str, ws: &[&Want]) -> Vec<Result<String, Strin
     }
     let out = match r.runner.run(&cmd.args([image, "sh", "-s"]).stdin(script)) {
         Ok(o) if o.status == 0 => o.stdout,
-        Ok(o) => return fail(format!("the {image} lookup failed: {}", o.stderr.trim().lines().last().unwrap_or(""))),
+        Ok(o) => {
+            let why = match (o.status, o.stderr.trim().lines().last()) {
+                (_, Some(line)) => line.to_string(),
+                (3, None) => "fetching the package index failed".into(),
+                (n, None) => format!("exit status {n}"),
+            };
+            return fail(format!("the {image} lookup failed: {why}"));
+        }
         Err(e) => return fail(format!("the {image} lookup failed: {e:#}")),
     };
     let mut sections: BTreeMap<usize, Vec<&str>> = BTreeMap::new();
@@ -319,7 +360,7 @@ fn search(r: &Resolver, manager: &str, ws: &[&Want]) -> Vec<Result<String, Strin
         .enumerate()
         .map(|(i, w)| {
             let lines = sections.remove(&i).unwrap_or_default();
-            pick(manager, w, &candidates(manager, w, &lines))
+            pick(manager, w, &candidates(manager, w, &lines)).map_or_else(Answer::Miss, Answer::Pkg)
         })
         .collect()
 }
@@ -360,7 +401,9 @@ fn candidates(manager: &str, w: &Want, lines: &[&str]) -> Vec<String> {
             }
             // xbps-alternatives ships an executable as `/usr/bin/<name>.<package>` and links it.
             "xbps" => l.split_once(char::is_whitespace).and_then(|(pkgver, p)| {
-                let (pkg, p) = (xbps_name(pkgver), p.trim());
+                // A symlink is listed as `/usr/bin/socat -> /usr/bin/socat1`.
+                let p = p.trim().split(" -> ").next().unwrap_or_default();
+                let pkg = xbps_name(pkgver);
                 let alternative = w.kind == Kind::Bin && p == format!("/usr/bin/{n}.{pkg}");
                 (file_ok(p) || alternative).then_some(pkg)
             }),
@@ -404,11 +447,11 @@ const BREW_API: &str = "https://formulae.brew.sh/api/formula.json";
 
 /// brew's API lists each formula's executables but no other files, so a pkg-config module is
 /// matched to formulae by name and confirmed against the bottle's contents.
-fn brew(fetch: &dyn Fetch, ws: &[&Want]) -> Vec<Result<String, String>> {
+fn brew(fetch: &dyn Fetch, ws: &[&Want]) -> Vec<Answer> {
     let formulae = match fetch.get_json(BREW_API) {
         Ok(serde_json::Value::Array(f)) => f,
-        Ok(_) => return ws.iter().map(|_| Err(format!("{BREW_API} is not a list"))).collect(),
-        Err(e) => return ws.iter().map(|_| Err(format!("reading {BREW_API}: {e:#}"))).collect(),
+        Ok(_) => return ws.iter().map(|_| Answer::Failed(format!("{BREW_API} is not a list"))).collect(),
+        Err(e) => return ws.iter().map(|_| Answer::Failed(format!("reading {BREW_API}: {e:#}"))).collect(),
     };
     let name_of = |f: &serde_json::Value| f["name"].as_str().unwrap_or_default().to_string();
     ws.iter()
@@ -421,9 +464,11 @@ fn brew(fetch: &dyn Fetch, ws: &[&Want]) -> Vec<Result<String, String>> {
                         .filter(|f| f["executables"].as_array().is_some_and(|e| e.iter().any(|x| x == n.as_str())))
                         .map(name_of)
                         .collect();
-                    pick("brew", w, &found)
+                    pick("brew", w, &found).map_or_else(Answer::Miss, Answer::Pkg)
                 }
-                Kind::Lib if is_so(n) => Err("brew is looked up by pkg-config module or executable, not by shared object".into()),
+                Kind::Lib if is_so(n) => {
+                    Answer::Miss("brew is looked up by pkg-config module or executable, not by shared object".into())
+                }
                 Kind::Lib => {
                     let guesses = brew_guesses(n);
                     let mut found = Vec::new();
@@ -434,16 +479,16 @@ fn brew(fetch: &dyn Fetch, ws: &[&Want]) -> Vec<Result<String, String>> {
                         match bottle_ships(fetch, f, &format!("/lib/pkgconfig/{n}.pc")) {
                             Ok(true) => found.push(name_of(f)),
                             Ok(false) => {}
-                            Err(e) => return Err(format!("checking the {} bottle: {e:#}", name_of(f))),
+                            Err(e) => return Answer::Failed(format!("checking the {} bottle: {e:#}", name_of(f))),
                         }
                     }
                     if found.is_empty() {
-                        return Err(format!(
+                        return Answer::Miss(format!(
                             "no formula named {} ships {n}.pc (the API lists no files, so only those names are checked)",
                             guesses.join(" or ")
                         ));
                     }
-                    pick("brew", w, &found)
+                    pick("brew", w, &found).map_or_else(Answer::Miss, Answer::Pkg)
                 }
             }
         })
@@ -622,6 +667,9 @@ mod tests {
             "gtk4-devel-32bit-4.18.6_1  /usr/lib32/pkgconfig/gtk4.pc",
         ];
         assert_eq!(candidates("xbps", &gtk, &xbps), ["gtk4-devel"]);
+        let socat = want(Kind::Bin, "socat");
+        assert_eq!(candidates("xbps", &socat, &["socat-0_0  /usr/bin/filan", "socat-0_0  /usr/bin/socat"]), ["socat"]);
+        assert_eq!(candidates("xbps", &socat, &["socat-1.8.1.3_1  /usr/bin/socat -> /usr/bin/socat1"]), ["socat"]);
         let pc = want(Kind::Bin, "pkg-config");
         assert_eq!(candidates("xbps", &pc, &["pkg-config-0.29.2_3  /usr/bin/pkg-config.pkg-config"]), ["pkg-config"]);
         let zypper = ["S  | Name  | Summary | Type", "---+---", "   | cmake-full | Make | package"];

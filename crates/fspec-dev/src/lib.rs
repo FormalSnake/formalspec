@@ -120,7 +120,15 @@ pub fn update(project: &Project, only: &[String], cx: &fspec_sources::Cx, paths:
         .collect();
     let old = Lock::load(&project.lock_path())?;
     let u = fspec_sources::update::update(&hosts, &old, only, cx)?;
-    let (mut lock, mut changes, mut errors) = (u.lock, u.changes, u.errors);
+    let pypi: BTreeSet<String> =
+        devs.values().flat_map(|d| d.packages.iter().filter(|p| python::is_pypi(p)).map(|p| p.name.clone())).collect();
+    let (mut lock, mut errors) = (u.lock, u.errors);
+    // The sources update never sees pypi packages, so it reports them as removed.
+    let mut changes: Vec<String> = u
+        .changes
+        .into_iter()
+        .filter(|c| !c.strip_prefix("- ").is_some_and(|r| pypi.iter().any(|n| r.starts_with(&format!("{n} ")))))
+        .collect();
     if let Err(e) = update_pypi(project, &devs, &old, &mut lock, &mut changes, only, cx, paths) {
         errors.push(format!("{e:#}"));
     }
@@ -171,6 +179,7 @@ pub fn update(project: &Project, only: &[String], cx: &fspec_sources::Cx, paths:
         lock.native = resolved.native;
         changes.extend(resolved.changes);
         misses = resolved.misses;
+        errors.extend(resolved.errors);
     }
     Ok(Update { lock, changes, errors, misses })
 }

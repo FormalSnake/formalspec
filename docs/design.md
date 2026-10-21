@@ -329,7 +329,26 @@ on `stdenv.isLinux`. `platforms = [...]` narrows the four defaults.
 **Packages** are ordinary `pkg(...)` resources from FormalSpec's own sources.
 `version =` pins an exact upstream version instead of the newest release, and
 `links = {"cargo": "rustup"}` adds a command that runs another one under a new
-name (rustup's proxies act on the name they run as).
+name (rustup's proxies act on the name they run as). Three sources exist for
+projects in particular:
+
+- `pkg("python", version = "3.13")` is CPython from python-build-standalone,
+  at the build and SHA-256 uv's own download metadata names for that version
+  and platform (the aqua registry carries no CPython).
+- `pypi("yt-dlp")` is a PyPI distribution. `fspec update` has uv compile it and
+  its dependencies for every platform at once (`uv pip compile --universal
+  --generate-hashes`, for the locked python's version) and keeps the hashed
+  requirement lines in the lock; activation installs exactly those into a
+  relocatable virtualenv over the project's python, in the user store. uv is
+  added as a package when `dev.star` does not name it. The venv is built for
+  the machine, so a pypi package does not run in a container yet.
+- `url("https://...")` is one file or archive at a fixed URL, pinned by its
+  hash. A file that is not an archive keeps its name and is data, not a
+  command: fonts, a model, a fixture.
+
+Each package's tree is exported as `FSPEC_PKG_<NAME>` (`FSPEC_PKG_YT_DLP`), so
+`env` and `shell_hook` can point into it: a venv's interpreter, a font
+directory for a generated `fonts.conf`.
 
 **Locking.** `fspec update` in a directory with a `dev.star` and no `spec.star`
 writes `fspec.lock` next to it: every package's artifacts for every platform,
@@ -371,6 +390,12 @@ the lock.
 | xbps | `xlocate` | `xlocate` |
 | brew | the formula whose bottle ships `lib/pkgconfig/gtk4.pc` | the formula listing `cmake` in `executables` |
 
+A name ending in `.so` is a shared object under the library directory instead:
+`lib("gstreamer-1.0/libgstlibav.so")` for a plugin that is loaded at runtime
+and ships no pkg-config module. dnf installs it by path (`/usr/lib64/...`),
+zypper, apt, pacman and xbps find it in their file index, and moss, which
+installs by provider only, records a miss.
+
 dnf, zypper and moss resolve capabilities themselves, so the lock holds the
 capability. The file-index lookups run in a container of that distro (debian,
 archlinux, void, tumbleweed), so `fspec update` needs docker or podman for
@@ -378,17 +403,31 @@ them. brew's API lists no files, so a pkg-config module is matched to formulae
 named after it (`dbus-1` checks `dbus`) and confirmed against the bottle's
 contents. When several packages ship the file, the one with the same name (for
 a bin) or the only `-dev`/`-devel` one (for a lib) wins; otherwise it is a
-miss. A miss is recorded in the lock with its reason, `fspec update` and
-`fspec dev plan` print it, and `lib("x", apt = "libx-dev")` names the package
-by hand for the lookups that cannot resolve it.
+miss. xlocate's index lags behind Void's repository, so an executable it does
+not know is checked against the file list of the package with the same name. A
+miss is recorded in the lock with its reason, `fspec update` and `fspec dev
+plan` print it, and `lib("x", apt = "libx-dev")` names the package by hand for
+the lookups that cannot resolve it. A lookup that cannot run at all (no
+network, a dropped docker connection) is not a miss: the lock keeps what it
+had for that manager and `fspec update` fails, so a flaky run never writes
+misses that are not true.
 
 Activation installs nothing system-wide. It checks that each module's `.pc` or
 each executable is present (on macOS, that `$(brew --prefix)/opt/<formula>`
 exists, whose `lib/pkgconfig`, `lib`, `include` and `bin` go on
 `PKG_CONFIG_PATH`, `LIBRARY_PATH`, `CPATH` and PATH) and fails with the install
-command built from the locked names when something is missing. A system with
-no supported package manager (NixOS) cannot satisfy `lib()` and `bin()` this
-way and is told to use a container.
+command built from the locked names when something is missing.
+
+A machine whose package manager has a miss for some dependency (Void has no
+libsystemd), or that has no package manager fspec knows (NixOS), cannot
+satisfy `lib()` and `bin()` natively. With `fallback_container = "debian:13"`
+the shell runs in that image instead, with a line saying which dependencies
+sent it there; without it, activation fails and names the misses. `fspec dev
+plan` shows the same either way. Nothing is skipped silently.
+
+`platforms = [...]` limits a project to some platforms. On any other, `fspec
+dev plan` says the project does not support this machine instead of failing,
+and `fspec dev` refuses to start.
 
 `container = "debian:13"` is the reproducible option: the shell runs in the
 pinned image plus one derived layer that installs the locked packages from that
