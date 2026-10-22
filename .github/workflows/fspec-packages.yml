@@ -22,6 +22,7 @@ jobs:
           - { pkg: fast, platform: x86_64-linux, runner: ubuntu-24.04 }
           - { pkg: fetch, platform: x86_64-linux, runner: ubuntu-24.04 }
           - { pkg: formalmusic, platform: x86_64-linux, runner: ubuntu-24.04 }
+          - { pkg: formalshell, platform: x86_64-linux, runner: ubuntu-24.04 }
           - { pkg: gopls, platform: x86_64-linux, runner: ubuntu-24.04 }
           - { pkg: kopuzd, platform: x86_64-linux, runner: ubuntu-24.04 }
           - { pkg: librepods, platform: x86_64-linux, runner: ubuntu-24.04 }
