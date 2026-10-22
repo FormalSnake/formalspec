@@ -77,6 +77,8 @@ the store-wide build graph and hand-written hashes.
 | `mkOutOfStoreSymlink` to a directory or a path outside the repo | `file(..., mode = "link", target = "...")` |
 | `homebrew.taps` | `brew(tap = "owner/repo")` on the pkg that needs it |
 | `${pkg}/lib/...` named by absolute path (a PAM or Lua module) | `/opt/fspec/current/pkgs/<name>/lib/...` |
+| `power.sleep.computer`, `power.restartAfterFreeze`, `networking.applicationFirewall`, `pmset`/`systemsetup` in activation scripts | `setting("pmset" \| "systemsetup" \| "firewall", key, value)` |
+| `system.defaults` for a root domain, or `defaults write /Library/Preferences/...` in activation | `defaults(..., system = True)` |
 
 ### A three-host example
 
