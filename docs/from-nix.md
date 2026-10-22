@@ -72,6 +72,10 @@ the store-wide build graph and hand-written hashes.
 | `users.users.<u>.openssh.authorizedKeys` | a `file(...)` in `/etc/ssh/authorized_keys.d/<u>` named by `AuthorizedKeysFile`; fspec writes real files, so nix-darwin's `AuthorizedKeysCommand /bin/cat` is not needed |
 | `security.sudo.extraConfig` | `file("/etc/sudoers.d/...", perms = "0440")` |
 | `fonts.packages` with vendored files | `file("/Library/Fonts/<font>", src = ...)` on macOS |
+| `launchd` `serviceConfig` keys (`StartInterval`, `WatchPaths`, `ThrottleInterval`, `StandardOutPath`, `ProcessType`) | `service(..., launchd = {...})` |
+| `mkOutOfStoreSymlink` to a directory or a path outside the repo | `file(..., mode = "link", target = "...")` |
+| `homebrew.taps` | `brew(tap = "owner/repo")` on the pkg that needs it |
+| `${pkg}/lib/...` named by absolute path (a PAM or Lua module) | `/opt/fspec/current/pkgs/<name>/lib/...` |
 
 ### A three-host example
 
