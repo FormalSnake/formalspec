@@ -257,6 +257,11 @@ fn a_service_without_exec_enables_the_distro_unit() {
     apply_scope(&w.cx(Scope::System), backends, &[]).unwrap();
     assert_eq!(w.runner.lines(), ["systemctl disable gdm"]);
 
+    w.runner.calls.lock().unwrap().clear();
+    let timer = resource(json!({"kind": "service", "name": "app.timer", "user": true}));
+    apply_scope(&w.cx(Scope::User), backends, &[desired(timer)]).unwrap();
+    assert_eq!(w.runner.lines(), ["systemctl --user enable app.timer"]);
+
     let bad = resource(json!({"kind": "service", "name": "gdm", "restart": "always"}));
     let err = SystemdBackend.check(&w.cx(Scope::System), &bad).unwrap_err().to_string();
     assert!(err.contains("takes no restart"), "{err}");

@@ -1,6 +1,7 @@
 //! `service("gdm")` without `exec`: a unit the distro ships, which fspec only enables at boot. It
 //! is not started, so enabling a display manager or sshd on a running system takes effect at the
-//! next boot, and the same apply works inside a chroot.
+//! next boot, and the same apply works inside a chroot. On systemd, `user = True` enables a user
+//! unit, such as one an app's own installer would write.
 
 use anyhow::{Result, bail};
 use fspec_core::apply::{Cx, Op};
@@ -23,7 +24,7 @@ pub(crate) fn of(s: &Service) -> Option<&Service> {
 pub(crate) fn check(init: Init, s: &Service) -> Result<()> {
     check_name("service", &s.name)?;
     let extras = [
-        ("user", s.user),
+        ("user", s.user && init != Init::Systemd),
         ("restart", s.restart != Restart::No),
         ("after", !s.after.is_empty()),
         ("env", !s.env.is_empty()),
@@ -41,7 +42,7 @@ pub(crate) fn check(init: Init, s: &Service) -> Result<()> {
 }
 
 fn systemctl(verb: &str, s: &Service) -> Cmd {
-    Cmd::new("systemctl").args([verb, s.name.as_str()])
+    Cmd::new("systemctl").args(s.user.then_some("--user")).args([verb, s.name.as_str()])
 }
 
 fn rc_update(verb: &str, s: &Service) -> Cmd {
