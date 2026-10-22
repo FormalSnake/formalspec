@@ -1462,7 +1462,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "fspec-core",
+ "libc",
  "ruzstd",
+ "serde",
  "serde_json",
  "shell-words",
  "tar",
@@ -1629,6 +1631,7 @@ dependencies = [
  "brotli-decompressor",
  "diffy",
  "flate2",
+ "fspec-build",
  "fspec-core",
  "lzma-rs",
  "ruzstd",

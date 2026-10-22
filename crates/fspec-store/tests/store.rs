@@ -88,6 +88,7 @@ impl World {
             generation,
             scope: Scope::System,
             protect: &[],
+            builders: &[],
         }
     }
 
@@ -757,4 +758,37 @@ fn a_tag_without_a_digest_is_refused_and_never_pulled() {
     w.runner = Box::new(runner);
     let err = w.apply(&[git_pkg()]).unwrap_err();
     assert!(format!("{err:#}").contains("not pinned to a digest"), "{err:#}");
+}
+
+/// Runs the recipe's own `sh -c` for real, so the build leaves an executable; git and the rest
+/// answer like a clean checkout.
+struct BuildHere;
+
+impl Runner for BuildHere {
+    fn run(&self, cmd: &Cmd) -> anyhow::Result<Output> {
+        if cmd.program != "sh" {
+            return Ok(Output::default());
+        }
+        let out = std::process::Command::new("sh").args(&cmd.args).envs(cmd.env.iter().cloned()).output()?;
+        Ok(Output { status: out.status.code().unwrap_or(1), ..Output::default() })
+    }
+}
+
+#[test]
+fn a_git_package_without_a_ci_artifact_is_built_on_the_host() {
+    let mut w = World::new();
+    w.lock.upsert(LockedPkg {
+        name: "tool".into(),
+        source: "git:https://example/tool@main".into(),
+        version: None,
+        rev: Some("4f1c2a9d3e5b7a8c9d0e1f2a3b4c5d6e7f8a9b0c".into()),
+        patches: None,
+        artifacts: BTreeMap::new(),
+    });
+    w.runner = Box::new(BuildHere);
+    let script = r#"mkdir -p "$FSPEC_OUT/bin" && printf '#!/bin/sh\necho built here\n' > "$FSPEC_OUT/bin/tool" && chmod +x "$FSPEC_OUT/bin/tool""#;
+    let resource = serde_json::from_value(json!({"kind": "pkg", "name": "tool", "mode": "pinned",
+        "source": {"kind": "git", "url": "https://example/tool", "rev": "main"}, "build": ["sh", "-c", script]}));
+    w.apply(&[Desired { resource: resource.unwrap(), owner: None }]).unwrap();
+    assert_eq!(w.run("tool"), "built here");
 }

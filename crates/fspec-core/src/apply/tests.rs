@@ -104,6 +104,7 @@ impl World {
             generation,
             scope,
             protect: &[],
+            builders: &[],
         }
     }
 

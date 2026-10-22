@@ -93,13 +93,19 @@ enum Command {
     },
     /// Build a `git(...)` package from source at its locked commit into a `.tar.zst`.
     Build {
-        #[arg(long)]
-        pkg: String,
+        #[arg(long, required_unless_present = "job")]
+        pkg: Option<String>,
+        /// A job file a host shipped to this builder; its patches sit beside it.
+        #[arg(long, hide = true, conflicts_with = "pkg")]
+        job: Option<PathBuf>,
         /// Must be this machine's platform, e.g. `x86_64-linux`.
         #[arg(long)]
         platform: String,
         #[arg(long)]
         out: PathBuf,
+        /// Build on this host's builders, falling back to this machine.
+        #[arg(long, conflicts_with = "job")]
+        host: Option<String>,
     },
     /// Generate CI that builds image hosts and packages.
     Ci {
@@ -450,8 +456,26 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
-        Command::Build { pkg, platform, out } => {
+        Command::Build { job: Some(job), platform, out, .. } => {
+            let file: fspec_build::builders::JobFile =
+                serde_json::from_slice(&std::fs::read(job)?).context("reading the build job")?;
+            let Source::Git { url, .. } = &file.pkg.source else { bail!("{} is not a git package", file.pkg.name) };
+            let (local, _) = Facts::probe_local();
+            if local != *platform {
+                bail!("this machine is {local}, not {platform}");
+            }
+            let dir = job.parent().context("the job file has no directory")?;
+            let job = fspec_build::Job { pkg: &file.pkg, url, rev: &file.rev, platform, spec_dir: dir, out };
+            println!("{}", fspec_build::build(&LiveRunner, &job)?.archive.display());
+            Ok(())
+        }
+        Command::Build { pkg, platform, out, host, .. } => {
+            let pkg = pkg.as_ref().context("--pkg is required")?;
             let spec = fspec_eval::evaluate(&spec_path)?;
+            let builders = match host {
+                Some(h) => spec.host(h)?.builders.clone(),
+                None => vec![],
+            };
             let pkg = spec
                 .hosts
                 .iter()
@@ -476,7 +500,7 @@ fn main() -> Result<()> {
             fspec_core::patches::check(&spec_dir, &pkg.patches, locked.patches.as_deref())?;
             let rev = locked.rev.as_deref().with_context(|| format!("pkg {} has no rev in fspec.lock", pkg.name))?;
             let job = fspec_build::Job { pkg, url, rev, platform, spec_dir: &spec_dir, out };
-            println!("{}", fspec_build::build(&LiveRunner, &job)?.archive.display());
+            println!("{}", fspec_build::builders::build_anywhere(&LiveRunner, &builders, &job)?.display());
             Ok(())
         }
         Command::Ci { command: CiCommand::Packages } => {
@@ -1351,6 +1375,7 @@ struct Env<'a> {
     runner: Box<dyn Runner>,
     fetch: LiveFetch,
     protect: Vec<String>,
+    builders: Vec<fspec_core::resource::Builder>,
 }
 
 impl<'a> Env<'a> {
@@ -1367,6 +1392,7 @@ impl<'a> Env<'a> {
             },
             fetch: LiveFetch::new(),
             protect: host.protect.clone(),
+            builders: host.builders.clone(),
         })
     }
 
@@ -1381,6 +1407,7 @@ impl<'a> Env<'a> {
             generation: state.generation + 1,
             scope,
             protect: &self.protect,
+            builders: &self.builders,
         }
     }
 }

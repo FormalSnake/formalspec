@@ -35,6 +35,8 @@ pub struct Cx<'a> {
     pub scope: Scope,
     /// The host's `protect` list, as written in the spec.
     pub protect: &'a [String],
+    /// The host's builders, for git packages CI has no artifact for.
+    pub builders: &'a [crate::resource::Builder],
 }
 
 impl Cx<'_> {

@@ -91,11 +91,25 @@ enum Kind<'a> {
     Nix { attr: &'a str },
 }
 
-/// Where an archive comes from. A CI build is already patched; a download is patched here.
+/// Where an archive comes from. A CI build and a build here are already patched; a download is
+/// patched here.
 enum Origin<'a> {
-    Url { url: &'a str, hash: &'a str },
-    Oci { reference: &'a str },
+    Url {
+        url: &'a str,
+        hash: &'a str,
+    },
+    Oci {
+        reference: &'a str,
+    },
+    /// A `git(...)` package CI has no artifact for: built on the host's builders, else here.
+    Build {
+        url: &'a str,
+        rev: &'a str,
+    },
 }
+
+/// The artifact of a package built on a builder or here, which the lock has no entry for.
+static BUILT: std::sync::LazyLock<Artifact> = std::sync::LazyLock::new(Artifact::default);
 
 fn target<'a>(cx: &'a Cx, p: &'a Pkg) -> Result<Target<'a>> {
     let missing = || format!("pkg {} is not in fspec.lock, run fspec update", p.name);
@@ -108,10 +122,24 @@ fn target<'a>(cx: &'a Cx, p: &'a Pkg) -> Result<Target<'a>> {
     fspec_core::patches::check(cx.spec_dir, &p.patches, locked.patches.as_deref())
         .with_context(|| format!("pkg {}", p.name))?;
     let platform = cx.facts.platform();
-    let artifact =
-        locked.artifacts.get(&platform).or_else(|| locked.artifacts.get("any")).with_context(|| {
-            format!("pkg {} has no artifact for {platform} in fspec.lock, run fspec update", p.name)
-        })?;
+    let found = locked.artifacts.get(&platform).or_else(|| locked.artifacts.get("any"));
+    if let Source::Git { url, .. } = &p.source
+        && found.and_then(|a| a.oci.as_deref()).is_none()
+    {
+        let rev = locked.rev.as_deref().with_context(|| format!("pkg {} has no rev in fspec.lock", p.name))?;
+        let id = format!("{url}@{rev}+{}", locked.patches.as_deref().unwrap_or_default());
+        let version = rev.chars().take(12).collect::<String>();
+        let dirname = format!("{}-{}-{version}", archive::hash8(&id), p.name);
+        let artifact = found.unwrap_or(&BUILT);
+        return Ok(Target {
+            locked,
+            version,
+            id,
+            kind: Kind::Archive { origin: Origin::Build { url, rev }, dirname, artifact },
+        });
+    }
+    let artifact = found
+        .with_context(|| format!("pkg {} has no artifact for {platform} in fspec.lock, run fspec update", p.name))?;
     if let Some(reference) = artifact.oci.as_deref() {
         let version = version.chars().take(12).collect::<String>();
         let dirname = format!("{}-{}-{version}", archive::hash8(reference), p.name);
@@ -312,6 +340,14 @@ fn build_tool_present(p: &Pkg, origin: &Origin) -> bool {
 
 fn unpack_into(cx: &Cx, p: &Pkg, origin: &Origin, dirname: &str, dest: &Path, scratch: &Path) -> Result<()> {
     match origin {
+        Origin::Build { url, rev } => {
+            let (platform, out) = (cx.facts.platform(), scratch.join("build").join(dirname));
+            let job = fspec_build::Job { pkg: p, url, rev, platform: &platform, spec_dir: cx.spec_dir, out: &out };
+            let built = fspec_build::builders::build_anywhere(cx.runner, cx.builders, &job)
+                .with_context(|| format!("building {}", p.name))?;
+            let body = fs::read(&built)?;
+            archive::unpack(&body, dest, &p.name).with_context(|| format!("unpacking {}", built.display()))?;
+        }
         Origin::Oci { reference } => {
             let body = oci::pull(cx.runner, reference, &scratch.join("oci").join(dirname))
                 .with_context(|| format!("pulling {reference}"))?;

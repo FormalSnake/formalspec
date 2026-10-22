@@ -31,6 +31,27 @@ pub struct Host {
     /// Packages resolve to the newest release at least this old (`3d`, `12h`), unless bleeding.
     #[serde(default)]
     pub release_age: Option<String>,
+    /// Machines that build this host's git packages when CI has no artifact for them, tried in
+    /// order before building on the host itself.
+    #[serde(default)]
+    pub builders: Vec<Builder>,
+}
+
+/// A machine reached over ssh that builds packages for a host.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Builder {
+    pub name: String,
+    /// ssh destinations for the same machine, in order of preference (the Tailscale name, then
+    /// the LAN address). Default: the name.
+    #[serde(default)]
+    pub routes: Vec<String>,
+}
+
+impl Builder {
+    pub fn routes(&self) -> Vec<&str> {
+        if self.routes.is_empty() { vec![self.name.as_str()] } else { self.routes.iter().map(String::as_str).collect() }
+    }
 }
 
 /// A resource as `plan` and the state file see it: flat, with the package that owns it.

@@ -115,6 +115,7 @@ pub fn update(project: &Project, only: &[String], cx: &fspec_sources::Cx, paths:
             protect: vec![],
             persist: vec![],
             release_age: None,
+            builders: vec![],
             ssh: None,
         })
         .collect();

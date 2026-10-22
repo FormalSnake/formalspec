@@ -166,6 +166,7 @@ mod tests {
                 generation: state.generation + 1,
                 scope: Scope::System,
                 protect: &[],
+                builders: &[],
             }
         }
 

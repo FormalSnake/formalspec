@@ -8,7 +8,9 @@ repository.workspace = true
 [dependencies]
 anyhow.workspace = true
 fspec-core.workspace = true
+libc.workspace = true
 ruzstd.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 shell-words.workspace = true
 tar.workspace = true

@@ -182,6 +182,7 @@ mod tests {
             protect: vec![],
             persist: vec![],
             release_age: None,
+            builders: vec![],
             ssh: None,
         }
     }

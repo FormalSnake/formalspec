@@ -2,6 +2,7 @@
 //! `fspec build` makes one `.tar.zst` per package and platform, the generated workflow pushes it
 //! to an OCI registry, and `fspec update --cache` records the digests in the lock.
 
+pub mod builders;
 pub mod cache;
 pub mod ci;
 mod pack;

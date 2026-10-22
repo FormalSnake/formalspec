@@ -41,6 +41,7 @@ fn apply(host: &str) -> Run {
             generation: state.generation + 1,
             scope,
             protect: &[],
+            builders: &[],
         };
         apply_scope(&cx, &backends, &desired).unwrap();
 

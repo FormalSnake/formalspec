@@ -54,6 +54,7 @@ impl World {
             generation: self.state().generation + 1,
             scope: Scope::User,
             protect: &[],
+            builders: &[],
         }
     }
 

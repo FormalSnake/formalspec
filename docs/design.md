@@ -194,7 +194,8 @@ change: GitHub's Ubuntu runners have podman.
 - `fspec build --pkg <name> --platform <p> --out <dir>` builds on this
   machine, which must be platform `<p>`. It writes
   `<dir>/<name>-<p>.tar.zst` with the executables at the top (sorted names,
-  zeroed owners and times) and `<dir>/tag` holding `<rev>-<p>`.
+  zeroed owners and times) and `<dir>/tag` holding `<rev>-<p>`. With
+  `--host <h>` it builds on that host's builders first (below).
 - `fspec ci packages` writes `.github/workflows/fspec-packages.yml` next to the
   spec: a matrix with one job per `git(...)` package and platform that a host
   declares (`ubuntu-24.04` for x86_64-linux, `ubuntu-24.04-arm` for
@@ -219,7 +220,37 @@ title). The lock pins the manifest digest.
 `oras pull <ref> -o <staging>` through the `Runner` (so `oras` must be on
 PATH), the layer file is hashed against the layer digest in
 `oras manifest fetch <ref>`, unpacked, and installed like any other store
-package. A reference without a digest is refused. The host never compiles.
+package. A reference without a digest is refused.
+
+**Builders.** A `git` package the lock has no `oci` artifact for (CI has not
+built it, or nobody runs CI for it) is built instead of failing the apply. A
+host names the machines that build for it:
+
+```python
+host(name = "e1504g", platform = "x86_64-linux",
+    builders = [builder("g815", routes = ["g815", "192.168.86.20"])])
+```
+
+`routes` are ssh destinations for the same machine, in order of preference
+(the Tailscale name, then the LAN address); without them the name is the
+route. The first time a run needs a builder it probes the routes in order with
+`ssh -o ConnectTimeout=5 -o BatchMode=yes <route> uname -sm` and keeps the
+first that answers for the rest of the run, so a builder that is down costs
+one timeout per route per run, not one per package. A builder of another
+platform is skipped. On the builder, fspec ships itself, a job file (the
+package as the spec declares it, the locked rev) and the package's patches to
+`~/.cache/fspec/build/<name>-<rev>`, runs `fspec build --job` there, copies the
+`.tar.zst` back over ssh and deletes the directory: nothing is installed on
+the builder, which needs only git, ssh and the recipe's tools (podman or
+docker for `image`). Run as root through sudo, the ssh runs as `SUDO_USER`,
+whose keys reach the builder. When every builder is unreachable or fails, the
+host builds the package itself and says so, rather than failing. The order is
+always the CI artifact, then builders in the order listed, then the host.
+
+The store directory of a built package hashes the url, the rev and the
+patches. Builders exist for software no distro packages and no release ships,
+like FormalShell or a project the user compiles themselves; everything else
+comes from the distro or from a prebuilt release.
 
 Patches on npm and other packages that ship as an unpacked tree need no build:
 `prepare` applies them in pure Rust (the `diffy` crate: git or unified diffs
@@ -1516,7 +1547,7 @@ A cargo workspace under `crates/`:
 | `fspec-os` | Services and timers per init (systemd, launchd, runit, OpenRC, dinit, s6, cron), users, macOS `defaults` |
 | `fspec-remote` | Remote hosts: ssh and tar command lines, the spec shipment, the probe check, `--all` ordering |
 | `fspec-switch` | `fspec switch` and `forget`: btrfs and bootloader detection, the boot owner record, the command plans per distro and for `--adopt-boot`, the `--reset-var` staging |
-| `fspec-build` | Source builds: recipe detection, the `.tar.zst` packer, the `ci packages` workflow, `update --cache` |
+| `fspec-build` | Source builds: recipe detection, the `.tar.zst` packer, builders over ssh with the local fallback, the `ci packages` workflow, `update --cache` |
 | `fspec` | The CLI |
 
 Builtins validate their arguments against the `fspec-core` types as soon as

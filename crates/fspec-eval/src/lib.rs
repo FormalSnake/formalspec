@@ -393,6 +393,9 @@ fn host_<'v>(
     if let Some(users) = map.get_mut("users") {
         untag(&what, "users", "user", users)?;
     }
+    if let Some(builders) = map.get_mut("builders") {
+        untag(&what, "builders", "builder", builders)?;
+    }
 
     let facts_value = facts_struct(heap, &facts);
     let mut resources = Vec::new();
@@ -569,6 +572,13 @@ fn builtins(builder: &mut GlobalsBuilder) {
         #[starlark(kwargs)] kwargs: Value<'v>,
     ) -> anyhow::Result<Resource_> {
         make::<Resource>("user", &["name"], args, kwargs)
+    }
+
+    fn builder<'v>(
+        #[starlark(args)] args: UnpackTuple<Value<'v>>,
+        #[starlark(kwargs)] kwargs: Value<'v>,
+    ) -> anyhow::Result<Resource_> {
+        make_untagged::<fspec_core::resource::Builder>("builder", &["name"], args, kwargs)
     }
 
     fn secret<'v>(

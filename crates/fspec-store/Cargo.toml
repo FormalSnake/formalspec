@@ -11,6 +11,7 @@ base64.workspace = true
 brotli-decompressor.workspace = true
 diffy.workspace = true
 flate2.workspace = true
+fspec-build.workspace = true
 fspec-core.workspace = true
 lzma-rs.workspace = true
 ruzstd.workspace = true
