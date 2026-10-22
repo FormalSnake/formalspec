@@ -1,6 +1,7 @@
 //! Patches on packages that ship as an unpacked tree (npm, release archives): applied in pure
 //! Rust before the tree gets its store path. Git-style or plain unified diffs with `a/` and `b/`
-//! prefixes; text changes, file creation, deletion and rename.
+//! prefixes; text changes, file creation, deletion and rename (of any file, binary included, when
+//! the rename changes no content).
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -31,7 +32,12 @@ fn apply(tree: &Path, text: &str) -> Result<()> {
         let file = file?;
         let PatchKind::Text(patch) = file.patch() else { bail!("binary patches are not supported") };
         let mode = file.new_mode().copied();
-        match file.operation().strip_prefix(1) {
+        // `rename from` and `copy from` lines carry no a/ b/ prefix, so only the rest is stripped.
+        let op = match file.operation() {
+            op @ (FileOperation::Rename { .. } | FileOperation::Copy { .. }) => op.strip_prefix(0),
+            op => op.strip_prefix(1),
+        };
+        match op {
             FileOperation::Modify { modified, .. } => {
                 let path = inside(tree, &modified)?;
                 let base = read(&path)?;
@@ -51,6 +57,11 @@ fn apply(tree: &Path, text: &str) -> Result<()> {
             }
             FileOperation::Rename { from, to } => {
                 let (src, dest) = (inside(tree, &from)?, inside(tree, &to)?);
+                // A pure rename carries no hunks and may move a binary file (Discord's app.asar).
+                if patch.hunks().is_empty() {
+                    fs::rename(&src, &dest).with_context(|| format!("renaming {from} to {to}"))?;
+                    continue;
+                }
                 write(&dest, &patched(&read(&src)?, patch, &from)?, mode)?;
                 fs::remove_file(&src).with_context(|| format!("removing {from}"))?;
             }
@@ -119,6 +130,22 @@ diff --git a/gone.txt b/gone.txt
         assert_eq!(fs::read_to_string(dir.path().join("src/hello.txt")).unwrap(), "hello\npatched\n");
         assert_eq!(fs::read_to_string(dir.path().join("new.txt")).unwrap(), "fresh\n");
         assert!(!dir.path().join("gone.txt").exists());
+    }
+
+    #[test]
+    fn a_pure_rename_moves_a_binary_file() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("resources")).unwrap();
+        fs::write(dir.path().join("resources/app.asar"), [0u8, 159, 146, 150]).unwrap();
+        let rename = "\
+diff --git a/resources/app.asar b/resources/_app.asar
+similarity index 100%
+rename from resources/app.asar
+rename to resources/_app.asar
+";
+        apply(dir.path(), rename).unwrap();
+        assert_eq!(fs::read(dir.path().join("resources/_app.asar")).unwrap(), [0u8, 159, 146, 150]);
+        assert!(!dir.path().join("resources/app.asar").exists());
     }
 
     #[test]

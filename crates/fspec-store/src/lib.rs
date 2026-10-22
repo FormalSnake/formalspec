@@ -12,10 +12,11 @@ mod patch;
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use fspec_core::apply::Records;
+use fspec_core::facts::Os;
 use fspec_core::journal::{Journal, copy_any, remove_any};
 use fspec_core::lock::{Artifact, LockedPkg};
 use fspec_core::resource::{Pkg, PkgMode, Source};
@@ -43,6 +44,9 @@ struct Installed {
     id: String,
     /// Executable name to path inside `store`.
     bins: BTreeMap<String, String>,
+    /// Path under `/usr/local/share` to the path inside `store` it links to.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    share: BTreeMap<String, String>,
     locked: LockedPkg,
 }
 
@@ -178,6 +182,28 @@ impl Backend for StoreBackend {
         Phase::Store
     }
 
+    fn check(&self, cx: &Cx, r: &Resource) -> Result<()> {
+        let Resource::Pkg(p) = r else { return Ok(()) };
+        if let Source::Git { deps, image: None, .. } = &p.source
+            && !deps.is_empty()
+        {
+            bail!("git(deps = ...) needs image = ... to install them into");
+        }
+        if !p.share.is_empty() && cx.facts.os != Os::Linux {
+            bail!("share links into /usr/local/share, which only Linux searches");
+        }
+        for (dest, rel) in &p.share {
+            let normal = |s: &str| Path::new(s).components().all(|c| matches!(c, Component::Normal(_)));
+            if !normal(dest) || Path::new(dest).components().count() < 2 {
+                bail!("share: `{dest}` must name an entry inside a directory of /usr/local/share, like icons/<theme>");
+            }
+            if rel != "." && !normal(rel) {
+                bail!("share: `{rel}` must be a path inside the package, or `.`");
+            }
+        }
+        Ok(())
+    }
+
     /// The lock moved past the installed version (pinned only), or a link went missing.
     fn drift(&self, cx: &Cx, entry: &Entry) -> Result<Vec<String>> {
         let Resource::Pkg(p) = &entry.resource else { return Ok(vec![]) };
@@ -201,6 +227,10 @@ impl Backend for StoreBackend {
             inst.bins.keys().filter(|b| fs::metadata(root.join("current/bin").join(b)).is_err()).cloned().collect();
         if !broken.is_empty() {
             notes.push(format!("not linked in current: {}", broken.join(", ")));
+        }
+        let unshared: Vec<_> = inst.share.keys().filter(|d| !is_link(&share_path(cx, d))).cloned().collect();
+        if !unshared.is_empty() {
+            notes.push(format!("not linked in /usr/local/share: {}", unshared.join(", ")));
         }
         Ok(notes)
     }
@@ -243,6 +273,9 @@ impl Backend for StoreBackend {
                 for name in before.bins.keys() {
                     generation.unlink(name)?;
                 }
+                for dest in before.share.keys() {
+                    unshare(cx, dest, journal)?;
+                }
             }
             if op.is_removal() {
                 continue;
@@ -253,6 +286,9 @@ impl Backend for StoreBackend {
             };
             for (name, rel) in &inst.bins {
                 generation.link(name, &link_target(&inst.store, rel))?;
+            }
+            for (dest, rel) in &inst.share {
+                share(cx, dest, &live_path(&inst.store, rel), journal)?;
             }
             records.insert(op.key.clone(), inst.to_record());
         }
@@ -285,8 +321,9 @@ fn unpack_into(cx: &Cx, p: &Pkg, origin: &Origin, dirname: &str, dest: &Path, sc
             let body = cx.fetch.get(url)?;
             archive::verify(&body, hash).with_context(|| format!("verifying {url}"))?;
             match &p.source {
-                // A file that is not an archive keeps its own name and is data, not a command.
-                Source::Url { .. } if !archive::is_archive(&body) => {
+                // A file that is neither an archive nor an ELF executable (an AppImage is one)
+                // keeps its own name and is data, not a command.
+                Source::Url { .. } if !archive::is_archive(&body) && !archive::is_elf(&body) => {
                     let name = url.rsplit('/').next().filter(|n| !n.is_empty()).unwrap_or(&p.name);
                     fs::create_dir_all(dest)?;
                     fs::write(dest.join(name), &body)?;
@@ -360,10 +397,52 @@ fn install(cx: &Cx, p: &Pkg, staging: &Path, journal: &mut Journal) -> Result<In
             (format!("store/{dirname}"), bins)
         }
     };
-    if bins.is_empty() {
-        bail!("it has no executables to link");
+    if bins.is_empty() && p.share.is_empty() {
+        bail!("it has no executables to link and no share");
     }
-    Ok(Installed { store, version: t.version, id: t.id, bins, locked: t.locked.clone() })
+    let tree = if Path::new(&store).is_absolute() { PathBuf::from(&store) } else { root.join(&store) };
+    for (dest, rel) in &p.share {
+        if fs::symlink_metadata(tree.join(rel)).is_err() {
+            bail!("share: `{rel}` (for {dest}) is not in the package");
+        }
+    }
+    Ok(Installed { store, version: t.version, id: t.id, bins, share: p.share.clone(), locked: t.locked.clone() })
+}
+
+fn is_link(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
+}
+
+fn share_path(cx: &Cx, dest: &str) -> PathBuf {
+    cx.paths.system("/usr/local/share").join(dest)
+}
+
+/// What a share link points at on the live system: our store is always `/opt/fspec/store`,
+/// whatever root this apply writes under.
+fn live_path(store: &str, rel: &str) -> PathBuf {
+    let base = if Path::new(store).is_absolute() { PathBuf::from(store) } else { Path::new("/opt/fspec").join(store) };
+    if rel == "." { base } else { base.join(rel) }
+}
+
+/// Link `/usr/local/share/<dest>` to `target`, refusing to replace anything but a link.
+fn share(cx: &Cx, dest: &str, target: &Path, journal: &mut Journal) -> Result<()> {
+    let at = share_path(cx, dest);
+    if fs::symlink_metadata(&at).is_ok_and(|m| !m.file_type().is_symlink()) {
+        bail!("{} exists and is not a link fspec made", at.display());
+    }
+    journal.backup(&at)?;
+    remove_any(&at)?;
+    fs::create_dir_all(at.parent().context("a share path has a parent")?)?;
+    std::os::unix::fs::symlink(target, &at).with_context(|| format!("linking {}", at.display()))
+}
+
+fn unshare(cx: &Cx, dest: &str, journal: &mut Journal) -> Result<()> {
+    let at = share_path(cx, dest);
+    if is_link(&at) {
+        journal.backup(&at)?;
+        remove_any(&at)?;
+    }
+    Ok(())
 }
 
 fn bins_of(p: &Pkg, artifact: &Artifact, dir: &Path) -> Result<BTreeMap<String, String>> {
@@ -385,6 +464,17 @@ fn bins_of(p: &Pkg, artifact: &Artifact, dir: &Path) -> Result<BTreeMap<String, 
         }
         bins
     };
+    if !p.bins.is_empty() {
+        let missing: Vec<&String> = p.bins.iter().filter(|b| !bins.contains_key(*b)).collect();
+        if !missing.is_empty() {
+            bail!(
+                "bins: {} not among its executables ({})",
+                missing.iter().map(|b| format!("`{b}`")).collect::<Vec<_>>().join(", "),
+                bins.keys().cloned().collect::<Vec<_>>().join(", ")
+            );
+        }
+        bins.retain(|name, _| p.bins.contains(name));
+    }
     for (name, target) in &p.links {
         let rel = bins.get(target).cloned().with_context(|| {
             format!(
@@ -397,8 +487,24 @@ fn bins_of(p: &Pkg, artifact: &Artifact, dir: &Path) -> Result<BTreeMap<String, 
     Ok(bins)
 }
 
-/// Every executable regular file in the top two levels, shallower ones winning name clashes.
+/// The executables of a tree the lock names none for. A tree laid out as an install prefix, with
+/// `bin/` at its root or in its single top-level directory, links what that `bin/` holds, so
+/// helpers under `lib/` or `libexec/` stay private. Any other tree links every executable regular
+/// file in its top two levels, shallower ones winning name clashes.
 fn discover(dir: &Path) -> BTreeMap<String, String> {
+    if let Some((bin, prefix)) = prefix_bin(dir) {
+        let mut bins = BTreeMap::new();
+        for entry in fs::read_dir(&bin).into_iter().flatten().flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') {
+                continue;
+            }
+            if fs::metadata(entry.path()).is_ok_and(|m| m.is_file() && is_executable(&m)) {
+                bins.insert(name.clone(), format!("{prefix}bin/{name}"));
+            }
+        }
+        return bins;
+    }
     let mut bins = BTreeMap::new();
     let mut level = vec![(dir.to_path_buf(), String::new())];
     for depth in 0..2 {
@@ -419,6 +525,18 @@ fn discover(dir: &Path) -> BTreeMap<String, String> {
         level = subdirs;
     }
     bins
+}
+
+/// `bin/` at the root of the tree or inside its only entry, with the path prefix that leads to it.
+fn prefix_bin(dir: &Path) -> Option<(PathBuf, String)> {
+    let is_dir = |p: &Path| fs::symlink_metadata(p).is_ok_and(|m| m.is_dir());
+    if is_dir(&dir.join("bin")) {
+        return Some((dir.join("bin"), String::new()));
+    }
+    let mut entries = fs::read_dir(dir).ok()?.flatten();
+    let (Some(only), None) = (entries.next(), entries.next()) else { return None };
+    let bin = only.path().join("bin");
+    is_dir(&bin).then(|| (bin, format!("{}/", only.file_name().to_string_lossy())))
 }
 
 fn is_executable(meta: &fs::Metadata) -> bool {

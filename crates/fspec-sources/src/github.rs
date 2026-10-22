@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, anyhow, bail};
+use fspec_core::fetch::is_not_found;
 use fspec_core::lock::{Artifact, LockedPkg};
 use serde::Deserialize;
 
@@ -80,8 +81,10 @@ pub fn pick_release(repo: &str, cutoff: Option<i64>, prefix: Option<&str>, cx: &
 pub fn pick_release_tagged(repo: &str, version: &str, cx: &Cx) -> Result<Release> {
     for tag in [format!("v{version}"), version.to_string()] {
         let url = format!("https://api.github.com/repos/{repo}/releases/tags/{tag}");
-        if let Ok(body) = cx.fetch.get_json(&url) {
-            return serde_json::from_value(body).with_context(|| format!("parsing {url}"));
+        match cx.fetch.get_json(&url) {
+            Ok(body) => return serde_json::from_value(body).with_context(|| format!("parsing {url}")),
+            Err(e) if is_not_found(&e) => continue,
+            Err(e) => return Err(e),
         }
     }
     bail!("{repo} has no release tagged v{version} or {version}")

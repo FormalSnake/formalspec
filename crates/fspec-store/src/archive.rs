@@ -27,12 +27,18 @@ pub fn verify(body: &[u8], sri: &str) -> Result<()> {
     Ok(())
 }
 
-/// Unpack a downloaded artifact into `dest`, picking the format from its magic bytes. Anything
-/// that is not an archive is a single executable and lands as `dest/<name>`.
+/// Whether `body` is a format [`unpack`] opens: gzip, xz, zstd or zip by magic bytes, an Electron
+/// asar, or a brotli-compressed tar (brotli has no magic, so the body is decoded and checked).
 pub fn is_archive(body: &[u8]) -> bool {
     [&[0x1f, 0x8b][..], &[0xfd, b'7', b'z', b'X', b'Z', 0], &[0x28, 0xb5, 0x2f, 0xfd], b"PK\x03\x04"]
         .iter()
         .any(|magic| body.starts_with(magic))
+        || is_asar(body)
+        || (!is_elf(body) && brotli_tar(body).is_some())
+}
+
+pub fn is_elf(body: &[u8]) -> bool {
+    body.starts_with(b"\x7fELF")
 }
 
 pub fn unpack(body: &[u8], dest: &Path, name: &str) -> Result<()> {
@@ -48,12 +54,75 @@ pub fn unpack(body: &[u8], dest: &Path, name: &str) -> Result<()> {
         untar(dec, dest)
     } else if body.starts_with(b"PK\x03\x04") {
         zip::ZipArchive::new(Cursor::new(body)).and_then(|mut z| z.extract(dest)).context("unpacking zip")
+    } else if is_asar(body) {
+        unasar(body, dest).context("unpacking asar")
+    } else if let Some(tar) = (!is_elf(body)).then(|| brotli_tar(body)).flatten() {
+        untar(&tar[..], dest)
     } else {
         let path = dest.join(name);
         fs::write(&path, body).with_context(|| format!("writing {}", path.display()))?;
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
         Ok(())
     }
+}
+
+/// The tar inside a brotli stream, as Discord ships its `full.distro` builds.
+fn brotli_tar(body: &[u8]) -> Option<Vec<u8>> {
+    let mut tar = Vec::new();
+    brotli_decompressor::Decompressor::new(body, 64 * 1024).read_to_end(&mut tar).ok()?;
+    (tar.len() > 262 && &tar[257..262] == b"ustar").then_some(tar)
+}
+
+/// An Electron asar starts with a pickle holding the header size, then a pickle holding the JSON
+/// file table.
+fn is_asar(body: &[u8]) -> bool {
+    body.len() > 16 && body[..4] == [4, 0, 0, 0] && body[16..].starts_with(b"{\"files\"")
+}
+
+/// Unpack an asar the way moonlight's own extractor reads one: the JSON table maps names to
+/// `{"files": ...}` directories or `{"size", "offset"}` files, offsets counted from the end of
+/// the header pickle.
+fn unasar(body: &[u8], dest: &Path) -> Result<()> {
+    let u32_at = |at: usize| -> Result<usize> {
+        let b = body.get(at..at + 4).context("asar header is truncated")?;
+        Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize)
+    };
+    let header_pickle = u32_at(8)?;
+    let json_len = u32_at(12)?;
+    let json = body.get(16..16 + json_len).context("asar header is truncated")?;
+    let table: serde_json::Value = serde_json::from_slice(json).context("parsing the asar header")?;
+    let base = 12 + header_pickle;
+    fn walk(body: &[u8], base: usize, dir: &serde_json::Value, at: &Path) -> Result<()> {
+        let files = dir.get("files").and_then(|f| f.as_object()).context("asar directory has no files")?;
+        fs::create_dir_all(at)?;
+        for (name, entry) in files {
+            if name.is_empty() || name == "." || name == ".." || name.contains('/') {
+                bail!("asar entry `{name}` leaves its directory");
+            }
+            let path = at.join(name);
+            if entry.get("files").is_some() {
+                walk(body, base, entry, &path)?;
+                continue;
+            }
+            if entry.get("unpacked").and_then(|u| u.as_bool()) == Some(true) || entry.get("link").is_some() {
+                bail!("asar entry `{name}` lives outside the archive");
+            }
+            let size = entry.get("size").and_then(|s| s.as_u64()).context("asar file has no size")? as usize;
+            let offset: usize = entry
+                .get("offset")
+                .and_then(|o| o.as_str())
+                .and_then(|o| o.parse().ok())
+                .context("asar file has no offset")?;
+            let start = base + offset;
+            let data = body.get(start..start + size).with_context(|| format!("asar file `{name}` is truncated"))?;
+            fs::write(&path, data)?;
+            if entry.get("executable").and_then(|e| e.as_bool()) == Some(true) {
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
+            }
+        }
+        Ok(())
+    }
+    walk(body, base, &table, dest)
 }
 
 fn untar(reader: impl Read, dest: &Path) -> Result<()> {
@@ -113,5 +182,44 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         unpack(b"\x7fELF raw", dir.path(), "tool").unwrap();
         assert!(is_exec(&dir.path().join("tool")));
+    }
+
+    #[test]
+    fn unpacks_a_brotli_tar() {
+        let br = include_bytes!("../tests/fixtures/hello.tar.br");
+        assert!(is_archive(br));
+        let dir = tempfile::tempdir().unwrap();
+        unpack(br, dir.path(), "hello").unwrap();
+        assert!(is_exec(&dir.path().join("hello-1.0.0/hello")));
+        assert!(!is_archive(b"plain text that is no brotli stream"));
+    }
+
+    /// An asar as `asar pack` writes it: two pickles, then the file bodies.
+    fn asar(table: &str, data: &[u8]) -> Vec<u8> {
+        let padded = table.len().div_ceil(4) * 4;
+        let mut out = Vec::new();
+        out.extend(4u32.to_le_bytes());
+        out.extend((padded as u32 + 8).to_le_bytes());
+        out.extend((padded as u32 + 4).to_le_bytes());
+        out.extend((table.len() as u32).to_le_bytes());
+        out.extend(table.as_bytes());
+        out.resize(16 + padded, 0);
+        out.extend(data);
+        out
+    }
+
+    #[test]
+    fn unpacks_an_asar() {
+        let table = r#"{"files":{"manifest.json":{"size":2,"offset":"0"},"bin":{"files":{"run":{"size":3,"offset":"2","executable":true}}}}}"#;
+        let body = asar(table, b"{}sh!");
+        assert!(is_archive(&body));
+        let dir = tempfile::tempdir().unwrap();
+        unpack(&body, dir.path(), "ext").unwrap();
+        assert_eq!(fs::read(dir.path().join("manifest.json")).unwrap(), b"{}");
+        assert_eq!(fs::read(dir.path().join("bin/run")).unwrap(), b"sh!");
+        assert!(is_exec(&dir.path().join("bin/run")));
+
+        let escape = asar(r#"{"files":{"..":{"files":{}}}}"#, b"");
+        assert!(unpack(&escape, tempfile::tempdir().unwrap().path(), "ext").is_err());
     }
 }

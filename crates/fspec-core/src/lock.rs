@@ -71,8 +71,9 @@ pub struct Artifact {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit: Option<String>,
     /// Executables inside the unpacked artifact, relative to its root (`rg`,
-    /// `ripgrep-15.1.0-x86_64-unknown-linux-musl/rg`). Empty: link every executable regular
-    /// file in the top two levels. `<command>=<path>` names the command differently.
+    /// `ripgrep-15.1.0-x86_64-unknown-linux-musl/rg`). Empty: link what a prefix tree's `bin/`
+    /// holds, else every executable regular file in the top two levels. `<command>=<path>` names
+    /// the command differently.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bins: Vec<String>,
     /// For pypi packages: every distribution to install, one `name==version --hash=sha256:...`

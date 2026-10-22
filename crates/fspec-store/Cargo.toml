@@ -8,6 +8,7 @@ repository.workspace = true
 [dependencies]
 anyhow.workspace = true
 base64.workspace = true
+brotli-decompressor.workspace = true
 diffy.workspace = true
 flate2.workspace = true
 fspec-core.workspace = true

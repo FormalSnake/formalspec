@@ -182,6 +182,13 @@ pub trait Backend {
     /// Make `ops` live. Journal an undo step before each live mutation. Called once with the
     /// removals and once with the adds and updates.
     fn commit(&self, cx: &Cx, ops: &[Op], staging: &Path, journal: &mut Journal) -> Result<Records>;
+
+    /// Called with the adds and updates once every backend has committed them, for the part of
+    /// a change that needs what later phases installed: group membership needs the groups that
+    /// packages create.
+    fn settle(&self, _cx: &Cx, _ops: &[Op], _journal: &mut Journal) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Plan for one scope: the config diff plus drift that backends report on unchanged resources.
@@ -367,6 +374,12 @@ fn commit_all(
         let rest: Vec<Op> = ops.iter().filter(|o| !o.is_removal()).cloned().collect();
         if !rest.is_empty() {
             records.extend(b.commit(cx, &rest, staging, journal).with_context(|| format!("{}: applying", b.name()))?);
+        }
+    }
+    for (b, ops) in by_backend {
+        let rest: Vec<Op> = ops.iter().filter(|o| !o.is_removal()).cloned().collect();
+        if !rest.is_empty() {
+            b.settle(cx, &rest, journal).with_context(|| format!("{}: settling", b.name()))?;
         }
     }
     restore_returned(cx, ops().filter(|o| o.current.is_none() && !o.is_removal()), journal)?;

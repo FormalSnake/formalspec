@@ -1,6 +1,7 @@
-//! Accounts. Linux accounts are created and adjusted with `useradd` and `usermod`. On macOS the
-//! account must already exist and only the login shell is managed. Removing a `user` never
-//! deletes the account.
+//! Accounts. Linux accounts are created and adjusted with `useradd` and `usermod`, and join their
+//! supplementary groups once packages are in, since packages create groups like `docker`. On
+//! macOS the account must already exist and only the login shell is managed. Removing a `user`
+//! never deletes the account.
 
 use std::path::Path;
 
@@ -103,6 +104,17 @@ impl Backend for UsersBackend {
         }
         Ok(records)
     }
+
+    fn settle(&self, cx: &Cx, ops: &[Op], journal: &mut Journal) -> Result<()> {
+        if cx.facts.os != Os::Linux {
+            return Ok(());
+        }
+        for op in ops {
+            let Resource::User(u) = op.resource() else { unreachable!("users claims users") };
+            join_groups(cx, u, journal)?;
+        }
+        Ok(())
+    }
 }
 
 fn check_user(u: &User) -> Result<()> {
@@ -159,9 +171,6 @@ fn linux(cx: &Cx, u: &User, shell: Option<&str>, journal: &mut Journal) -> Resul
         if let Some(shell) = shell {
             add = add.args(["-s", shell]);
         }
-        if !u.groups.is_empty() {
-            add = add.args(["-G".to_string(), u.groups.join(",")]);
-        }
         journal.record(Undo::Run { cmd: Cmd::new("userdel").arg(&u.name) })?;
         cx.runner.check(&add.arg(&u.name))?;
         return Ok(());
@@ -183,7 +192,10 @@ fn linux(cx: &Cx, u: &User, shell: Option<&str>, journal: &mut Journal) -> Resul
         journal.record(Undo::Run { cmd: revert.arg(&u.name) })?;
         cx.runner.check(&change.arg(&u.name))?;
     }
+    Ok(())
+}
 
+fn join_groups(cx: &Cx, u: &User, journal: &mut Journal) -> Result<()> {
     let groups = cx.runner.run(&Cmd::new("id").args(["-nG", &u.name]))?;
     let have: Vec<&str> = groups.stdout.split_whitespace().collect();
     let missing: Vec<&String> = u.groups.iter().filter(|g| !have.contains(&g.as_str())).collect();

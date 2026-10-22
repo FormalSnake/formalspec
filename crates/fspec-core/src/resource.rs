@@ -75,6 +75,7 @@ impl Host {
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
 pub enum System {
     Image(Image),
     Distro(Distro),
@@ -108,6 +109,8 @@ pub struct Repo {
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+// A host holds a few hundred resources at most; boxing Pkg would buy nothing measurable.
+#[allow(clippy::large_enum_variant)]
 pub enum Resource {
     Pkg(Pkg),
     File(File),
@@ -228,14 +231,19 @@ pub struct Pkg {
     /// `$FSPEC_OUT`, run with `$FSPEC_SRC` set to the patched checkout.
     #[serde(default)]
     pub build: Vec<String>,
-    /// Executables a source build packs at the top of its artifact, by file name. Empty: every
-    /// executable the recipe produced.
+    /// The commands to link, by file name: a source build packs only these, and any store
+    /// package links only these of the executables it found. Empty: all of them.
     #[serde(default)]
     pub bins: Vec<String>,
     /// More command names for one of the package's executables, for tools that act on the name
     /// they run as: `{"cargo": "rustup"}` links `cargo` to rustup's proxy.
     #[serde(default)]
     pub links: BTreeMap<String, String>,
+    /// Data trees linked where the system looks for them: a path under `/usr/local/share`
+    /// (`icons/Bibata-Modern-Classic`) to a path inside the package (`.` for its root). A package
+    /// with `share` may have no executables: fonts, icon, cursor and GTK themes.
+    #[serde(default)]
+    pub share: BTreeMap<String, String>,
     /// App data paths removed with the package.
     #[serde(default)]
     pub data: Vec<String>,
@@ -306,6 +314,13 @@ pub enum Source {
         url: String,
         #[serde(default = "main")]
         rev: String,
+        /// Packages the build needs, installed with the image's package manager before the
+        /// recipe runs in it.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        deps: Vec<String>,
+        /// The OCI image the build runs in. Unset: on the build machine itself.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        image: Option<String>,
     },
     Nix {
         attr: String,
@@ -379,7 +394,7 @@ impl fmt::Display for Source {
             | Source::Zypper(d) => {
                 write!(f, "{kind}:{}", d.names.join(","))
             }
-            Source::Git { url, rev } => write!(f, "{kind}:{url}@{rev}"),
+            Source::Git { url, rev, .. } => write!(f, "{kind}:{url}@{rev}"),
             Source::Nix { attr } => write!(f, "{kind}:{attr}"),
         }
     }

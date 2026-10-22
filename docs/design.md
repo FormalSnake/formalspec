@@ -105,6 +105,11 @@ package name or service name fail the plan.
 `rev = "main"` and `"latest"` are resolved by `fspec update`, never at apply,
 so the lock always holds an exact commit or version.
 
+Resolvers read GitHub's API with a token when one is available: `GITHUB_TOKEN`,
+else what `gh auth token` prints. Without one GitHub allows 60 requests an hour,
+and a refusal for that reason is reported as the rate limit (with when it
+resets), never as a missing release.
+
 ### Modes
 
 - `pinned` (default): exact version and hash from the lock.
@@ -139,8 +144,9 @@ run fspec update"), at `apply` and as a drift note in `plan`.
 
 Fields on `pkg` for source builds: `patches`, `build_flags` (appended to the
 recipe's configure or build command), `build = ["sh", "-c", "…"]` (replaces
-recipe detection) and `bins = ["name", …]` (the executables to ship, by file
-name; default is every executable the recipe produced).
+recipe detection) and `bins = ["name", …]` (the executables to ship and link,
+by file name; default is every executable the recipe produced). `bins` works the
+same on prebuilt archives: it picks among the executables the store finds.
 
 **Recipes.** `fspec build` checks out the locked commit, applies the patches
 with `git apply`, then picks the first match: `Cargo.toml`, `meson.build`,
@@ -157,7 +163,31 @@ them.
 | explicit | the `build` command, with `FSPEC_SRC` (the patched checkout) and `FSPEC_OUT` (put executables in `$FSPEC_OUT/bin`) in its environment; `build_flags` do not apply |
 
 Every command goes through the `Runner`. Non-Cargo recipes install into
-`<out>`, so executables are read from `<out>/bin`.
+`<out>`, a prefix, and the artifact is that whole tree (directories, modes and
+symlinks kept), so data in `share/` and helpers in `lib/` ship with the
+executables in `bin/`. A Cargo build ships the executables of `<build>/release`
+at the top.
+
+**Build dependencies.** A runner has only what its image ships, and the
+binary has to load on the host, so a `git` source can name the image its build
+runs in and the packages the build needs there:
+
+```python
+pkg("librepods", source = git("https://github.com/…/omarchy-pods", rev = "…",
+    image = "registry.opensuse.org/opensuse/tumbleweed",
+    deps = ["cmake", "gcc-c++", "qt6-base-devel", "libpulse-devel"]))
+```
+
+With `image` set, `fspec build` still checks out and patches on the build
+machine, then runs the whole recipe as one `podman run --rm` (`docker run`
+where podman is missing) of that image, with the work directory mounted at its
+own path and `FSPEC_SRC` and `FSPEC_OUT` passed in. `deps` install first, by
+whichever of zypper, dnf, apt-get, pacman, xbps-install or apk the image has,
+so they are named the way that distro names them (`pkgconfig(gtk4)` works on
+zypper and dnf). Building in the host's own distro links against the same
+sonames the host has. `deps` without `image` fails the plan. Pin the image by
+digest (`…@sha256:…`) for builds that repeat exactly. The CI workflow needs no
+change: GitHub's Ubuntu runners have podman.
 
 **Commands.**
 
@@ -193,7 +223,8 @@ package. A reference without a digest is refused. The host never compiles.
 
 Patches on npm and other packages that ship as an unpacked tree need no build:
 `prepare` applies them in pure Rust (the `diffy` crate: git or unified diffs
-with `a/` and `b/` prefixes, text edits, file creation, deletion and rename)
+with `a/` and `b/` prefixes, text edits, file creation, deletion and rename; a
+rename with no hunks moves the file as is, so it works on binaries)
 to the package directory (`package/` for npm, `node_modules/<name>` after an
 `npm install`, else the archive's single top-level directory) before the tree
 gets its store path. The store directory name hashes the artifact hash together
@@ -289,13 +320,49 @@ A generation is `generations/<n>/bin/`, symlinks into the store (relative, so a
 rooted tree stays movable). Each apply starts from the links of the generation
 `current` points at, applies only the changed packages, and renames a temp
 symlink over `current` last; the journal restores the old link if anything
-fails. Which executables get linked: the lock artifact's `bins` when set, else
-every executable regular file in the top two levels of the unpacked tree; for
-npm, the package's `bin` entries. Store directories are named
+fails. Which executables get linked: the lock artifact's `bins` when set; else,
+for a tree laid out as an install prefix (`bin/` at its root or in its single
+top-level directory, as FormalShell's `formalshell/bin/` and terminal-browser's
+`terminal-browser/bin/`), the executables in that `bin/`; else every executable
+regular file in the top two levels of the unpacked tree; for npm, the package's
+`bin` entries. A prefix keeps its private helpers in `lib/` or `libexec/`
+(FormalShell ships its own `matugen` there), so searching it deeper would link
+them over the real commands; `bin/` is where a prefix puts what it means to
+expose. `bins = ["name", …]` on the `pkg` then keeps only those commands, for an
+archive whose top levels hold more executables than commands (Discord's
+`files/` also holds `chrome_crashpad_handler`). Store directories are named
 `<hash8>-<name>-<version>`, never rewritten, and reused when present. An
 artifact is verified against its `sha256-` or `sha512-` SRI hash before
-anything is unpacked (`.tar.gz`, `.tar.xz`, `.tar.zst`, `.zip`, or a bare
-binary named after the package).
+anything is unpacked (`.tar.gz`, `.tar.xz`, `.tar.zst`, `.zip`, a
+brotli-compressed tar, an Electron `.asar`, or a bare binary named after the
+package). Formats are told apart by their bytes, not their names. Brotli has no
+magic number, so a download that matches nothing else is decoded and kept as a
+tar only when the result is one (`ustar` at offset 257): Discord publishes its
+Linux builds that way (`full.distro`). An asar is unpacked the way moonlight's
+own extractor reads it, refusing entries that name `..` or live outside the
+archive; moonlight's extensions ship as asars.
+
+Data-only packages (fonts, icon and cursor themes, GTK themes) have no
+executables; they declare where their trees go with `share`, a map from a path
+under `/usr/local/share` to a path inside the package (`.` for its root):
+
+```python
+pkg("bibata", source = url(".../Bibata-Modern-Classic.tar.xz"),
+    share = {"icons/Bibata-Modern-Classic": "Bibata-Modern-Classic"})
+pkg("geist-mono-nerd-font", source = url(".../GeistMono.tar.xz"),
+    share = {"fonts/GeistMonoNerdFont": "."})
+```
+
+Store packages belong to the system scope, so the links go where every user's
+lookup reaches: fontconfig reads `/usr/local/share/fonts`, and icon, cursor and
+GTK theme lookups walk `XDG_DATA_DIRS`, which defaults to
+`/usr/local/share:/usr/share` (libXcursor's own default path skips
+`/usr/local/share/icons`, so an X11 cursor theme also needs it in
+`XCURSOR_PATH`). Each link points straight at the store path and is replaced
+when the package changes, removed with it, and reported as drift when missing.
+A destination must sit inside a directory (`icons/<theme>`, never `icons`), and
+apply refuses to replace anything there that is not a link. A package with
+neither executables nor `share` is refused. `share` is Linux only.
 
 Each pkg's record keeps the store path, version, linked bins and the lock entry
 it was installed from. `fspec rollback [gen]` re-applies that generation's
@@ -355,8 +422,9 @@ projects in particular:
   added as a package when `dev.star` does not name it. The venv is built for
   the machine, so a pypi package does not run in a container yet.
 - `url("https://...")` is one file or archive at a fixed URL, pinned by its
-  hash. A file that is not an archive keeps its name and is data, not a
-  command: fonts, a model, a fixture.
+  hash. An ELF executable (an AppImage is one) becomes the command named after
+  the package. Any other file that is not an archive keeps its name and is
+  data, not a command: fonts, a model, a fixture.
 
 Each package's tree is exported as `FSPEC_PKG_<NAME>` (`FSPEC_PKG_YT_DLP`), so
 `env` and `shell_hook` can point into it: a venv's interpreter, a font
@@ -722,7 +790,11 @@ escaped. fspec assumes a cron that reads `/etc/cron.d` (cronie, vixie-cron) and
 does not detect the flavour; dcron, busybox crond and snooze are out of scope.
 
 `user` creates Linux accounts with `useradd` and adds missing groups with
-`usermod -aG` (it never removes a group). On macOS it only sets the login shell
+`usermod -aG` (it never removes a group). The account exists from the users
+phase, so files and secrets can be owned by it, but it joins its groups only
+after every phase has committed: packages create groups such as `docker` (a
+sysusers.d file) and `nordvpn` (a postinstall that also empties the group), so
+one apply converges. On macOS it only sets the login shell
 and checks the account and uid; it never creates accounts. Removing a `user`
 stops managing it and leaves the account. `defaults` journals the previous value
 of each key so a failed apply restores it, and removal deletes a key only while
@@ -1436,7 +1508,9 @@ refuses), `drift` reports live divergence for unchanged resources, `prepare`
 fetches and renders into a staging directory, and `commit` makes changes live,
 journaling an undo step before each mutation. The engine commits removals in
 reverse phase order, then adds and updates in phase order (users, files, store,
-packages, services, defaults, system), and writes the new state and
+packages, services, defaults, system). A backend can then `settle` its adds
+and updates, in the same phase order, for work that needs what later phases
+installed (group membership). The engine writes the new state and
 `generations/<n>.json` only after every commit succeeded. Each scope (system,
 user) is its own transaction with its own journal. A non-root `fspec apply`
 runs the system scope through `sudo fspec apply --scope system`, then the user

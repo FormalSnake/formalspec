@@ -273,6 +273,121 @@ fn artifact_bins_pick_the_links() {
     assert!(!w.root().join("current/bin/helper").exists());
 }
 
+fn with_fields(d: Desired, fields: serde_json::Value) -> Desired {
+    let mut v = serde_json::to_value(&d.resource).unwrap();
+    v.as_object_mut().unwrap().extend(fields.as_object().unwrap().clone());
+    Desired { resource: serde_json::from_value(v).unwrap(), owner: None }
+}
+
+fn lock_tool(w: &mut World, body: Vec<u8>) {
+    w.lock.upsert(locked("tool", "aqua:tool", "1.0.0", "https://example/tool.tar.gz", &body));
+    w.fetch = MapFetch::default().with("https://example/tool.tar.gz", body);
+}
+
+#[test]
+fn a_prefix_tree_links_its_bin_and_keeps_lib_private() {
+    let mut w = World::new();
+    lock_tool(
+        &mut w,
+        tgz(&[
+            ("formalshell/bin/formalshell", "#!/bin/sh\necho shell\n", 0o755),
+            ("formalshell/lib/formalshell/bin/matugen", "#!/bin/sh\necho private\n", 0o755),
+            ("formalshell/lib/formalshell/formalshell-rs", "#!/bin/sh\n", 0o755),
+            ("formalshell/share/formalshell/VERSION", "0.2.0", 0o644),
+        ]),
+    );
+    w.apply(&[aqua("tool")]).unwrap();
+    assert_eq!(w.run("formalshell"), "shell");
+    let linked: Vec<_> = fs::read_dir(w.root().join("current/bin")).unwrap().flatten().map(|e| e.file_name()).collect();
+    assert_eq!(linked, ["formalshell"]);
+}
+
+#[test]
+fn pkg_bins_pick_among_the_executables() {
+    let mut w = World::new();
+    lock_tool(
+        &mut w,
+        tgz(&[
+            ("files/Discord", "#!/bin/sh\necho discord\n", 0o755),
+            ("files/chrome_crashpad_handler", "#!/bin/sh\n", 0o755),
+            ("files/libffmpeg.so", "elf", 0o755),
+        ]),
+    );
+    w.apply(&[with_fields(aqua("tool"), json!({"bins": ["Discord"]}))]).unwrap();
+    assert_eq!(w.run("Discord"), "discord");
+    assert!(!w.root().join("current/bin/libffmpeg.so").exists());
+
+    let err = w.apply(&[with_fields(aqua("tool"), json!({"bins": ["discord"]}))]).unwrap_err();
+    assert!(format!("{err:#}").contains("bins: `discord` not among its executables (Discord, "), "{err:#}");
+}
+
+#[test]
+fn a_url_elf_is_the_command_and_any_other_file_is_data() {
+    let mut w = World::new();
+    let appimage = b"\x7fELF\x02\x01\x01 AppImage".to_vec();
+    let font = b"OTTO font".to_vec();
+    w.lock.upsert(locked(
+        "beeper",
+        "url:https://example/Beeper-4.3.73-x86_64.AppImage",
+        "1",
+        "https://example/Beeper-4.3.73-x86_64.AppImage",
+        &appimage,
+    ));
+    w.lock.upsert(locked("font", "url:https://example/Geist.otf", "1", "https://example/Geist.otf", &font));
+    w.fetch = MapFetch::default()
+        .with("https://example/Beeper-4.3.73-x86_64.AppImage", appimage)
+        .with("https://example/Geist.otf", font);
+    let url = |name: &str, u: &str| pkg(name, json!({"kind": "url", "url": u}), "pinned");
+    w.apply(&[url("beeper", "https://example/Beeper-4.3.73-x86_64.AppImage")]).unwrap();
+    let beeper = w.root().join("current/bin/beeper");
+    assert!(fs::metadata(&beeper).unwrap().permissions().mode() & 0o111 != 0);
+
+    let err = w.apply(&[url("font", "https://example/Geist.otf")]).unwrap_err();
+    assert!(format!("{err:#}").contains("no executables"), "{err:#}");
+}
+
+#[test]
+fn a_data_only_pkg_links_its_share_trees() {
+    let mut w = World::new();
+    let fedora = serde_json::from_value(json!({"kind": "distro", "distro": "fedora", "init": "systemd"})).unwrap();
+    w.facts = Facts::declared("m", "x86_64-linux", Some(&fedora)).unwrap();
+    let body = tgz(&[
+        ("Bibata-Modern-Classic/index.theme", "[Icon Theme]", 0o644),
+        ("Bibata-Modern-Classic/cursors/left_ptr", "cursor", 0o644),
+    ]);
+    let mut l = locked("bibata", "url:https://example/Bibata.tar.gz", "2.0.7", "https://example/Bibata.tar.gz", &body);
+    l.artifacts = BTreeMap::from([("x86_64-linux".to_string(), l.artifacts.remove(PLATFORM).unwrap())]);
+    w.lock.upsert(l);
+    w.fetch = MapFetch::default().with("https://example/Bibata.tar.gz", body);
+    let bibata = |share: serde_json::Value| {
+        with_fields(
+            pkg("bibata", json!({"kind": "url", "url": "https://example/Bibata.tar.gz"}), "pinned"),
+            json!({"share": share}),
+        )
+    };
+
+    let refused = w.plan(&[bibata(json!({"icons": "Bibata-Modern-Classic"}))]);
+    assert!(refused.unsupported[0].contains("must name an entry inside a directory"), "{:?}", refused.unsupported);
+
+    w.apply(&[bibata(json!({"icons/Bibata-Modern-Classic": "Bibata-Modern-Classic"}))]).unwrap();
+    let link = w.paths.system("/usr/local/share/icons/Bibata-Modern-Classic");
+    let target = fs::read_link(&link).unwrap();
+    assert!(target.starts_with("/opt/fspec/store/"), "{}", target.display());
+    assert!(target.to_string_lossy().ends_with("-bibata-2.0.7/Bibata-Modern-Classic"), "{}", target.display());
+    assert!(w.plan(&[bibata(json!({"icons/Bibata-Modern-Classic": "Bibata-Modern-Classic"}))]).changes.is_empty());
+
+    fs::remove_file(&link).unwrap();
+    let drift = w.plan(&[bibata(json!({"icons/Bibata-Modern-Classic": "Bibata-Modern-Classic"}))]);
+    assert_eq!(drift.changes.len(), 1, "{drift:?}");
+
+    w.apply(&[]).unwrap();
+    assert!(fs::symlink_metadata(&link).is_err());
+
+    fs::create_dir_all(&link).unwrap();
+    let err = w.apply(&[bibata(json!({"icons/Bibata-Modern-Classic": "Bibata-Modern-Classic"}))]).unwrap_err();
+    assert!(format!("{err:#}").contains("is not a link fspec made"), "{err:#}");
+}
+
 #[test]
 fn npm_without_dependencies_links_its_bin() {
     let mut w = World::new();

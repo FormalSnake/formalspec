@@ -67,7 +67,8 @@ fn fedora_host() {
     let lines = run.runner.lines();
     for expected in [
         "getent passwd kyan",
-        "useradd -m -u 1000 -s /usr/bin/fish -G wheel,docker kyan",
+        "useradd -m -u 1000 -s /usr/bin/fish kyan",
+        "usermod -aG wheel,docker kyan",
         "systemctl start fspec-caddy.service",
         "systemctl start fspec-backup.timer",
         "systemctl start fspec-tidy.timer",
