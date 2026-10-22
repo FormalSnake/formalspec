@@ -292,6 +292,20 @@ fn removal_deletes_only_unedited_managed_files() {
 }
 
 #[test]
+fn a_dangling_link_in_the_way_becomes_a_directory_and_comes_back_on_rollback() {
+    let w = World::new();
+    std::os::unix::fs::symlink("/nix/store/gone/agents", w.at("agents")).unwrap();
+    w.apply(&want([text("~/agents/a.md", "a")])).unwrap();
+    assert_eq!(w.read("agents/a.md"), "a");
+
+    let w = World::new();
+    std::os::unix::fs::symlink("/nix/store/gone/agents", w.at("agents")).unwrap();
+    fs::write(w.at("blocker"), "i am a file").unwrap();
+    assert!(w.apply(&want([text("~/agents/a.md", "a"), text("~/blocker/b", "x")])).is_err());
+    assert_eq!(fs::read_link(w.at("agents")).unwrap(), Path::new("/nix/store/gone/agents"));
+}
+
+#[test]
 fn rollback_restores_a_file_when_a_later_op_fails() {
     let w = World::new();
     w.apply(&want([text("~/a", "one")])).unwrap();

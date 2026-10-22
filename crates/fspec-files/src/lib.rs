@@ -219,8 +219,25 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
 /// Write-then-rename `bytes` over `dest`, journaling the previous content first. The temporary
 /// file is created 0600 so a secret is never world-readable, even briefly.
 fn install(journal: &mut Journal, dest: &Path, bytes: &[u8], mode: Option<u32>) -> Result<()> {
+    clear_dangling(journal, dest)?;
     journal.backup(dest)?;
     write_atomic(dest, bytes, mode)
+}
+
+/// Swap each dangling symlink among `path`'s ancestors for a directory, journaled. A home shared
+/// with another root keeps that root's links, such as home-manager's into a `/nix/store` this
+/// root does not have, and `create_dir_all` fails on them.
+fn clear_dangling(journal: &mut Journal, path: &Path) -> Result<()> {
+    let mut dirs: Vec<&Path> = path.ancestors().skip(1).collect();
+    dirs.reverse();
+    for dir in dirs {
+        if fs::symlink_metadata(dir).is_ok_and(|m| m.file_type().is_symlink()) && !dir.exists() {
+            journal.backup(dir)?;
+            remove_any(dir)?;
+            fs::create_dir(dir).with_context(|| format!("creating {}", dir.display()))?;
+        }
+    }
+    Ok(())
 }
 
 fn write_atomic(dest: &Path, bytes: &[u8], mode: Option<u32>) -> Result<()> {
@@ -314,6 +331,7 @@ fn commit_link(cx: &Cx, op: &Op, f: &File, path: &Path, journal: &mut Journal) -
     }
     let already = matches!(read_live(path)?, Live::Link(t) if t == target);
     if !already {
+        clear_dangling(journal, path)?;
         journal.backup(path)?;
         let dir = path.parent().context("path has no parent")?;
         fs::create_dir_all(dir)?;
