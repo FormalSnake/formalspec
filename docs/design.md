@@ -247,8 +247,9 @@ whose keys reach the builder. When every builder is unreachable or fails, the
 host builds the package itself and says so, rather than failing. The order is
 always the CI artifact, then builders in the order listed, then the host.
 
-The store directory of a built package hashes the url, the rev and the
-patches. Builders exist for software no distro packages and no release ships,
+The store directory of a built package hashes the url, the rev, the patches
+and the recipe (`build`, `build_flags`, `image`, `deps`), so a changed recipe
+builds anew. Builders exist for software no distro packages and no release ships,
 like FormalShell or a project the user compiles themselves; everything else
 comes from the distro or from a prebuilt release.
 
@@ -348,6 +349,12 @@ This gives FormalSpec three things Nix users expect:
 - `fspec rollback` repoints `current` at the previous generation.
 
 Users put `/opt/fspec/current/bin` on PATH; nothing else exposes store tools.
+`/opt/fspec/current/pkgs/<name>` links each package's whole tree, the stable
+path for a library or data file that other config names by absolute path, on
+every platform: `/opt/fspec/current/pkgs/pam_ssh_agent_auth/lib/pam_ssh_agent_auth.so`
+in `/etc/pam.d/sudo_local`, or SbarLua's `sketchybar.so` in a `LUA_CPATH`. A
+source build may install only such files; a download with no executables and
+no `share` is still refused as a wrong artifact.
 
 A generation is `generations/<n>/bin/`, symlinks into the store (relative, so a
 rooted tree stays movable). Each apply starts from the links of the generation

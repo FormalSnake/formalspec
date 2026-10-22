@@ -1,5 +1,7 @@
-//! A generation is `<fspec root>/generations/<n>/bin/` full of symlinks into the store, and
-//! `<fspec root>/current` is a symlink to the active one.
+//! A generation is `<fspec root>/generations/<n>/bin/` full of symlinks into the store, plus
+//! `pkgs/<name>` linking each package's whole tree, and `<fspec root>/current` is a symlink to
+//! the active one. `current/pkgs/<name>/...` is the stable path to a library or data file that
+//! other config has to name, like a PAM module.
 
 use std::fs;
 use std::os::unix::fs::symlink;
@@ -20,7 +22,10 @@ pub fn current_dir(root: &Path) -> Option<PathBuf> {
     fs::read_link(root.join("current")).ok().map(|t| root.join(t))
 }
 
-/// Where a link in `generations/<n>/bin/` points for `rel` inside `store`: relative for
+/// The directories of a generation that hold links into the store.
+const DIRS: [&str; 2] = ["bin", "pkgs"];
+
+/// Where a link in `generations/<n>/bin/` (or `pkgs/`) points for `rel` inside `store`: relative for
 /// our own store (so a rooted tree can be moved), absolute for an outside path such as `/nix/store`.
 pub fn link_target(store: &str, rel: &str) -> PathBuf {
     if Path::new(store).is_absolute() {
@@ -41,15 +46,13 @@ impl Generation {
         }
         journal.backup(&dir)?;
         remove_any(&dir)?;
-        let bin = dir.join("bin");
-        fs::create_dir_all(&bin).with_context(|| format!("creating {}", bin.display()))?;
-        if let Some(prev) = previous {
-            let Ok(entries) = fs::read_dir(prev.join("bin")) else {
-                return Ok(Generation { root: root.into(), dir, live: false });
-            };
+        for sub in DIRS {
+            let to = dir.join(sub);
+            fs::create_dir_all(&to).with_context(|| format!("creating {}", to.display()))?;
+            let Some(Ok(entries)) = previous.as_ref().map(|p| fs::read_dir(p.join(sub))) else { continue };
             for entry in entries {
                 let entry = entry?;
-                symlink(fs::read_link(entry.path())?, bin.join(entry.file_name()))?;
+                symlink(fs::read_link(entry.path())?, to.join(entry.file_name()))?;
             }
         }
         Ok(Generation { root: root.into(), dir, live: false })
@@ -60,7 +63,20 @@ impl Generation {
     }
 
     pub fn link(&self, name: &str, target: &Path) -> Result<()> {
-        let at = self.dir.join("bin").join(name);
+        self.link_in("bin", name, target)
+    }
+
+    /// `pkgs/<name>`, the package's whole tree.
+    pub fn unlink_pkg(&self, name: &str) -> Result<()> {
+        remove_any(&self.dir.join("pkgs").join(name))
+    }
+
+    pub fn link_pkg(&self, name: &str, target: &Path) -> Result<()> {
+        self.link_in("pkgs", name, target)
+    }
+
+    fn link_in(&self, sub: &str, name: &str, target: &Path) -> Result<()> {
+        let at = self.dir.join(sub).join(name);
         remove_any(&at)?;
         symlink(target, &at).with_context(|| format!("linking {}", at.display()))
     }

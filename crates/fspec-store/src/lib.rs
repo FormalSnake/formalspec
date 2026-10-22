@@ -127,7 +127,9 @@ fn target<'a>(cx: &'a Cx, p: &'a Pkg) -> Result<Target<'a>> {
         && found.and_then(|a| a.oci.as_deref()).is_none()
     {
         let rev = locked.rev.as_deref().with_context(|| format!("pkg {} has no rev in fspec.lock", p.name))?;
-        let id = format!("{url}@{rev}+{}", locked.patches.as_deref().unwrap_or_default());
+        // The recipe is part of what was built: a changed `build` or image builds anew.
+        let recipe = serde_json::to_string(&(&p.build, &p.build_flags, &p.source))?;
+        let id = format!("{url}@{rev}+{}+{}", locked.patches.as_deref().unwrap_or_default(), archive::hash8(&recipe));
         let version = rev.chars().take(12).collect::<String>();
         let dirname = format!("{}-{}-{version}", archive::hash8(&id), p.name);
         let artifact = found.unwrap_or(&BUILT);
@@ -304,6 +306,7 @@ impl Backend for StoreBackend {
                 for dest in before.share.keys() {
                     unshare(cx, dest, journal)?;
                 }
+                generation.unlink_pkg(&p.name)?;
             }
             if op.is_removal() {
                 continue;
@@ -315,6 +318,7 @@ impl Backend for StoreBackend {
             for (name, rel) in &inst.bins {
                 generation.link(name, &link_target(&inst.store, rel))?;
             }
+            generation.link_pkg(&p.name, &link_target(&inst.store, ""))?;
             for (dest, rel) in &inst.share {
                 share(cx, dest, &live_path(&inst.store, rel), journal)?;
             }
@@ -433,7 +437,9 @@ fn install(cx: &Cx, p: &Pkg, staging: &Path, journal: &mut Journal) -> Result<In
             (format!("store/{dirname}"), bins)
         }
     };
-    if bins.is_empty() && p.share.is_empty() {
+    // A source build may install only a library or data (a PAM module), which current/pkgs/<name>
+    // reaches; a download with nothing to link is a wrong artifact.
+    if bins.is_empty() && p.share.is_empty() && !matches!(p.source, Source::Git { .. }) {
         bail!("it has no executables to link and no share");
     }
     let tree = if Path::new(&store).is_absolute() { PathBuf::from(&store) } else { root.join(&store) };

@@ -791,4 +791,13 @@ fn a_git_package_without_a_ci_artifact_is_built_on_the_host() {
         "source": {"kind": "git", "url": "https://example/tool", "rev": "main"}, "build": ["sh", "-c", script]}));
     w.apply(&[Desired { resource: resource.unwrap(), owner: None }]).unwrap();
     assert_eq!(w.run("tool"), "built here");
+    assert!(w.root().join("current/pkgs/tool/bin/tool").is_file());
+
+    // A build that installs only a library is reachable through current/pkgs.
+    let lib = r#"mkdir -p "$FSPEC_OUT/lib" && echo so > "$FSPEC_OUT/lib/pam_x.so""#;
+    let resource = serde_json::from_value(json!({"kind": "pkg", "name": "tool", "mode": "pinned",
+        "source": {"kind": "git", "url": "https://example/tool", "rev": "main"}, "build": ["sh", "-c", lib]}));
+    w.apply(&[Desired { resource: resource.unwrap(), owner: None }]).unwrap();
+    assert_eq!(fs::read_to_string(w.root().join("current/pkgs/tool/lib/pam_x.so")).unwrap(), "so\n");
+    assert!(!w.root().join("current/bin/tool").exists());
 }
