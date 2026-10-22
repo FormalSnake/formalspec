@@ -95,6 +95,7 @@ mod tests {
             channel: Default::default(),
             patches: vec![],
             build_flags: vec![],
+            build_deps: vec![],
             build: vec![],
             bins: vec![],
             data: vec![],

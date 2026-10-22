@@ -480,10 +480,16 @@ fn main() -> Result<()> {
         }
         Command::Ci { command: CiCommand::Packages } => {
             let spec = fspec_eval::evaluate(&spec_path)?;
-            let top = LiveRunner.check(
-                &Cmd::new("git").arg("-C").arg(spec_dir.display().to_string()).args(["rev-parse", "--show-toplevel"]),
-            )?;
-            let top = PathBuf::from(top.stdout.trim());
+            // The workflow belongs at the repo root; a spec outside any repo keeps it beside itself.
+            let top = LiveRunner
+                .check(
+                    &Cmd::new("git")
+                        .arg("-C")
+                        .arg(spec_dir.display().to_string())
+                        .args(["rev-parse", "--show-toplevel"]),
+                )
+                .map(|o| PathBuf::from(o.stdout.trim()))
+                .unwrap_or_else(|_| spec_dir.clone());
             let rel = spec_path
                 .strip_prefix(&top)
                 .with_context(|| format!("{} is outside its repo {}", spec_path.display(), top.display()))?;
