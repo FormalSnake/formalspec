@@ -402,6 +402,10 @@ pub struct DistroPkgs {
     /// Empty means "the package's own name" when used as a `pkg` source.
     #[serde(default, deserialize_with = "one_or_many")]
     pub names: Vec<String>,
+    /// The `repo(...)` the packages come from (zypper only). While that repo is deferred, so
+    /// are they, instead of failing the apply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
 }
 
 fn one_or_many<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {

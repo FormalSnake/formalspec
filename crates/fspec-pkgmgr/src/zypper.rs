@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use fspec_core::apply::Cx;
-use fspec_core::journal::{Journal, Undo};
+use fspec_core::journal::{Journal, Undo, remove_any};
 use fspec_core::resource::Repo;
 use fspec_core::runner::Cmd;
 
@@ -162,11 +162,20 @@ fn key_package(fingerprint: &str) -> String {
 }
 
 /// Download the repo's key into the cache and check its fingerprint. A rooted apply's runner
-/// prints nothing, so there the check is left to the live apply.
+/// prints nothing, so there the check is left to the live apply. A key that cannot be fetched
+/// (the host is down, or a filtering proxy intercepts TLS) leaves no key in the cache, so the
+/// repo is deferred; a key with the wrong fingerprint fails the apply.
 pub(crate) fn fetch_key(cx: &Cx, r: &Repo) -> Result<()> {
     let (Some(url), Some(want)) = (&r.key, &r.fingerprint) else { return Ok(()) };
-    let bytes = cx.fetch.get(url).with_context(|| format!("repo:{}: fetching its key", r.name))?;
     let path = key_path(cx, r);
+    let bytes = match cx.fetch.get(url) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("fspec: repo:{}: fetching its key failed, deferring the repo: {e:#}", r.name);
+            remove_any(&path)?;
+            return Ok(());
+        }
+    };
     let home = cx.paths.system("/var/cache/fspec/gnupg");
     for dir in [&home, &cx.paths.system("/var/cache/fspec/keys")] {
         fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
@@ -193,17 +202,25 @@ pub(crate) fn fetch_key(cx: &Cx, r: &Repo) -> Result<()> {
     }
 }
 
-/// Import the key and add the repo, replacing a repo of the same alias at another URL.
-pub(crate) fn add_repo(cx: &Cx, journal: &mut Journal, r: &Repo) -> Result<()> {
+/// Import the key and add the repo, replacing a repo of the same alias at another URL. Returns
+/// why the repo was deferred instead: its key could not be fetched, or its metadata cannot be
+/// refreshed. A deferred repo is left disabled, so the distro upgrade and the other repos still
+/// work, and the next apply tries it again.
+pub(crate) fn add_repo(cx: &Cx, journal: &mut Journal, r: &Repo) -> Result<Option<String>> {
     if let Some(f) = &r.fingerprint {
+        let key = key_path(cx, r);
+        if !key.exists() {
+            disable(cx, journal, r)?;
+            return Ok(Some(format!("its key {} could not be fetched", r.key.as_deref().unwrap_or_default())));
+        }
         let pkg = key_package(f);
         if cx.runner.run(&Cmd::new("rpm").args(["-q", &pkg]))?.status != 0 {
             journal.record(Undo::Run { cmd: Cmd::new("rpm").args(["-e", "--allmatches", &pkg]) })?;
-            cx.runner.check(&Cmd::new("rpm").arg("--import").arg(key_path(cx, r).display().to_string()))?;
+            cx.runner.check(&Cmd::new("rpm").arg("--import").arg(key.display().to_string()))?;
         }
     }
     match repos(cx).into_iter().find(|k| k.alias == r.name) {
-        Some(k) if k.url == r.url && k.enabled => return Ok(()),
+        Some(k) if k.url == r.url && k.enabled => return Ok(None),
         Some(k) => {
             journal.record(Undo::Run { cmd: add(&k.url, &k.alias) })?;
             cx.runner.check(&remove(&r.name))?;
@@ -212,7 +229,27 @@ pub(crate) fn add_repo(cx: &Cx, journal: &mut Journal, r: &Repo) -> Result<()> {
     }
     journal.record(Undo::Run { cmd: remove(&r.name) })?;
     cx.runner.check(&add(&r.url, &r.name))?;
+    let refresh = cx.runner.run(&zypper(["refresh"]).arg(&r.name))?;
+    if refresh.status != 0 {
+        cx.runner.check(&zypper(["modifyrepo", "--disable"]).arg(&r.name))?;
+        let why = refresh.stderr.lines().chain(refresh.stdout.lines()).find(|l| !l.trim().is_empty()).unwrap_or("");
+        return Ok(Some(format!("refreshing it failed: {}", why.trim())));
+    }
+    Ok(None)
+}
+
+/// Turn off a repo fspec added before, so a deferred repo does not break the other repos.
+fn disable(cx: &Cx, journal: &mut Journal, r: &Repo) -> Result<()> {
+    if repos(cx).iter().any(|k| k.alias == r.name && k.enabled) {
+        journal.record(Undo::Run { cmd: zypper(["modifyrepo", "--enable"]).arg(&r.name) })?;
+        cx.runner.check(&zypper(["modifyrepo", "--disable"]).arg(&r.name))?;
+    }
     Ok(())
+}
+
+/// Whether the repo is configured and enabled, so packages from it can install.
+pub(crate) fn repo_enabled(cx: &Cx, alias: &str) -> bool {
+    repos(cx).iter().any(|k| k.alias == alias && k.enabled)
 }
 
 /// Remove the repo. Its key stays imported, since other repos may be signed with it.

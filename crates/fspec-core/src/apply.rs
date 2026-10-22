@@ -155,6 +155,19 @@ impl Op {
 /// What each backend's commit returns: the new record per applied (not removed) key.
 pub type Records = BTreeMap<Key, Map<String, Value>>;
 
+const DEFERRED: &str = "deferred";
+
+/// The record of an op a backend could not apply for a reason outside the spec, such as an
+/// unreachable repo. The apply goes on without it, the state does not record it, and so the
+/// next apply tries it again.
+pub fn deferred(why: impl Into<String>) -> Map<String, Value> {
+    Map::from_iter([(DEFERRED.to_string(), Value::String(why.into()))])
+}
+
+fn deferral(record: Option<&Map<String, Value>>) -> Option<&str> {
+    record?.get(DEFERRED)?.as_str()
+}
+
 pub trait Backend {
     fn name(&self) -> &'static str;
 
@@ -340,6 +353,7 @@ pub fn apply_scope(cx: &Cx, backends: &[&dyn Backend], desired: &[Desired]) -> R
                         next.data.remove(&op.key.id);
                     }
                 }
+                Some(_) if deferral(records.get(&op.key)).is_some() => {}
                 Some(d) => {
                     let record = records.get(&op.key).cloned().unwrap_or_default();
                     next.entries
@@ -370,19 +384,42 @@ fn commit_all(
     }
     let ops = || by_backend.iter().flat_map(|(_, ops)| ops);
     trash_removed(cx, ops().filter(|o| o.is_removal()), journal)?;
+    // A deferred package takes the services, timers and files it owns with it, from the phases
+    // still to come.
+    let mut deferred_pkgs: Vec<String> = Vec::new();
     for (b, ops) in by_backend {
-        let rest: Vec<Op> = ops.iter().filter(|o| !o.is_removal()).cloned().collect();
+        let mut rest = Vec::new();
+        for op in ops.iter().filter(|o| !o.is_removal()) {
+            match op.desired.as_ref().and_then(|d| d.owner.as_ref()).filter(|o| deferred_pkgs.contains(o)) {
+                Some(owner) => {
+                    eprintln!("fspec: deferred {}: pkg:{owner} is deferred", op.key);
+                    records.insert(op.key.clone(), deferred(format!("pkg:{owner} is deferred")));
+                }
+                None => rest.push(op.clone()),
+            }
+        }
         if !rest.is_empty() {
-            records.extend(b.commit(cx, &rest, staging, journal).with_context(|| format!("{}: applying", b.name()))?);
+            let got = b.commit(cx, &rest, staging, journal).with_context(|| format!("{}: applying", b.name()))?;
+            for (key, record) in &got {
+                if let Some(why) = deferral(Some(record)) {
+                    eprintln!("fspec: deferred {key}: {why}; the next apply tries it again");
+                    if key.kind == "pkg" {
+                        deferred_pkgs.push(key.id.clone());
+                    }
+                }
+            }
+            records.extend(got);
         }
     }
     for (b, ops) in by_backend {
-        let rest: Vec<Op> = ops.iter().filter(|o| !o.is_removal()).cloned().collect();
+        let rest: Vec<Op> =
+            ops.iter().filter(|o| !o.is_removal() && deferral(records.get(&o.key)).is_none()).cloned().collect();
         if !rest.is_empty() {
             b.settle(cx, &rest, journal).with_context(|| format!("{}: settling", b.name()))?;
         }
     }
-    restore_returned(cx, ops().filter(|o| o.current.is_none() && !o.is_removal()), journal)?;
+    let added = ops().filter(|o| o.current.is_none() && !o.is_removal() && deferral(records.get(&o.key)).is_none());
+    restore_returned(cx, added, journal)?;
     Ok(records)
 }
 

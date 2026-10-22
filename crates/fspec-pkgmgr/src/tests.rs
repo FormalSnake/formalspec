@@ -1050,3 +1050,54 @@ fn repo_is_for_zypper_distros_only() {
     let err = w.apply(Scope::System, &want).unwrap_err();
     assert!(format!("{err:#}").contains("repo(...) is for zypper distros"), "{err:#}");
 }
+
+fn from_1password(name: &str) -> Desired {
+    pkg(name, json!({"kind": "zypper", "names": [], "repo": "1password"}), "pinned")
+}
+
+#[test]
+fn a_repo_whose_key_cannot_be_fetched_is_deferred_with_its_packages() {
+    let w = tumbleweed();
+    disable_rolling(&w);
+    let want = [from_1password("1password-cli"), repo_res(ONEPASSWORD_FPR), distro_res(TW, &[])];
+    w.apply(Scope::System, &want).unwrap();
+    let lines = w.take();
+    assert!(!lines.iter().any(|l| l.contains("addrepo") || l.contains("1password-cli")), "{lines:#?}");
+    assert!(lines.iter().any(|l| l.contains("dist-upgrade")), "the rest of the apply goes on: {lines:#?}");
+    let state = w.state(Scope::System);
+    assert!(state.entries.keys().all(|k| k.kind == "distro"), "{:?}", state.entries.keys());
+    let pending: Vec<String> =
+        w.plan(Scope::System, &want).unwrap().changes.iter().map(|c| c.key.to_string()).collect();
+    assert_eq!(pending, ["pkg:1password-cli", "repo:1password"]);
+}
+
+#[test]
+fn a_repo_that_cannot_refresh_is_disabled_and_deferred() {
+    let mut w = tumbleweed();
+    disable_rolling(&w);
+    w.fetch.bodies.insert(KEY_URL.into(), b"armored key".to_vec());
+    gpg_says(&w, ONEPASSWORD_FPR);
+    w.answer("zypper --non-interactive refresh 1password", 4, "");
+    let want = [from_1password("1password-cli"), repo_res(ONEPASSWORD_FPR), distro_res(TW, &[])];
+    w.apply(Scope::System, &want).unwrap();
+    let lines = w.take();
+    let at = |prefix: &str| {
+        lines.iter().position(|l| l.starts_with(prefix)).unwrap_or_else(|| panic!("{prefix}: {lines:#?}"))
+    };
+    assert!(
+        at("zypper --non-interactive refresh 1password")
+            < at("zypper --non-interactive modifyrepo --disable 1password")
+    );
+    assert!(
+        at("zypper --non-interactive modifyrepo --disable 1password") < at("zypper --non-interactive dist-upgrade")
+    );
+    assert!(!lines.iter().any(|l| l.contains("install --auto-agree-with-licenses 1password-cli")), "{lines:#?}");
+}
+
+#[test]
+fn repo_on_a_package_needs_a_zypper_distro() {
+    let w = World::linux();
+    let err =
+        w.apply(Scope::System, &[pkg("x", json!({"kind": "dnf", "names": [], "repo": "r"}), "pinned")]).unwrap_err();
+    assert!(format!("{err:#}").contains("not a zypper distro"), "{err:#}");
+}

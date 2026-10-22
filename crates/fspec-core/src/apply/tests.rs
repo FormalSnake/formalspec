@@ -315,3 +315,73 @@ fn claiming_an_orphan_makes_it_the_packages_data() {
     assert!(crate::attribute::orphans(&w.paths, &State::default(), &user).is_empty());
     assert!(crate::attribute::claim(&w.paths, &mut user, "~/Documents", "steam").is_err());
 }
+
+/// Defers every package named `away`, as an unreachable repo would.
+struct DeferringPkgs;
+
+impl Backend for DeferringPkgs {
+    fn name(&self) -> &'static str {
+        "deferring-pkgs"
+    }
+    fn handles(&self, _cx: &Cx, r: &Resource) -> bool {
+        matches!(r, Resource::Pkg(_))
+    }
+    fn phase(&self) -> Phase {
+        Phase::Packages
+    }
+    fn commit(&self, _cx: &Cx, ops: &[Op], _staging: &Path, _journal: &mut Journal) -> Result<Records> {
+        Ok(ops
+            .iter()
+            .filter(|o| !o.is_removal())
+            .map(|o| (o.key.clone(), if o.key.id == "away" { deferred("repo:x is deferred") } else { Map::new() }))
+            .collect())
+    }
+}
+
+/// Runs `echo enable <name>` per service, so the test sees which ones were committed.
+struct EchoServices;
+
+impl Backend for EchoServices {
+    fn name(&self) -> &'static str {
+        "echo-services"
+    }
+    fn handles(&self, _cx: &Cx, r: &Resource) -> bool {
+        matches!(r, Resource::Service(_))
+    }
+    fn phase(&self) -> Phase {
+        Phase::Services
+    }
+    fn commit(&self, cx: &Cx, ops: &[Op], _staging: &Path, _journal: &mut Journal) -> Result<Records> {
+        let mut records = Records::new();
+        for op in ops.iter().filter(|o| !o.is_removal()) {
+            cx.runner.check(&Cmd::new("echo").arg(format!("enable {}", op.key.id)))?;
+            records.insert(op.key.clone(), Map::new());
+        }
+        Ok(records)
+    }
+}
+
+#[test]
+fn a_deferred_package_and_what_it_owns_are_left_out_and_retried() {
+    let w = World::new();
+    let backends: &[&dyn Backend] = &[&DeferringPkgs, &EchoServices];
+    let service = |name: &str, owner: Option<&str>| Desired {
+        resource: serde_json::from_value(serde_json::json!({"kind": "service", "name": name})).unwrap(),
+        owner: owner.map(Into::into),
+    };
+    let want = [
+        pkg("away", serde_json::json!({})),
+        pkg("here", serde_json::json!({})),
+        service("awayd", Some("away")),
+        service("hered", Some("here")),
+    ];
+    apply_scope(&w.cx(Scope::System), backends, &want).unwrap();
+    assert_eq!(w.runner.lines(), ["echo 'enable hered'"]);
+    let state = w.state(Scope::System);
+    let keys: Vec<String> = state.entries.keys().map(|k| k.to_string()).collect();
+    assert_eq!(keys, ["pkg:here", "service:hered"]);
+
+    let plan = plan_scope(&w.cx(Scope::System), backends, &want, &state).unwrap();
+    let pending: Vec<String> = plan.changes.iter().map(|c| c.key.to_string()).collect();
+    assert_eq!(pending, ["pkg:away", "service:awayd"]);
+}

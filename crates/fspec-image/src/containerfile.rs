@@ -103,7 +103,7 @@ mod tests {
     }
 
     fn dnf(names: &[&str]) -> Option<Source> {
-        Some(Source::Dnf(DistroPkgs { names: names.iter().map(|s| s.to_string()).collect() }))
+        Some(Source::Dnf(DistroPkgs { names: names.iter().map(|s| s.to_string()).collect(), repo: None }))
     }
 
     #[test]
@@ -146,7 +146,7 @@ mod tests {
 
     #[test]
     fn rejects_managers_the_base_cannot_use() {
-        let pacman = Some(Source::Pacman(DistroPkgs { names: vec!["htop".into()] }));
+        let pacman = Some(Source::Pacman(DistroPkgs { names: vec!["htop".into()], repo: None }));
         let err = containerfile(&image("ghcr.io/ublue-os/bazzite:stable", pacman, &[])).unwrap_err();
         assert!(err.to_string().contains("must be dnf"), "{err}");
         let err = containerfile(&image("docker.io/archlinux/archlinux:latest", dnf(&["htop"]), &[])).unwrap_err();

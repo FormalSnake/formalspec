@@ -913,6 +913,16 @@ snapshot commit in the distro phase, before `pkg` packages, so a package from
 the repo installs in the same apply. The base packages commit in that phase
 too, after the repos.
 
+A repo the host cannot reach is deferred, not an error: its key cannot be
+fetched, or `zypper refresh <name>` fails after the add (the vendor is down,
+or a filtering proxy such as Cisco Umbrella intercepts its TLS). The apply
+prints a warning, leaves the repo disabled so the distro upgrade still works,
+and records nothing for it, so the next apply tries again. A package that says
+where it comes from, `pkg("nordvpn", source = zypper(repo = "nordvpn"))`, is
+deferred with its repo, and so are the services, timers and files it owns that
+commit in later phases. A user's group that does not exist yet waits the same
+way. A fingerprint mismatch still stops the apply.
+
 macOS has no equivalent of either; the system layer there is `defaults`,
 launchd and Homebrew.
 

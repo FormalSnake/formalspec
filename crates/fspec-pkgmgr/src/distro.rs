@@ -52,14 +52,15 @@ fn repo(op: &Op) -> Option<&Repo> {
 }
 
 impl DistroBackend {
-    fn commit_repo(&self, cx: &Cx, op: &Op, journal: &mut Journal) -> Result<()> {
+    /// Returns why the repo was deferred, when it was.
+    fn commit_repo(&self, cx: &Cx, op: &Op, journal: &mut Journal) -> Result<Option<String>> {
         match (&op.desired, &op.current) {
             (None, Some(e)) => {
-                let Resource::Repo(r) = &e.resource else { return Ok(()) };
-                zypper::remove_repo(cx, journal, r)
+                let Resource::Repo(r) = &e.resource else { return Ok(None) };
+                zypper::remove_repo(cx, journal, r).map(|()| None)
             }
             (Some(d), current) => {
-                let Resource::Repo(r) = &d.resource else { return Ok(()) };
+                let Resource::Repo(r) = &d.resource else { return Ok(None) };
                 if let Some(Entry { resource: Resource::Repo(old), .. }) = current
                     && old.name != r.name
                 {
@@ -67,7 +68,7 @@ impl DistroBackend {
                 }
                 zypper::add_repo(cx, journal, r)
             }
-            (None, None) => Ok(()),
+            (None, None) => Ok(None),
         }
     }
 }
@@ -145,10 +146,12 @@ impl Backend for DistroBackend {
     /// Repos first, then the snapshot, then the base packages, which may come from either.
     fn commit(&self, cx: &Cx, ops: &[Op], _staging: &Path, journal: &mut Journal) -> Result<Records> {
         let fam = family(cx)?;
-        for op in ops.iter().filter(|o| repo(o).is_some()) {
-            self.commit_repo(cx, op, journal)?;
-        }
         let mut records = Records::new();
+        for op in ops.iter().filter(|o| repo(o).is_some()) {
+            if let Some(why) = self.commit_repo(cx, op, journal)? {
+                records.insert(op.key.clone(), fspec_core::apply::deferred(why));
+            }
+        }
         for op in ops.iter().filter(|o| repo(o).is_none()) {
             let Some(d) = &op.desired else { continue };
             let want = &distro(&d.resource)?.packages;
@@ -182,7 +185,7 @@ impl Backend for DistroBackend {
             records.insert(op.key.clone(), next);
         }
         for op in ops.iter().filter(|o| o.desired.is_some() && repo(o).is_some()) {
-            records.insert(op.key.clone(), Default::default());
+            records.entry(op.key.clone()).or_default();
         }
         Ok(records)
     }

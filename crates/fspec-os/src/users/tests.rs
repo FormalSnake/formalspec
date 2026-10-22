@@ -32,6 +32,8 @@ fn creates_a_linux_account_with_a_shell_from_etc_shells() {
             "useradd -m -u 1000 -s /usr/local/bin/fish kyan",
             "getent passwd kyan",
             "id -nG kyan",
+            "getent group wheel",
+            "getent group docker",
             "usermod -aG wheel,docker kyan",
         ]
     );
@@ -91,6 +93,7 @@ fn adjusts_an_existing_linux_account() {
             "getent passwd kyan",
             "usermod -s /usr/bin/fish kyan",
             "id -nG kyan",
+            "getent group docker",
             "usermod -aG docker kyan",
         ]
     );
@@ -201,4 +204,17 @@ fn check_rejects_macos_groups_and_bad_names() {
     assert!(err.contains("only manages the login shell"), "{err}");
     let bad = resource(json!({"kind": "user", "name": "-x"}));
     assert!(UsersBackend.check(&World::linux(Init::Systemd).cx(Scope::System), &bad).is_err());
+}
+
+#[test]
+fn a_group_that_does_not_exist_yet_waits_for_a_later_apply() {
+    let w = World::linux(Init::Systemd);
+    w.runner.respond("getent group nordvpn", Output { status: 2, ..Output::default() });
+    let mut u = kyan("bash");
+    if let Resource::User(user) = &mut u {
+        user.groups.push("nordvpn".into());
+    }
+    apply_scope(&w.cx(Scope::System), &[&UsersBackend], &[desired(u)]).unwrap();
+    let lines = w.runner.lines();
+    assert!(lines.contains(&"usermod -aG wheel,docker kyan".to_string()), "{lines:?}");
 }

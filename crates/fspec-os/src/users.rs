@@ -210,7 +210,15 @@ fn modify(cx: &Cx, u: &User, shell: Option<&str>, journal: &mut Journal) -> Resu
 fn join_groups(cx: &Cx, u: &User, journal: &mut Journal) -> Result<()> {
     let groups = cx.runner.run(&Cmd::new("id").args(["-nG", &u.name]))?;
     let have: Vec<&str> = groups.stdout.split_whitespace().collect();
-    let missing: Vec<&String> = u.groups.iter().filter(|g| !have.contains(&g.as_str())).collect();
+    let mut missing: Vec<&String> = u.groups.iter().filter(|g| !have.contains(&g.as_str())).collect();
+    // A deferred package has not created its group yet; drift joins it on a later apply.
+    missing.retain(|g| {
+        let exists = cx.runner.run(&Cmd::new("getent").args(["group", g])).is_ok_and(|o| o.status == 0);
+        if !exists {
+            eprintln!("fspec: user:{}: group {g} does not exist yet, joining it on a later apply", u.name);
+        }
+        exists
+    });
     if !missing.is_empty() {
         for g in &missing {
             journal.record(Undo::Run { cmd: Cmd::new("gpasswd").args(["-d", &u.name, g]) })?;

@@ -198,7 +198,11 @@ impl PkgEngine {
     }
 
     pub fn check(&self, cx: &Cx, r: &Resource) -> Result<()> {
-        want(self.0, cx, pkg(r)?).map(drop)
+        let p = pkg(r)?;
+        if from_repo(p).is_some() && self.0 != Family::Zypper {
+            bail!("pkg:{}: repo = ... names a zypper repo(...), and this is not a zypper distro", p.name);
+        }
+        want(self.0, cx, p).map(drop)
     }
 
     pub fn drift(&self, cx: &Cx, entry: &Entry) -> Result<Vec<String>> {
@@ -235,7 +239,14 @@ impl PkgEngine {
                 }
                 continue;
             };
-            let w = want(fam, cx, pkg(&d.resource)?)?;
+            let p = pkg(&d.resource)?;
+            if let Some(alias) = from_repo(p)
+                && !crate::zypper::repo_enabled(cx, alias)
+            {
+                records.insert(op.key.clone(), fspec_core::apply::deferred(format!("repo:{alias} is deferred")));
+                continue;
+            }
+            let w = want(fam, cx, p)?;
             match had {
                 None => install(cx, journal, fam, &w.names, w.cached.as_ref())?,
                 Some((n, rec)) if n == w.names => upgrade(cx, journal, fam, &w, &rec)?,
@@ -251,6 +262,16 @@ impl PkgEngine {
             records.insert(op.key.clone(), rec);
         }
         Ok(records)
+    }
+}
+
+/// The `repo(...)` a distro package says it comes from.
+fn from_repo(p: &Pkg) -> Option<&str> {
+    match &p.source {
+        Source::Zypper(d) | Source::Dnf(d) | Source::Pacman(d) | Source::Apt(d) | Source::Xbps(d) | Source::Moss(d) => {
+            d.repo.as_deref()
+        }
+        _ => None,
     }
 }
 
