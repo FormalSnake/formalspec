@@ -43,15 +43,27 @@ pub fn is_elf(body: &[u8]) -> bool {
 
 pub fn unpack(body: &[u8], dest: &Path, name: &str) -> Result<()> {
     fs::create_dir_all(dest).with_context(|| format!("creating {}", dest.display()))?;
-    if body.starts_with(&[0x1f, 0x8b]) {
-        untar(flate2::read::GzDecoder::new(body), dest)
+    // A compressed stream holds a tar, or one file such as rust-analyzer's gzipped executable.
+    let stream = if body.starts_with(&[0x1f, 0x8b]) {
+        let mut out = Vec::new();
+        flate2::read::GzDecoder::new(body).read_to_end(&mut out).context("unpacking gzip")?;
+        Some(out)
     } else if body.starts_with(&[0xfd, b'7', b'z', b'X', b'Z', 0]) {
-        let mut tar = Vec::new();
-        lzma_rs::xz_decompress(&mut &body[..], &mut tar).map_err(|e| anyhow!("unpacking xz: {e}"))?;
-        untar(&tar[..], dest)
+        let mut out = Vec::new();
+        lzma_rs::xz_decompress(&mut &body[..], &mut out).map_err(|e| anyhow!("unpacking xz: {e}"))?;
+        Some(out)
     } else if body.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]) {
-        let dec = ruzstd::decoding::StreamingDecoder::new(body).map_err(|e| anyhow!("unpacking zstd: {e}"))?;
-        untar(dec, dest)
+        let mut out = Vec::new();
+        ruzstd::decoding::StreamingDecoder::new(body)
+            .map_err(|e| anyhow!("unpacking zstd: {e}"))?
+            .read_to_end(&mut out)
+            .context("unpacking zstd")?;
+        Some(out)
+    } else {
+        None
+    };
+    if let Some(inner) = stream {
+        if is_tar(&inner) { untar(&inner[..], dest) } else { write_command(&inner, dest, name) }
     } else if body.starts_with(b"PK\x03\x04") {
         zip::ZipArchive::new(Cursor::new(body)).and_then(|mut z| z.extract(dest)).context("unpacking zip")
     } else if is_asar(body) {
@@ -59,18 +71,26 @@ pub fn unpack(body: &[u8], dest: &Path, name: &str) -> Result<()> {
     } else if let Some(tar) = (!is_elf(body)).then(|| brotli_tar(body)).flatten() {
         untar(&tar[..], dest)
     } else {
-        let path = dest.join(name);
-        fs::write(&path, body).with_context(|| format!("writing {}", path.display()))?;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
-        Ok(())
+        write_command(body, dest, name)
     }
+}
+
+fn is_tar(bytes: &[u8]) -> bool {
+    bytes.len() > 262 && &bytes[257..262] == b"ustar"
+}
+
+fn write_command(bytes: &[u8], dest: &Path, name: &str) -> Result<()> {
+    let path = dest.join(name);
+    fs::write(&path, bytes).with_context(|| format!("writing {}", path.display()))?;
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
+    Ok(())
 }
 
 /// The tar inside a brotli stream, as Discord ships its `full.distro` builds.
 fn brotli_tar(body: &[u8]) -> Option<Vec<u8>> {
     let mut tar = Vec::new();
     brotli_decompressor::Decompressor::new(body, 64 * 1024).read_to_end(&mut tar).ok()?;
-    (tar.len() > 262 && &tar[257..262] == b"ustar").then_some(tar)
+    is_tar(&tar).then_some(tar)
 }
 
 /// An Electron asar starts with a pickle holding the header size, then a pickle holding the JSON
@@ -155,6 +175,16 @@ mod tests {
         let err = verify(b"other", &sri_sha256(body)).unwrap_err();
         assert!(err.to_string().contains("hash mismatch"), "{err}");
         assert!(verify(body, "md5-AAAA").is_err());
+    }
+
+    #[test]
+    fn a_gzipped_executable_becomes_the_command() {
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gz.write_all(b"\x7fELF tool").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        unpack(&gz.finish().unwrap(), dir.path(), "rust-analyzer").unwrap();
+        assert_eq!(fs::read(dir.path().join("rust-analyzer")).unwrap(), b"\x7fELF tool");
+        assert!(is_exec(&dir.path().join("rust-analyzer")));
     }
 
     #[test]
