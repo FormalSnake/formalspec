@@ -274,6 +274,10 @@ pub struct Pkg {
     /// with `share` may have no executables: fonts, icon, cursor and GTK themes.
     #[serde(default)]
     pub share: BTreeMap<String, String>,
+    /// Config linked into `/etc`: a path under it (`dbus-1/system.d/asusd.conf`) to a path inside
+    /// the package. Linux only.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub etc: BTreeMap<String, String>,
     /// macOS app bundles inside the package (`Kopuz.app`, `bin/kopuz.app`), cloned into
     /// /Applications under their own name. A package with `apps` may have no executables.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

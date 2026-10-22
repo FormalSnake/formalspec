@@ -16,7 +16,7 @@ use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use fspec_core::apply::Records;
-use fspec_core::facts::Os;
+use fspec_core::facts::{Init, Os};
 use fspec_core::journal::{Journal, copy_any, remove_any};
 use fspec_core::lock::{Artifact, LockedPkg};
 use fspec_core::resource::{Pkg, PkgMode, Source};
@@ -47,6 +47,9 @@ struct Installed {
     /// Path under `/usr/local/share` to the path inside `store` it links to.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     share: BTreeMap<String, String>,
+    /// Path under `/etc` to the path inside `store` it links to.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    etc: BTreeMap<String, String>,
     /// App bundles inside `store`, each cloned to /Applications/<its file name>.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     apps: Vec<String>,
@@ -242,6 +245,14 @@ impl Backend for StoreBackend {
                 bail!("share: `{rel}` must be a path inside the package, or `.`");
             }
         }
+        if !p.etc.is_empty() && cx.facts.os != Os::Linux {
+            bail!("etc links into /etc for Linux services; on macOS use file(..., target = ...)");
+        }
+        for (dest, rel) in &p.etc {
+            if !normal(dest) || !normal(rel) {
+                bail!("etc: `{dest}` and `{rel}` must be paths under /etc and inside the package");
+            }
+        }
         Ok(())
     }
 
@@ -269,9 +280,11 @@ impl Backend for StoreBackend {
         if !broken.is_empty() {
             notes.push(format!("not linked in current: {}", broken.join(", ")));
         }
-        let unshared: Vec<_> = inst.share.keys().filter(|d| !is_link(&share_path(cx, d))).cloned().collect();
-        if !unshared.is_empty() {
-            notes.push(format!("not linked in /usr/local/share: {}", unshared.join(", ")));
+        for (base, links) in [(SHARE, &inst.share), (ETC, &inst.etc)] {
+            let missing: Vec<_> = links.keys().filter(|d| !is_link(&under(cx, base, d))).cloned().collect();
+            if !missing.is_empty() {
+                notes.push(format!("not linked in {base}: {}", missing.join(", ")));
+            }
         }
         let missing: Vec<_> = inst.apps.iter().map(|a| app_name(a)).filter(|n| !app_path(cx, n).is_dir()).collect();
         if !missing.is_empty() {
@@ -311,6 +324,7 @@ impl Backend for StoreBackend {
         fs::create_dir_all(root.join("store")).with_context(|| format!("creating {}", root.display()))?;
         let generation = Generation::open(&root, cx.generation, journal)?;
         let mut records = Records::new();
+        let mut reload_units = false;
         for op in ops {
             let p = pkg_of(op)?;
             let before = op.current.as_ref().and_then(|e| Installed::from_record(&e.record));
@@ -319,7 +333,11 @@ impl Backend for StoreBackend {
                     generation.unlink(name)?;
                 }
                 for dest in before.share.keys() {
-                    unshare(cx, dest, journal)?;
+                    unshare(cx, SHARE, dest, journal)?;
+                }
+                for dest in before.etc.keys() {
+                    unshare(cx, ETC, dest, journal)?;
+                    reload_units |= dest.starts_with("systemd/");
                 }
                 for app in &before.apps {
                     let at = app_path(cx, app_name(app));
@@ -341,14 +359,24 @@ impl Backend for StoreBackend {
             }
             generation.link_pkg(&p.name, &link_target(&inst.store, ""))?;
             for (dest, rel) in &inst.share {
-                share(cx, dest, &live_path(&inst.store, rel), journal)?;
+                share(cx, SHARE, dest, &live_path(&inst.store, rel), journal)?;
             }
+            for (dest, rel) in &inst.etc {
+                share(cx, ETC, dest, &live_path(&inst.store, rel), journal)?;
+            }
+            reload_units |= inst.etc.keys().any(|d| d.starts_with("systemd/"));
             for app in &inst.apps {
                 place_app(cx, &root, &inst.store, app, journal)?;
             }
             records.insert(op.key.clone(), inst.to_record());
         }
         generation.switch(journal)?;
+        // A unit linked under /etc/systemd is enabled by the services phase, after this one.
+        if reload_units && cx.facts.init == Init::Systemd {
+            let reload = Cmd::new("systemctl").arg("daemon-reload");
+            journal.record(fspec_core::journal::Undo::Run { cmd: reload.clone() })?;
+            cx.runner.check(&reload)?;
+        }
         Ok(records)
     }
 }
@@ -475,9 +503,11 @@ fn install(cx: &Cx, p: &Pkg, staging: &Path, journal: &mut Journal) -> Result<In
         bail!("it has no executables to link, no share and no apps");
     }
     let tree = if Path::new(&store).is_absolute() { PathBuf::from(&store) } else { root.join(&store) };
-    for (dest, rel) in &p.share {
-        if fs::symlink_metadata(tree.join(rel)).is_err() {
-            bail!("share: `{rel}` (for {dest}) is not in the package");
+    for (field, links) in [("share", &p.share), ("etc", &p.etc)] {
+        for (dest, rel) in links {
+            if fs::symlink_metadata(tree.join(rel)).is_err() {
+                bail!("{field}: `{rel}` (for {dest}) is not in the package");
+            }
         }
     }
     for app in &p.apps {
@@ -491,6 +521,7 @@ fn install(cx: &Cx, p: &Pkg, staging: &Path, journal: &mut Journal) -> Result<In
         id: t.id,
         bins,
         share: p.share.clone(),
+        etc: p.etc.clone(),
         apps: p.apps.clone(),
         locked: t.locked.clone(),
     })
@@ -500,8 +531,11 @@ fn is_link(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
 }
 
-fn share_path(cx: &Cx, dest: &str) -> PathBuf {
-    cx.paths.system("/usr/local/share").join(dest)
+const SHARE: &str = "/usr/local/share";
+const ETC: &str = "/etc";
+
+fn under(cx: &Cx, base: &str, dest: &str) -> PathBuf {
+    cx.paths.system(base).join(dest)
 }
 
 /// What a share link points at on the live system: our store is always `/opt/fspec/store`,
@@ -511,9 +545,9 @@ fn live_path(store: &str, rel: &str) -> PathBuf {
     if rel == "." { base } else { base.join(rel) }
 }
 
-/// Link `/usr/local/share/<dest>` to `target`, refusing to replace anything but a link.
-fn share(cx: &Cx, dest: &str, target: &Path, journal: &mut Journal) -> Result<()> {
-    let at = share_path(cx, dest);
+/// Link `<base>/<dest>` to `target`, refusing to replace anything but a link.
+fn share(cx: &Cx, base: &str, dest: &str, target: &Path, journal: &mut Journal) -> Result<()> {
+    let at = under(cx, base, dest);
     if fs::symlink_metadata(&at).is_ok_and(|m| !m.file_type().is_symlink()) {
         bail!("{} exists and is not a link fspec made", at.display());
     }
@@ -563,8 +597,8 @@ fn clone_tree(from: &Path, to: &Path) -> Result<()> {
     copy_any(from, to)
 }
 
-fn unshare(cx: &Cx, dest: &str, journal: &mut Journal) -> Result<()> {
-    let at = share_path(cx, dest);
+fn unshare(cx: &Cx, base: &str, dest: &str, journal: &mut Journal) -> Result<()> {
+    let at = under(cx, base, dest);
     if is_link(&at) {
         journal.backup(&at)?;
         remove_any(&at)?;

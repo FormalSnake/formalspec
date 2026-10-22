@@ -455,6 +455,22 @@ A destination must sit inside a directory (`icons/<theme>`, never `icons`), and
 apply refuses to replace anything there that is not a link. A package with
 neither executables, `share` nor `apps` is refused. `share` is Linux only.
 
+A package's own system config goes under `/etc` with `etc`, the same kind of
+map from a path under `/etc` to a path inside the package:
+
+```python
+pkg("asusctl", source = github(...),
+    etc = {"dbus-1/system.d/asusd.conf": "usr/share/dbus-1/system.d/asusd.conf"})
+```
+
+The links behave like `share` links (replaced on change, removed with the
+package, drift when missing, never over a file fspec did not link). A link
+under `systemd/` makes the store run `systemctl daemon-reload` before the
+services phase, so `service("asusd")` can enable a unit the package ships. That
+suits a unit whose `ExecStart` already names a path that exists; an upstream
+unit that runs `/usr/bin/asusd` needs a `service(exec = ...)` with the store
+path instead. `etc` is Linux only.
+
 macOS app bundles go where Spotlight, Launchpad, the Dock and `open -a` find
 them with `apps`, the bundle paths inside the package:
 

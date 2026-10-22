@@ -389,6 +389,62 @@ fn a_data_only_pkg_links_its_share_trees() {
     assert!(format!("{err:#}").contains("is not a link fspec made"), "{err:#}");
 }
 
+struct Shared(&'static RecordingRunner);
+
+impl Runner for Shared {
+    fn run(&self, cmd: &Cmd) -> anyhow::Result<Output> {
+        self.0.run(cmd)
+    }
+}
+
+#[test]
+fn etc_links_config_and_units_and_reloads_systemd_for_a_unit() {
+    let mut w = World::new();
+    let fedora = serde_json::from_value(json!({"kind": "distro", "distro": "fedora", "init": "systemd"})).unwrap();
+    w.facts = Facts::declared("m", "x86_64-linux", Some(&fedora)).unwrap();
+    let rec: &'static RecordingRunner = Box::leak(Box::default());
+    w.runner = Box::new(Shared(rec));
+    let body = tgz(&[
+        ("usr/bin/asusd", "#!/bin/sh\n", 0o755),
+        ("usr/share/dbus-1/system.d/asusd.conf", "<busconfig/>", 0o644),
+        ("usr/lib/systemd/system/asusd.service", "[Service]\n", 0o644),
+    ]);
+    let mut l = locked("asusd", "url:https://example/asusd.tgz", "6.5.0", "https://example/asusd.tgz", &body);
+    l.artifacts = BTreeMap::from([("x86_64-linux".to_string(), l.artifacts.remove(PLATFORM).unwrap())]);
+    w.lock.upsert(l);
+    w.fetch = MapFetch::default().with("https://example/asusd.tgz", body);
+    let asusd = |etc: serde_json::Value| {
+        with_fields(
+            pkg("asusd", json!({"kind": "url", "url": "https://example/asusd.tgz"}), "pinned"),
+            json!({"etc": etc}),
+        )
+    };
+    let conf = json!({"dbus-1/system.d/asusd.conf": "usr/share/dbus-1/system.d/asusd.conf"});
+    w.apply(&[asusd(conf.clone())]).unwrap();
+    let link = w.paths.system("/etc/dbus-1/system.d/asusd.conf");
+    assert!(fs::read_link(&link).unwrap().starts_with("/opt/fspec/store/"));
+    assert!(!rec.lines().iter().any(|l| l.contains("daemon-reload")));
+
+    let unit = json!({"dbus-1/system.d/asusd.conf": "usr/share/dbus-1/system.d/asusd.conf",
+        "systemd/system/asusd.service": "usr/lib/systemd/system/asusd.service"});
+    w.apply(&[asusd(unit.clone())]).unwrap();
+    assert!(is_link(&w.paths.system("/etc/systemd/system/asusd.service")));
+    assert_eq!(rec.lines().iter().filter(|l| *l == "systemctl daemon-reload").count(), 1);
+
+    fs::remove_file(&link).unwrap();
+    assert_eq!(w.plan(&[asusd(unit)]).changes.len(), 1);
+    w.apply(&[]).unwrap();
+    assert!(fs::symlink_metadata(&link).is_err());
+    assert!(fs::symlink_metadata(w.paths.system("/etc/systemd/system/asusd.service")).is_err());
+
+    let bad = w.plan(&[asusd(json!({"../passwd": "usr/bin/asusd"}))]);
+    assert!(bad.unsupported[0].contains("must be paths under /etc"), "{:?}", bad.unsupported);
+}
+
+fn is_link(p: &std::path::Path) -> bool {
+    fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink())
+}
+
 #[test]
 fn apps_are_copied_to_applications_and_go_with_the_package() {
     let mut w = World::new();
