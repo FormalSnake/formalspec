@@ -122,10 +122,22 @@ impl Runner for LiveRunner {
         c.stdin(if cmd.stdin.is_some() { Stdio::piped() } else { Stdio::null() });
         c.stdout(Stdio::piped()).stderr(Stdio::piped());
         let mut child = c.spawn().with_context(|| format!("running `{cmd}`"))?;
-        if let Some(input) = &cmd.stdin {
-            child.stdin.take().context("stdin")?.write_all(input.as_bytes())?;
-        }
+        // Feed stdin from its own thread: a child that fills its stdout or stderr pipe before it
+        // has read all of stdin (tar -T - warning about thousands of paths) would otherwise
+        // block on that write while we block on ours.
+        let writer = match (&cmd.stdin, child.stdin.take()) {
+            (Some(input), Some(mut stdin)) => {
+                let input = input.clone();
+                Some(std::thread::spawn(move || stdin.write_all(input.as_bytes())))
+            }
+            _ => None,
+        };
         let out = child.wait_with_output()?;
+        if let Some(w) = writer {
+            // A child that exits without reading everything closes the pipe; its exit status
+            // already says what went wrong.
+            let _ = w.join();
+        }
         Ok(Output {
             status: out.status.code().unwrap_or(-1),
             stdout: String::from_utf8_lossy(&out.stdout).into(),
