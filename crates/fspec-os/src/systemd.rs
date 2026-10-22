@@ -84,15 +84,20 @@ impl Backend for SystemdBackend {
             let main = main_unit(op.resource());
             let ctl = |args: &[&str]| ctl(user, args);
             let us = units(op.resource())?;
+            // A unit that refuses manual start or stop only starts with what wants it, so apply
+            // enables and disables it and leaves it running or not.
+            let manual = !refuses_manual(op.resource());
 
             // Undo steps replay backwards: files are restored first, then the reload, then the
             // unit is brought back to its old state, so that step is recorded first.
             // systemctl refuses `--now` in a chroot but ignores start and stop there, so a root
             // built by `switch --distro` still applies.
             if op.is_removal() {
-                journal.record(Undo::Run { cmd: ctl(&["start", &main]) })?;
+                if manual {
+                    journal.record(Undo::Run { cmd: ctl(&["start", &main]) })?;
+                }
                 journal.record(Undo::Run { cmd: ctl(&["enable", &main]) })?;
-            } else if op.current.is_some() {
+            } else if op.current.is_some() && manual {
                 journal.record(Undo::Run { cmd: ctl(&["restart", &main]) })?;
             }
             journal.record(Undo::Run { cmd: ctl(&["daemon-reload"]) })?;
@@ -100,7 +105,9 @@ impl Backend for SystemdBackend {
                 for u in &us {
                     journal.backup(&cx.resolve(&u.path)?)?;
                 }
-                cx.runner.run(&ctl(&["stop", &main]))?;
+                if manual {
+                    cx.runner.run(&ctl(&["stop", &main]))?;
+                }
                 cx.runner.run(&ctl(&["disable", &main]))?;
                 for u in &us {
                     remove_any(&cx.resolve(&u.path)?)?;
@@ -116,12 +123,18 @@ impl Backend for SystemdBackend {
             }
             cx.runner.check(&ctl(&["daemon-reload"]))?;
             if op.current.is_some() {
-                cx.runner.check(&ctl(&["restart", &main]))?;
+                if manual {
+                    cx.runner.check(&ctl(&["restart", &main]))?;
+                }
             } else {
                 journal.record(Undo::Run { cmd: ctl(&["disable", &main]) })?;
-                journal.record(Undo::Run { cmd: ctl(&["stop", &main]) })?;
+                if manual {
+                    journal.record(Undo::Run { cmd: ctl(&["stop", &main]) })?;
+                }
                 cx.runner.check(&ctl(&["enable", &main]))?;
-                cx.runner.check(&ctl(&["start", &main]))?;
+                if manual {
+                    cx.runner.check(&ctl(&["start", &main]))?;
+                }
             }
             let mut rec = Map::new();
             rec.insert("units".into(), json!(us.iter().map(|u| u.path.clone()).collect::<Vec<_>>()));
@@ -144,6 +157,14 @@ fn distro(r: &Resource) -> Option<&fspec_core::resource::Service> {
 
 fn ctl(user: bool, args: &[&str]) -> Cmd {
     Cmd::new("systemctl").args(user.then_some("--user")).args(args.iter().copied())
+}
+
+fn refuses_manual(r: &Resource) -> bool {
+    let Resource::Service(s) = r else { return false };
+    let unit = s.systemd.get("unit");
+    ["RefuseManualStart", "RefuseManualStop"]
+        .iter()
+        .any(|k| unit.and_then(|u| u.get(k)).is_some_and(|v| v == &Value::Bool(true) || v == "yes"))
 }
 
 fn is_user(r: &Resource) -> bool {

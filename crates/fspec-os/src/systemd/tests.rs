@@ -159,6 +159,26 @@ fn add_update_remove_command_sequences() {
 }
 
 #[test]
+fn a_unit_that_refuses_manual_start_is_only_enabled_and_disabled() {
+    let w = World::linux(Init::Systemd);
+    let backends: &[&dyn Backend] = &[&SystemdBackend];
+    let app = |exec: &str| {
+        resource(json!({"kind": "service", "name": "app", "exec": exec,
+            "systemd": {"unit": {"RefuseManualStart": true, "RefuseManualStop": true}}}))
+    };
+    apply_scope(&w.cx(Scope::System), backends, &[desired(app("/bin/app"))]).unwrap();
+    assert_eq!(w.runner.lines(), ["systemctl daemon-reload", "systemctl enable fspec-app.service"]);
+
+    w.runner.calls.lock().unwrap().clear();
+    apply_scope(&w.cx(Scope::System), backends, &[desired(app("/bin/app2"))]).unwrap();
+    assert_eq!(w.runner.lines(), ["systemctl daemon-reload"]);
+
+    w.runner.calls.lock().unwrap().clear();
+    apply_scope(&w.cx(Scope::System), backends, &[]).unwrap();
+    assert_eq!(w.runner.lines(), ["systemctl disable fspec-app.service", "systemctl daemon-reload"]);
+}
+
+#[test]
 fn user_units_use_the_user_manager() {
     let w = World::linux(Init::Systemd);
     apply_scope(&w.cx(Scope::User), &[&SystemdBackend], &[desired(syncthing())]).unwrap();
