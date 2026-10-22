@@ -1,0 +1,49 @@
+name: fspec packages
+
+on:
+  push:
+    branches: [main]
+    paths: ["examples/kyan/fspec.lock", "examples/kyan/patches/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    name: ${{ matrix.pkg }} (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { pkg: clipssh, platform: x86_64-linux, runner: ubuntu-24.04 }
+          - { pkg: fast, platform: x86_64-linux, runner: ubuntu-24.04 }
+          - { pkg: fetch, platform: x86_64-linux, runner: ubuntu-24.04 }
+          - { pkg: formalmusic, platform: x86_64-linux, runner: ubuntu-24.04 }
+          - { pkg: gopls, platform: x86_64-linux, runner: ubuntu-24.04 }
+          - { pkg: kopuzd, platform: x86_64-linux, runner: ubuntu-24.04 }
+          - { pkg: librepods, platform: x86_64-linux, runner: ubuntu-24.04 }
+          - { pkg: lumen, platform: x86_64-linux, runner: ubuntu-24.04 }
+          - { pkg: meshtop, platform: x86_64-linux, runner: ubuntu-24.04 }
+          - { pkg: messages, platform: x86_64-linux, runner: ubuntu-24.04 }
+          - { pkg: nil, platform: x86_64-linux, runner: ubuntu-24.04 }
+          - { pkg: wl-clip-persist, platform: x86_64-linux, runner: ubuntu-24.04 }
+          - { pkg: wl-gammarelay-rs, platform: x86_64-linux, runner: ubuntu-24.04 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oras-project/setup-oras@v1
+      - name: Install fspec
+        run: cargo install --locked --git https://github.com/FormalStudio/formalspec fspec
+      - name: Build
+        run: fspec --spec examples/kyan/spec.star build --pkg ${{ matrix.pkg }} --platform ${{ matrix.platform }} --out out
+      - name: Push
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "$TOKEN" | oras login ghcr.io -u "${{ github.actor }}" --password-stdin
+          cd out
+          oras push "ghcr.io/$owner/fspec-cache/${{ matrix.pkg }}:$(cat tag)" \
+            "${{ matrix.pkg }}-${{ matrix.platform }}.tar.zst:application/vnd.fspec.package.v1.tar+zstd"

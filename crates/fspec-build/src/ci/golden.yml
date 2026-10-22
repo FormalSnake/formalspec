@@ -3,7 +3,7 @@ name: fspec packages
 on:
   push:
     branches: [main]
-    paths: [fspec.lock, "patches/**"]
+    paths: ["fspec.lock", "patches/**"]
   workflow_dispatch:
 
 permissions:
@@ -26,7 +26,7 @@ jobs:
       - name: Install fspec
         run: cargo install --locked --git {{repo}} fspec
       - name: Build
-        run: fspec build --pkg ${{ matrix.pkg }} --platform ${{ matrix.platform }} --out out
+        run: fspec --spec spec.star build --pkg ${{ matrix.pkg }} --platform ${{ matrix.platform }} --out out
       - name: Push
         env:
           TOKEN: ${{ secrets.GITHUB_TOKEN }}

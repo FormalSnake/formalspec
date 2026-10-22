@@ -35,7 +35,8 @@ fn runner(platform: &str) -> Result<&'static str> {
 
 pub const PATH: &str = ".github/workflows/fspec-packages.yml";
 
-pub fn workflow(jobs: &[(String, String)]) -> Result<String> {
+/// `spec` is the spec file relative to the repo root, which is where the workflow lives.
+pub fn workflow(jobs: &[(String, String)], spec: &str) -> Result<String> {
     if jobs.is_empty() {
         bail!("no host declares a git(...) package, there is nothing to cache");
     }
@@ -44,13 +45,14 @@ pub fn workflow(jobs: &[(String, String)]) -> Result<String> {
         matrix
             .push_str(&format!("          - {{ pkg: {pkg}, platform: {platform}, runner: {} }}\n", runner(platform)?));
     }
+    let dir = spec.rsplit_once('/').map(|(d, _)| format!("{d}/")).unwrap_or_default();
     Ok(format!(
         r#"name: fspec packages
 
 on:
   push:
     branches: [main]
-    paths: [fspec.lock, "patches/**"]
+    paths: ["{dir}fspec.lock", "{dir}patches/**"]
   workflow_dispatch:
 
 permissions:
@@ -71,7 +73,7 @@ jobs:
       - name: Install fspec
         run: cargo install --locked --git {repo} fspec
       - name: Build
-        run: fspec build --pkg ${{{{ matrix.pkg }}}} --platform ${{{{ matrix.platform }}}} --out out
+        run: fspec --spec {spec} build --pkg ${{{{ matrix.pkg }}}} --platform ${{{{ matrix.platform }}}} --out out
       - name: Push
         env:
           TOKEN: ${{{{ secrets.GITHUB_TOKEN }}}}

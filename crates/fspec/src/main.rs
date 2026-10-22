@@ -480,8 +480,15 @@ fn main() -> Result<()> {
         }
         Command::Ci { command: CiCommand::Packages } => {
             let spec = fspec_eval::evaluate(&spec_path)?;
-            let text = fspec_build::ci::workflow(&fspec_build::ci::jobs(&spec.hosts))?;
-            let path = spec_dir.join(fspec_build::ci::PATH);
+            let top = LiveRunner.check(
+                &Cmd::new("git").arg("-C").arg(spec_dir.display().to_string()).args(["rev-parse", "--show-toplevel"]),
+            )?;
+            let top = PathBuf::from(top.stdout.trim());
+            let rel = spec_path
+                .strip_prefix(&top)
+                .with_context(|| format!("{} is outside its repo {}", spec_path.display(), top.display()))?;
+            let text = fspec_build::ci::workflow(&fspec_build::ci::jobs(&spec.hosts), &rel.to_string_lossy())?;
+            let path = top.join(fspec_build::ci::PATH);
             std::fs::create_dir_all(path.parent().context("workflow has a parent")?)?;
             std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
             println!("{}", path.display());
