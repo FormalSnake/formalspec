@@ -14,3 +14,47 @@ pulls fspec back toward how nix works for nix's own reasons is the wrong change.
 
 `docs/design.md` is the design. `docs/from-nix.md` maps nix constructs to their fspec shape;
 add each mapping you settle there, and drop nix-isms that only exist to work around nix.
+
+## What fspec is not
+
+- Not a package collection. It installs what the distro, Flatpak, Homebrew or an upstream
+  release already ships, and builds from source only for software none of them has.
+- Not a derivation model. A source build is one `git(...)` package with its own recipe, built by
+  CI, a builder or the host, never a graph that rebuilds the world when one input moves.
+- Not a replacement OS. It does not own `/usr`; the host's package manager does.
+
+## Crates
+
+| Crate | Owns |
+|---|---|
+| `fspec` | The CLI: argument parsing, `Env`, the sudo handoff of the system scope |
+| `fspec-core` | Resources, `Cx`, plan and apply, the state file, the lock, the `Runner` |
+| `fspec-eval` | Starlark builtins (`host`, `pkg`, `file`, `service`, ...) into resources |
+| `fspec-sources` | `fspec update`: resolving packages into the lock |
+| `fspec-store` | Store packages under `/opt/fspec`, generations, links |
+| `fspec-build` | `git(...)` builds: recipes, packing, builders over ssh, the CI cache |
+| `fspec-files` | `file` and `secret` |
+| `fspec-os` | Services per init, users, macOS defaults, distro units |
+| `fspec-pkgmgr` | Native package managers, Flatpak, Homebrew |
+| `fspec-image` | bootc images and their CI |
+| `fspec-remote` | Shipping the spec and applying or planning over ssh |
+| `fspec-switch` | `fspec switch`, `forget`, `disk`: pure functions returning command plans |
+| `fspec-install` | The installer |
+| `fspec-dev` | Project environments from `dev.star` |
+
+## Build and test
+
+- `cargo build`, `cargo test --workspace`. CI also runs `cargo fmt --all --check` and
+  `cargo clippy --workspace --all-targets -- -D warnings`; run all four before pushing.
+- Every external command goes through a `Runner`; tests use `RecordingRunner` and temp roots.
+  Do not test against the real machine from `cargo test`.
+- `examples/kyan/` is a real spec for real hosts. It is not a test fixture.
+
+## Conventions
+
+- Docs must match the code. A change to behaviour, a builtin, a flag or a resource field updates
+  `docs/design.md` (and `docs/from-nix.md` where it maps a nix construct) in the same commit.
+- Comments state constraints the code cannot show. No em dashes in code, docs or commits.
+- Commits are short lowercase conventional subjects (`feat(build): ...`), one unit of work each.
+- Prefer a plan function that returns commands over code that runs them; it keeps the step
+  testable and printable.
