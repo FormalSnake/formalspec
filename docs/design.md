@@ -845,7 +845,12 @@ is installed by name with `dnf`, `pacman -S --needed`, `apt-get` and
 `xbps-install`, and a name removed from the list is removed from the machine.
 The base packages are not in the lock, so they are never pinned or cached;
 pin a package that matters by declaring it as a `pkg` as well. Dropping the
-whole `fedora(...)` declaration leaves its packages installed. Before any
+whole `fedora(...)` declaration leaves its packages installed. On zypper
+distros a `!name` entry, zypper's own syntax, removes that package in the same
+transaction, for one that conflicts with a wanted one
+(`"tuned-ppd", "!power-profiles-daemon"`); drift reports it when it comes
+back. A rollback removes only the names that apply installed, never one that
+was there before, since zypper also removes everything that requires it. Before any
 change to the system layer, if `findmnt -no FSTYPE /` says btrfs, apply takes a
 read-only snapshot `/.snapshots/fspec-<generation>`; it is taken while
 preparing, before the package phases commit, so it holds the old kernel. A

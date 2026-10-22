@@ -95,6 +95,9 @@ impl Backend for DistroBackend {
                 bail!("repo:{}: repo(...) is for zypper distros, {} is not one", repo.name, cx.facts.distro)
             }
             Resource::Repo(repo) => zypper::check_repo(repo),
+            Resource::Distro(d) if fam != Family::Zypper && d.packages.iter().any(|n| n.starts_with('!')) => {
+                bail!("distro: `!name` packages are zypper syntax, {} is not a zypper distro", cx.facts.distro)
+            }
             _ if fam == Family::Zypper => zypper::pin(cx).map(drop),
             _ => Ok(()),
         }
@@ -166,7 +169,8 @@ impl Backend for DistroBackend {
             {
                 zypper::move_to(cx, journal, s)?;
             }
-            let dropped: Vec<String> = had.iter().filter(|n| !want.contains(n)).cloned().collect();
+            let dropped: Vec<String> =
+                had.iter().filter(|n| !want.contains(n) && !n.starts_with('!')).cloned().collect();
             let added: Vec<String> = want.iter().filter(|n| !had.contains(n)).cloned().collect();
             if !dropped.is_empty() {
                 remove(cx, journal, fam, &dropped, &rec)?;

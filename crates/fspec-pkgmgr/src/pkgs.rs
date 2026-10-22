@@ -72,7 +72,7 @@ fn sri(bytes: &[u8]) -> String {
 /// `{"names": [...], "versions": {name: version}}` from the live system.
 pub(crate) fn record_names(cx: &Cx, fam: Family, names: &[String]) -> Result<Map<String, Value>> {
     let mut versions = Map::new();
-    for n in names {
+    for n in names.iter().filter(|n| !n.starts_with('!')) {
         let out = cx.runner.run(&fam.version(n))?;
         let v = fam.parse_version(n, &out.stdout);
         if out.status == 0 && !v.is_empty() {
@@ -92,6 +92,12 @@ pub(crate) fn drift_names(cx: &Cx, fam: Family, names: &[String], rec: &Map<Stri
     let mut notes = Vec::new();
     let versions = rec.get("versions").and_then(Value::as_object);
     for n in names {
+        if let Some(gone) = n.strip_prefix('!') {
+            if installed(cx, fam, gone)? {
+                notes.push(format!("{gone} is installed"));
+            }
+            continue;
+        }
         let out = cx.runner.run(&fam.version(n))?;
         if out.status != 0 {
             notes.push(format!("{n} is not installed"));
@@ -141,9 +147,11 @@ fn install_cmds(cx: &Cx, fam: Family, names: &[String], cached: Option<&Cached>)
     }
 }
 
-/// Install `names` (from `cached` when set), journaling the removal of the ones not installed
-/// yet. A name that was already there stays on rollback: removing it would also take every
-/// package that requires it, which for `tailscale` or `tar` is half the system.
+/// Install `names` (from `cached` when set). A `!name`, zypper's syntax, removes that package in
+/// the same transaction, for one that conflicts with a wanted one. Rollback removes only the
+/// names that were not installed yet: removing one that was already there would also take every
+/// package that requires it, which for `tailscale` or `tar` is half the system. The package
+/// managers install in one transaction, so the undo is journaled once the install went through.
 pub(crate) fn install(
     cx: &Cx,
     journal: &mut Journal,
@@ -151,15 +159,36 @@ pub(crate) fn install(
     names: &[String],
     cached: Option<&Cached>,
 ) -> Result<()> {
-    let mut new = Vec::new();
+    let (mut new, mut back) = (Vec::new(), Vec::new());
     for n in names {
-        let out = cx.runner.run(&fam.version(n))?;
-        if out.status != 0 || fam.parse_version(n, &out.stdout).is_empty() {
-            new.push(n.clone());
+        match n.strip_prefix('!') {
+            Some(gone) if installed(cx, fam, gone)? => back.push(gone.to_string()),
+            Some(_) => {}
+            None if !installed(cx, fam, n)? => new.push(n.clone()),
+            None => {}
         }
     }
-    journal_undo(cx, journal, fam, || if new.is_empty() { Vec::new() } else { vec![fam.remove(&new)] })?;
-    run_all(cx, &install_cmds(cx, fam, names, cached))
+    let undo = || {
+        let mut cmds = Vec::new();
+        if !new.is_empty() {
+            cmds.push(fam.remove(&new));
+        }
+        if !back.is_empty() {
+            cmds.extend(fam.install_names(&back));
+        }
+        cmds
+    };
+    if let Some(cmd) = fam.restore_point(&cx.paths.system("/")) {
+        journal.record(Undo::Run { cmd })?;
+        return run_all(cx, &install_cmds(cx, fam, names, cached));
+    }
+    run_all(cx, &install_cmds(cx, fam, names, cached))?;
+    journal_all(journal, undo())
+}
+
+fn installed(cx: &Cx, fam: Family, name: &str) -> Result<bool> {
+    let out = cx.runner.run(&fam.version(name))?;
+    Ok(out.status == 0 && !fam.parse_version(name, &out.stdout).is_empty())
 }
 
 /// Installing over an existing package can only be reversed when the previous file is cached.

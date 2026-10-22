@@ -444,7 +444,6 @@ fn dnf_lock_bump_installs_the_new_rpm_and_journals_the_old_one() {
         [
             format!("dnf install -y {}", dir.join("htop-3.4-1.fc42.x86_64.rpm").display()),
             "dnf install -y zzz".to_string(),
-            "dnf remove -y zzz".to_string(),
             format!("dnf install -y {}", dir.join("htop-3.3-1.fc42.x86_64.rpm").display()),
         ]
     );
@@ -465,7 +464,7 @@ fn dnf_failure_rolls_back_the_earlier_install() {
     w.answer("dnf install -y b", 1, "");
     assert!(w.apply(Scope::System, &[dnf("a", &[], "pinned"), dnf("b", &[], "pinned")]).is_err());
     let lines = w.take();
-    assert_eq!(&lines[lines.len() - 2..], ["dnf remove -y b", "dnf remove -y a"]);
+    assert_eq!(&lines[lines.len() - 2..], ["dnf install -y b", "dnf remove -y a"]);
 }
 
 #[test]
@@ -712,7 +711,6 @@ fn every_family_journals_the_old_file_on_a_lock_bump() {
         w.forget_answers();
         let mut expect = f.install_file(&w, &new, "htop");
         expect.push(format!("{} zzz", f.install));
-        expect.push(format!("{} zzz", f.remove));
         expect.extend(f.install_file(&w, &old, "htop"));
         assert_eq!(f.without_queries(w.take()), expect, "{}", f.kind);
     }
@@ -725,7 +723,8 @@ fn every_family_rolls_back_the_earlier_install() {
         w.answer(&format!("{} b", f.install), 1, "");
         assert!(w.apply(Scope::System, &[f.pkg("a", &[]), f.pkg("b", &[])]).is_err());
         let lines = w.take();
-        assert_eq!(&lines[lines.len() - 2..], [format!("{} b", f.remove), format!("{} a", f.remove)], "{}", f.kind);
+        // b never installed, so only a is removed.
+        assert_eq!(&lines[lines.len() - 2..], [format!("{} b", f.install), format!("{} a", f.remove)], "{}", f.kind);
     }
 }
 
@@ -797,7 +796,7 @@ fn distro_backend_rolls_back_a_failed_install_and_reports_drift() {
     w.answer(&format!("{} z", f.install), 1, "");
     assert!(w.apply(Scope::System, &[distro_res(f.distro, &["a", "z"])]).is_err());
     let lines = f.without_queries(w.take());
-    assert_eq!(&lines[lines.len() - 2..], [format!("{} z", f.install), format!("{} z", f.remove)]);
+    assert_eq!(lines.last(), Some(&format!("{} z", f.install)), "a failed install has nothing to undo");
 
     w.forget_answers();
     w.answer(f.version, 1, "");
@@ -1113,8 +1112,33 @@ fn a_failed_install_leaves_the_packages_that_were_already_there() {
     let w = World::on(f.distro, &[]);
     w.answer(f.version, 0, "a 1.0-1");
     w.answer(&format!("{} new", f.version), 1, "");
-    w.answer(&format!("{} a new", f.install), 1, "");
-    assert!(w.apply(Scope::System, &[distro_res(f.distro, &["a", "new"])]).is_err());
+    w.answer(&format!("{} zzz", f.install), 1, "");
+    assert!(w.apply(Scope::System, &[distro_res(f.distro, &["a", "new"]), f.pkg("zzz", &[])]).is_err());
     let lines = f.without_queries(w.take());
     assert_eq!(lines.last(), Some(&format!("{} new", f.remove)), "{lines:#?}");
+}
+
+#[test]
+fn a_bang_name_swaps_out_a_conflicting_package_and_puts_it_back_on_rollback() {
+    let w = tumbleweed();
+    disable_rolling(&w);
+    w.answer("rpm -q --qf %{VERSION}-%{RELEASE} power-profiles-daemon", 0, "0.30-1.6");
+    w.answer("rpm -q --qf %{VERSION}-%{RELEASE} tuned-ppd", 1, "");
+    let want = [
+        distro_res(TW, &["tuned-ppd", "!power-profiles-daemon"]),
+        pkg("zzz", json!({"kind": "zypper", "names": []}), "pinned"),
+    ];
+    w.answer("zypper --non-interactive install --auto-agree-with-licenses zzz", 1, "");
+    assert!(w.apply(Scope::System, &want).is_err());
+    let lines = w.take();
+    let install = "zypper --non-interactive install --auto-agree-with-licenses tuned-ppd !power-profiles-daemon";
+    let at = |l: &str| lines.iter().position(|x| x == l).unwrap_or_else(|| panic!("{l}: {lines:#?}"));
+    assert!(at(install) < at("zypper --non-interactive remove tuned-ppd"));
+    assert!(
+        at("zypper --non-interactive remove tuned-ppd")
+            < at("zypper --non-interactive install --auto-agree-with-licenses power-profiles-daemon")
+    );
+
+    let err = World::on("arch", &[]).apply(Scope::System, &[distro_res("arch", &["!x"])]).unwrap_err();
+    assert!(format!("{err:#}").contains("zypper syntax"), "{err:#}");
 }
