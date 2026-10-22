@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::ErrorKind;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -23,6 +23,42 @@ pub struct Lock {
     /// For a project's `dev.star`: each OCI image it names (`debian:13`) pinned by digest.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub image: BTreeMap<String, String>,
+    /// Each `load("gh:owner/repo@ref//...")` source, keyed `gh:owner/repo@ref` (no `@ref` for the
+    /// default branch): the commit it resolved to and the files loaded from it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub loads: BTreeMap<String, LockedLoad>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct LockedLoad {
+    pub rev: String,
+    /// Path inside the repo to its `sha256-<base64>`.
+    pub files: BTreeMap<String, String>,
+}
+
+/// Where a spec keeps the load files a remote apply shipped with it, relative to the spec dir.
+pub const SHIPPED_LOADS: &str = ".fspec/loads";
+
+/// `<owner>/<repo>/<rev>/<path>`, the layout of the load cache and of [`SHIPPED_LOADS`].
+pub fn load_rel(repo: &str, rev: &str, path: &str) -> PathBuf {
+    Path::new(repo).join(rev).join(path)
+}
+
+/// `$XDG_CACHE_HOME/fspec/loads`, else `~/.cache/fspec/loads`.
+pub fn loads_cache() -> Option<PathBuf> {
+    let base = std::env::var_os("XDG_CACHE_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))?;
+    Some(base.join("fspec/loads"))
+}
+
+impl LockedLoad {
+    /// Each locked file under the load cache layout. `key` is the lock key, `gh:owner/repo@ref`.
+    pub fn rel_paths(&self, key: &str) -> Vec<PathBuf> {
+        let repo = key.trim_start_matches("gh:").split('@').next().unwrap_or_default();
+        self.files.keys().map(|path| load_rel(repo, &self.rev, path)).collect()
+    }
 }
 
 /// What provides one `lib(...)` or `bin(...)`: the package (or `pkgconfig(...)`, `/usr/bin/...`

@@ -243,3 +243,147 @@ fn recipients_come_from_secrets_star() {
     std::fs::write(&path, "secrets = {\"a.age\": \"age1x\"}\n").unwrap();
     assert!(evaluate_recipients(&path).is_err());
 }
+
+mod gh_loads {
+    use std::collections::BTreeMap;
+    use std::fs;
+
+    use fspec_core::fetch::MapFetch;
+    use fspec_core::lock::LockedLoad;
+    use fspec_core::resource::{Resource, Source};
+    use fspec_core::runner::{Output, RecordingRunner};
+
+    use crate::remote::{Mode, sri};
+    use crate::{Spec, evaluate_with};
+
+    const REV: &str = "0123456789abcdef0123456789abcdef01234567";
+    const APP: &str = r#"
+load("//lib.star", "flags")
+def formalmusic():
+    o = origin()
+    return pkg("formalmusic", source = git(o.url, rev = o.rev), build_flags = flags)
+"#;
+    const LIB: &str = "flags = [\"--release\"]\n";
+    const SPEC: &str = r#"
+load("gh:FormalStudio/formalmusic@main//fspec.star", "formalmusic")
+own = origin()
+hosts = [host("m", platform = "aarch64-darwin", modules = [[formalmusic()]])]
+"#;
+
+    fn api(path: &str) -> String {
+        format!("https://api.github.com/repos/FormalStudio/formalmusic/contents/{path}?ref={REV}")
+    }
+
+    struct T {
+        dir: tempfile::TempDir,
+        fetch: MapFetch,
+        runner: RecordingRunner,
+    }
+
+    impl T {
+        fn new() -> T {
+            let dir = tempfile::tempdir().unwrap();
+            fs::write(dir.path().join("spec.star"), SPEC).unwrap();
+            let fetch = MapFetch::default().with(&api("fspec.star"), APP).with(&api("lib.star"), LIB);
+            let runner = RecordingRunner::default();
+            runner.respond(
+                "git ls-remote https://github.com/FormalStudio/formalmusic main",
+                Output { stdout: format!("{REV}\trefs/heads/main\n"), ..Output::default() },
+            );
+            T { dir, fetch, runner }
+        }
+
+        fn cache(&self) -> Option<std::path::PathBuf> {
+            Some(self.dir.path().join("cache"))
+        }
+
+        fn eval(&self, mode: Mode) -> anyhow::Result<Spec> {
+            evaluate_with(&self.dir.path().join("spec.star"), mode, &self.fetch, self.cache())
+        }
+    }
+
+    #[test]
+    fn update_locks_the_commit_and_each_file_and_origin_names_them() {
+        let t = T::new();
+        let spec = t.eval(Mode::Resolve { runner: &t.runner, locked: &BTreeMap::new(), keep: false }).unwrap();
+        let load = &spec.loads["gh:FormalStudio/formalmusic@main"];
+        assert_eq!(load.rev, REV);
+        assert_eq!(
+            load.files,
+            BTreeMap::from([
+                ("fspec.star".to_string(), sri(APP.as_bytes())),
+                ("lib.star".to_string(), sri(LIB.as_bytes()))
+            ])
+        );
+        let Resource::Pkg(p) = &spec.hosts[0].resources[0] else { panic!() };
+        assert_eq!(
+            p.source,
+            Source::Git {
+                url: "https://github.com/FormalStudio/formalmusic".into(),
+                rev: REV.into(),
+                deps: vec![],
+                image: None
+            }
+        );
+        assert_eq!(p.build_flags, ["--release"]);
+
+        // Evaluation reads the cache at the locked commit and never resolves.
+        let t2 = T { fetch: MapFetch::default(), runner: RecordingRunner::default(), ..t };
+        let again = t2.eval(Mode::Locked(&spec.loads)).unwrap();
+        assert_eq!(again.hosts, spec.hosts);
+        assert!(t2.runner.lines().is_empty());
+    }
+
+    #[test]
+    fn evaluation_needs_the_lock_and_a_matching_file() {
+        let t = T::new();
+        let err = t.eval(Mode::Locked(&BTreeMap::new())).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("no entry for gh:FormalStudio/formalmusic@main; run `fspec update`"),
+            "{err:#}"
+        );
+
+        let mut files = BTreeMap::new();
+        files.insert("fspec.star".to_string(), sri(b"something else"));
+        let locked =
+            BTreeMap::from([("gh:FormalStudio/formalmusic@main".to_string(), LockedLoad { rev: REV.into(), files })]);
+        let err = t.eval(Mode::Locked(&locked)).unwrap_err();
+        assert!(format!("{err:#}").contains("does not match fspec.lock"), "{err:#}");
+    }
+
+    #[test]
+    fn keep_reuses_the_locked_commit() {
+        let t = T::new();
+        let old = "fedcba9876543210fedcba9876543210fedcba98";
+        let fetch = MapFetch::default()
+            .with(&api("fspec.star").replace(REV, old), APP)
+            .with(&api("lib.star").replace(REV, old), LIB);
+        let locked = BTreeMap::from([(
+            "gh:FormalStudio/formalmusic@main".to_string(),
+            LockedLoad { rev: old.into(), files: BTreeMap::new() },
+        )]);
+        let spec = evaluate_with(
+            &t.dir.path().join("spec.star"),
+            Mode::Resolve { runner: &t.runner, locked: &locked, keep: true },
+            &fetch,
+            t.cache(),
+        )
+        .unwrap();
+        assert_eq!(spec.loads["gh:FormalStudio/formalmusic@main"].rev, old);
+        assert!(t.runner.lines().is_empty());
+    }
+
+    #[test]
+    fn load_strings_parse() {
+        use crate::remote::{Target, parse};
+        assert_eq!(parse("//x.star").unwrap(), None);
+        assert_eq!(
+            parse("gh:o/r//fspec.star").unwrap(),
+            Some(Target { repo: "o/r", reference: None, path: "fspec.star" })
+        );
+        assert_eq!(parse("gh:o/r@v1.2//a/b.star").unwrap().unwrap().key(), "gh:o/r@v1.2");
+        for bad in ["gh:o/r", "gh:o//x.star", "gh:o/r@//x.star", "gh:o/r//../x.star", "gh:o/r//x.py"] {
+            assert!(parse(bad).is_err(), "{bad}");
+        }
+    }
+}

@@ -1510,10 +1510,12 @@ version = "0.1.0"
 dependencies = [
  "allocative",
  "anyhow",
+ "base64 0.23.1",
  "fspec-core",
  "glob",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "starlark",
  "tempfile",
 ]

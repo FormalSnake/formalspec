@@ -6,6 +6,7 @@ pub mod cmd;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
+use fspec_core::lock::{Lock, SHIPPED_LOADS, loads_cache};
 use fspec_core::runner::{Output, Runner};
 use fspec_core::{Facts, Host, Plan};
 use serde::{Deserialize, Serialize};
@@ -61,6 +62,8 @@ pub struct Remote<'a> {
     pub spec_file: String,
     /// Ship a tree with uncommitted changes anyway.
     pub dirty: bool,
+    /// Where the `gh:` load files are cached, default [`loads_cache`].
+    pub loads_cache: Option<PathBuf>,
 }
 
 impl Remote<'_> {
@@ -88,8 +91,10 @@ impl Remote<'_> {
         Ok(reach)
     }
 
-    /// Copies the git-tracked files of the spec dir, plus `fspec.lock`, to the remote. Returns the
-    /// remote directory as a shell word.
+    /// Copies the git-tracked files of the spec dir, plus `fspec.lock`, to the remote, and the
+    /// `gh:` load files this machine has cached, so the remote evaluates without fetching them
+    /// (it may have no GitHub token for a private repo). Returns the remote directory as a shell
+    /// word.
     pub fn ship(&self, alias: &str) -> Result<String> {
         let git = |c| self.runner.check(&c).context("the spec must live in a git repository to be shipped");
         let commit = git(cmd::git_commit(&self.spec_dir))?.stdout.trim().to_string();
@@ -108,6 +113,21 @@ impl Remote<'_> {
         let archive = tmp.path().join("spec.tar");
         self.runner.check(&cmd::tar_create(&self.spec_dir, &archive, &files))?;
         self.runner.check(&cmd::ship(alias, &dest, &archive, tree_dirty))?;
+        let lock = Lock::load(&self.spec_dir.join("fspec.lock"))?;
+        if let Some(cache) = self.loads_cache.clone().or_else(loads_cache) {
+            let loads: Vec<String> = lock
+                .loads
+                .iter()
+                .flat_map(|(key, l)| l.rel_paths(key))
+                .filter(|rel| cache.join(rel).is_file())
+                .map(|rel| rel.display().to_string())
+                .collect();
+            if !loads.is_empty() {
+                let archive = tmp.path().join("loads.tar");
+                self.runner.check(&cmd::tar_create(&cache, &archive, &loads))?;
+                self.runner.check(&cmd::ship_into(alias, &format!("{dest}/{SHIPPED_LOADS}"), &archive))?;
+            }
+        }
         Ok(dest)
     }
 

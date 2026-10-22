@@ -60,6 +60,11 @@ pub fn tar_create(spec_dir: &Path, archive: &Path, files: &[String]) -> Cmd {
         .stdin(files.join("\n"))
 }
 
+/// Unpacks `archive` into `dir` on the remote, beside what is already there.
+pub fn ship_into(alias: &str, dir: &str, archive: &Path) -> Cmd {
+    batch(alias).arg(format!("mkdir -p {dir} && tar -xf - -C {dir}")).stdin_file(archive)
+}
+
 pub fn ship(alias: &str, dest: &str, archive: &Path, dirty: bool) -> Cmd {
     let wipe = if dirty { format!("rm -rf {dest} && ") } else { String::new() };
     batch(alias).arg(format!("{wipe}mkdir -p {dest} && tar -xf - -C {dest}")).stdin_file(archive)

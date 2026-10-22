@@ -58,6 +58,45 @@ it matches the declaration, and fails with a clear error when it does not.
 `load("//modules/cli.star", "cli")` resolves from the directory holding
 `spec.star`; there are no relative loads.
 
+A recipe can live with the project it installs instead of in the spec. A
+`gh:` load reads a `.star` file from a GitHub repo, pinned like a package:
+
+```python
+load("gh:FormalStudio/formalmusic@main//fspec.star", "formalmusic")
+hosts = [host("macbook", ..., modules = [[formalmusic()]])]
+```
+
+`@<branch>` or `@<tag>` tracks (each `fspec update` moves it), `@<commit>`
+(40 hex) pins, and no `@` means the default branch. `fspec update` resolves the
+ref with `git ls-remote`, fetches the file and every `//x.star` it loads, which
+resolve inside that repo at that commit, and records them in `fspec.lock`:
+
+```toml
+[loads."gh:FormalStudio/formalmusic@main"]
+rev = "0123456789abcdef0123456789abcdef01234567"
+files = { "fspec.star" = "sha256-...", "lib.star" = "sha256-..." }
+```
+
+`fspec update <pkg>` keeps every load at its locked commit. Evaluation never
+resolves a ref: it reads each file at the locked commit from
+`<spec>/.fspec/loads`, then `~/.cache/fspec/loads`, then GitHub's contents API
+(with the same token as the resolvers, so private repos work), and checks it
+against the locked hash. A load the lock lacks, or a file that does not match
+it, fails with `run fspec update`. Inside such a file `origin()` returns
+`struct(url = "https://github.com/<owner>/<repo>", rev = "<locked commit>")`,
+also inside a function the spec calls, and `None` in the spec's own files, so
+the project's recipe can build itself at the commit it was read from:
+
+```python
+def formalmusic():
+    o = origin()
+    return pkg("formalmusic", source = git(o.url, rev = o.rev), build_flags = [...])
+```
+
+One lock entry then pins, or tracks, both the recipe and the build. A loaded
+file names paths relative to the user's spec (`glob`, `src`, `patches`), not to
+its own repo.
+
 ## Resources
 
 A config evaluates to a list of resources:
@@ -1583,7 +1622,9 @@ through the `Runner`:
    apply unless `--dirty` is passed.
 3. Ship: `git ls-files` in the spec directory plus `fspec.lock` go through
    `tar` and ssh into `~/.cache/fspec/spec/<commit>/` on the remote. A dirty
-   tree lands in `<commit>-dirty/`, wiped first.
+   tree lands in `<commit>-dirty/`, wiped first. The `gh:` load files the
+   lock names follow from this machine's cache into `<dir>/.fspec/loads`, so
+   the remote needs no GitHub token to evaluate them.
 4. Run `ssh -t h fspec --spec <dir>/spec.star apply --local --host h` with the
    terminal handed over, so sudo can prompt. `--local` stops the remote end
    from forwarding the apply again if its host name differs from the declared one.

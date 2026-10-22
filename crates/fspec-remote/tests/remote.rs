@@ -38,7 +38,7 @@ fn fixture(status: &str) -> (tempfile::TempDir, RecordingRunner) {
 }
 
 fn remote<'a>(dir: &Path, runner: &'a RecordingRunner, dirty: bool) -> Remote<'a> {
-    Remote { runner, spec_dir: dir.to_path_buf(), spec_file: "spec.star".into(), dirty }
+    Remote { runner, spec_dir: dir.to_path_buf(), spec_file: "spec.star".into(), dirty, loads_cache: None }
 }
 
 fn apply_lines(dir: &Path, runner: &RecordingRunner) -> Vec<String> {
@@ -175,4 +175,27 @@ fn all_stops_at_the_first_failure_and_summarises() {
     .unwrap_err();
     assert_eq!(seen, ["g815", "e1504g"]);
     assert_eq!(err.to_string(), "host e1504g failed: sudo failed\nconverged: g815\nnot attempted: macbook");
+}
+
+#[test]
+fn ship_carries_the_cached_gh_load_files() {
+    let (dir, runner) = fixture("");
+    fs::write(
+        dir.path().join("fspec.lock"),
+        "[loads.\"gh:o/app@main\"]\nrev = \"abc\"\nfiles = { \"fspec.star\" = \"sha256-x\", \"lib.star\" = \"sha256-y\" }\n",
+    )
+    .unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    fs::create_dir_all(cache.path().join("o/app/abc")).unwrap();
+    fs::write(cache.path().join("o/app/abc/fspec.star"), "").unwrap();
+    let r = Remote { loads_cache: Some(cache.path().to_path_buf()), ..remote(dir.path(), &runner, false) };
+    let dest = r.ship("g815").unwrap();
+
+    let calls = runner.calls.lock().unwrap();
+    let tars: Vec<_> = calls.iter().filter(|c| c.program == "tar").collect();
+    assert_eq!(tars.len(), 2);
+    assert!(tars[1].to_string().ends_with(&format!(" -C {} -T -", cache.path().display())), "{}", tars[1]);
+    assert_eq!(tars[1].stdin.as_deref(), Some("o/app/abc/fspec.star"));
+    let into = format!("{dest}/.fspec/loads");
+    assert_eq!(calls.last().unwrap().to_string(), format!("{PROBE} 'mkdir -p {into} && tar -xf - -C {into}'"));
 }

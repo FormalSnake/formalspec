@@ -2,8 +2,10 @@
 //! form, validated against the `fspec-core` types as soon as they are constructed, so a typo
 //! fails at the line that made it.
 
+pub mod remote;
+
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -11,7 +13,10 @@ use allocative::Allocative;
 use anyhow::{Context, anyhow, bail};
 use fspec_core::dev::Dev;
 use fspec_core::facts::Facts;
+use fspec_core::fetch::{Fetch, LiveFetch};
+use fspec_core::lock::{Lock, LockedLoad, SHIPPED_LOADS, loads_cache};
 use fspec_core::resource::{Host, Resource, Source, System};
+use fspec_core::runner::Runner;
 use serde::de::DeserializeOwned;
 use serde::{Serialize, Serializer};
 use serde_json::{Map, Value as Json};
@@ -30,6 +35,8 @@ use starlark::values::{Heap, ProvidesStaticType, StarlarkValue, Value, starlark_
 #[derive(Debug)]
 pub struct Spec {
     pub hosts: Vec<Host>,
+    /// Each `gh:` load source the evaluation read, at the commit it read it at.
+    pub loads: BTreeMap<String, LockedLoad>,
 }
 
 impl Spec {
@@ -41,15 +48,46 @@ impl Spec {
     }
 }
 
-/// Evaluate `spec_path`. `load("//x.star", ...)` resolves against the spec's directory.
+/// Evaluate `spec_path`. `load("//x.star", ...)` resolves against the spec's directory, and
+/// `load("gh:owner/repo@ref//x.star", ...)` at the commit `fspec.lock` pins for it.
 pub fn evaluate(spec_path: &Path) -> anyhow::Result<Spec> {
     let root = spec_path.parent().map(Path::to_path_buf).unwrap_or_default();
+    let lock = Lock::load(&root.join("fspec.lock"))?;
+    let fetch = LiveFetch::new();
+    evaluate_with(spec_path, remote::Mode::Locked(&lock.loads), &fetch, loads_cache())
+}
+
+/// Evaluate for `fspec update`: each `gh:` ref resolves to its current commit, or with `keep`
+/// stays at the commit `locked` has for it.
+pub fn evaluate_resolving(
+    spec_path: &Path,
+    runner: &dyn Runner,
+    fetch: &dyn Fetch,
+    locked: &BTreeMap<String, LockedLoad>,
+    keep: bool,
+) -> anyhow::Result<Spec> {
+    evaluate_with(spec_path, remote::Mode::Resolve { runner, locked, keep }, fetch, loads_cache())
+}
+
+/// `cache` is where fetched `gh:` load files are kept between runs.
+pub fn evaluate_with(
+    spec_path: &Path,
+    mode: remote::Mode,
+    fetch: &dyn Fetch,
+    cache: Option<PathBuf>,
+) -> anyhow::Result<Spec> {
+    let root = spec_path.parent().map(Path::to_path_buf).unwrap_or_default();
+    let mut dirs = vec![root.join(SHIPPED_LOADS)];
+    dirs.extend(cache);
+    let remote = remote::Remote { mode, fetch, dirs, loaded: RefCell::default() };
     let globals = globals();
+    let (cache, loading) = (RefCell::default(), RefCell::default());
     let loader = Loader {
-        root: SpecRoot { dir: root, dev: None },
+        root: SpecRoot { dir: root, dev: None, origin: None },
         globals: &globals,
-        cache: RefCell::default(),
-        loading: RefCell::default(),
+        cache: &cache,
+        loading: &loading,
+        remote: Some(&remote),
     };
     let text = std::fs::read_to_string(spec_path).with_context(|| format!("reading {}", spec_path.display()))?;
     let ast = AstModule::parse(&spec_path.display().to_string(), text, &dialect()).map_err(|e| e.into_anyhow())?;
@@ -74,7 +112,7 @@ pub fn evaluate(spec_path: &Path) -> anyhow::Result<Spec> {
                 bail!("host `{}` is declared more than once", h.name);
             }
         }
-        Ok(Spec { hosts })
+        Ok(Spec { hosts, loads: remote.loaded.take() })
     })
 }
 
@@ -101,11 +139,13 @@ pub fn evaluate_dev(path: &Path, platform: &str) -> anyhow::Result<Dev> {
         _ => bail!("platform `{platform}` is not one of {}", fspec_core::dev::PLATFORMS.join(", ")),
     };
     let globals = globals();
+    let (cache, loading) = (RefCell::default(), RefCell::default());
     let loader = Loader {
-        root: SpecRoot { dir: root, dev: Some(RefCell::default()) },
+        root: SpecRoot { dir: root, dev: Some(RefCell::default()), origin: None },
         globals: &globals,
-        cache: RefCell::default(),
-        loading: RefCell::default(),
+        cache: &cache,
+        loading: &loading,
+        remote: None,
     };
     let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let ast = AstModule::parse(&path.display().to_string(), text, &dialect()).map_err(|e| e.into_anyhow())?;
@@ -137,13 +177,35 @@ fn globals() -> Globals {
 struct SpecRoot {
     dir: PathBuf,
     dev: Option<RefCell<Option<Dev>>>,
+    /// Set inside a file loaded from GitHub: its `//` loads resolve in the same repo, at the
+    /// commit the lock has for the same ref.
+    origin: Option<Origin>,
+}
+
+struct Origin {
+    repo: String,
+    reference: Option<String>,
 }
 
 struct Loader<'a> {
     root: SpecRoot,
     globals: &'a Globals,
-    cache: RefCell<HashMap<String, FrozenModule>>,
-    loading: RefCell<Vec<String>>,
+    cache: &'a RefCell<HashMap<String, FrozenModule>>,
+    loading: &'a RefCell<Vec<String>>,
+    remote: Option<&'a remote::Remote<'a>>,
+}
+
+impl Loader<'_> {
+    /// A `gh:` load, or a `//` load inside a file that came from GitHub: the file at the
+    /// locked commit, evaluated with that repo as its origin.
+    fn load_remote(&self, path: &str, t: &remote::Target) -> anyhow::Result<(String, String, SpecRoot)> {
+        let remote = self.remote.with_context(|| format!("load(\"{path}\"): GitHub loads belong in spec.star"))?;
+        let rev = remote.rev(t)?;
+        let text = remote.read(t, &rev, t.path)?;
+        let origin = Origin { repo: t.repo.into(), reference: t.reference.map(Into::into) };
+        let root = SpecRoot { dir: self.root.dir.clone(), dev: None, origin: Some(origin) };
+        Ok((format!("gh:{}@{rev}//{}", t.repo, t.path), text, root))
+    }
 }
 
 impl FileLoader for Loader<'_> {
@@ -151,29 +213,54 @@ impl FileLoader for Loader<'_> {
         if let Some(m) = self.cache.borrow().get(path) {
             return Ok(m.clone());
         }
-        let Some(rel) = path.strip_prefix("//") else {
-            return Err(other(anyhow!(
-                "load(\"{path}\"): paths start with // and are relative to the spec's directory"
-            )));
+        let gh = remote::parse(path).map_err(other)?;
+        let inner = match (&self.root.origin, path.strip_prefix("//")) {
+            (Some(o), Some(rel)) => {
+                remote::parse(&format!("gh:{}//{rel}", o.repo)).map_err(other)?;
+                Some(remote::Target { repo: &o.repo, reference: o.reference.as_deref(), path: rel })
+            }
+            _ => None,
         };
-        if self.loading.borrow().iter().any(|p| p == path) {
-            return Err(other(anyhow!("load cycle: {} -> {path}", self.loading.borrow().join(" -> "))));
+        let (name, text, child) = match gh.or(inner) {
+            Some(t) => self.load_remote(path, &t).map_err(other)?,
+            None => {
+                let Some(rel) = path.strip_prefix("//") else {
+                    return Err(other(anyhow!(
+                        "load(\"{path}\"): paths start with // and are relative to the spec's directory, or gh:owner/repo@ref//path"
+                    )));
+                };
+                let file = self.root.dir.join(rel);
+                let text =
+                    std::fs::read_to_string(&file).with_context(|| format!("load(\"{path}\")")).map_err(other)?;
+                (path.to_string(), text, SpecRoot { dir: self.root.dir.clone(), dev: None, origin: None })
+            }
+        };
+        if let Some(m) = self.cache.borrow().get(&name) {
+            return Ok(m.clone());
         }
-        let file = self.root.dir.join(rel);
-        let text = std::fs::read_to_string(&file).with_context(|| format!("load(\"{path}\")")).map_err(other)?;
-        let ast = AstModule::parse(path, text, &dialect())?;
-        self.loading.borrow_mut().push(path.into());
+        if self.loading.borrow().contains(&name) {
+            return Err(other(anyhow!("load cycle: {} -> {name}", self.loading.borrow().join(" -> "))));
+        }
+        let ast = AstModule::parse(&name, text, &dialect())?;
+        let loader = Loader {
+            root: child,
+            globals: self.globals,
+            cache: self.cache,
+            loading: self.loading,
+            remote: self.remote,
+        };
+        self.loading.borrow_mut().push(name.clone());
         let frozen = Module::with_temp_heap(|module| {
             let mut eval = Evaluator::new(&module);
-            eval.set_loader(self);
-            eval.extra = Some(&self.root);
+            eval.set_loader(&loader);
+            eval.extra = Some(&loader.root);
             eval.eval_module(ast, self.globals)?;
             drop(eval);
             module.freeze().map_err(|e| other(anyhow!("{e:?}")))
         });
         self.loading.borrow_mut().pop();
         let frozen = frozen?;
-        self.cache.borrow_mut().insert(path.into(), frozen.clone());
+        self.cache.borrow_mut().insert(name, frozen.clone());
         Ok(frozen)
     }
 }
@@ -487,6 +574,24 @@ fn glob_(root: &Path, pattern: &str) -> anyhow::Result<Vec<String>> {
 
 #[starlark_module]
 fn builtins(builder: &mut GlobalsBuilder) {
+    /// Inside a file loaded from GitHub, its repo and the locked commit; `None` in the spec's own
+    /// files. Read from the file name of the call site, `gh:<repo>@<rev>//<path>`, so it also
+    /// holds inside a function that the user's spec calls.
+    fn origin<'v>(eval: &mut Evaluator<'v, '_, '_>) -> anyhow::Result<Value<'v>> {
+        let site = eval.call_stack_top_location();
+        let Some((repo, rev)) = site
+            .as_ref()
+            .and_then(|s| s.filename().strip_prefix("gh:"))
+            .and_then(|f| f.split_once("//"))
+            .and_then(|(repo_rev, _)| repo_rev.split_once('@'))
+        else {
+            return Ok(Value::new_none());
+        };
+        let heap = eval.heap();
+        Ok(heap
+            .alloc(AllocStruct([("url", heap.alloc(format!("https://github.com/{repo}"))), ("rev", heap.alloc(rev))])))
+    }
+
     fn glob<'v>(pattern: &str, eval: &mut Evaluator<'v, '_, '_>) -> anyhow::Result<Vec<String>> {
         let root = eval.extra.and_then(|e| e.downcast_ref::<SpecRoot>()).context("glob needs a spec directory")?;
         glob_(&root.dir, pattern)

@@ -399,6 +399,7 @@ fn main() -> Result<()> {
                         spec_dir: spec_dir.clone(),
                         spec_file: file_name(&spec_path)?,
                         dirty: *dirty,
+                        loads_cache: None,
                     };
                     match remote.plan(host, &alias)? {
                         Planned::Plan(plan) => plan,
@@ -418,10 +419,12 @@ fn main() -> Result<()> {
             Ok(())
         }
         Command::Update { pkgs, images, cache, registry } => {
-            let spec = fspec_eval::evaluate(&spec_path)?;
             let lock_path = spec_dir.join("fspec.lock");
             let old = Lock::load(&lock_path)?;
             let (fetch, runner) = (LiveFetch::new(), LiveRunner);
+            // Updating named packages keeps every gh: load at its locked commit.
+            let keep = !pkgs.is_empty() || *images;
+            let spec = fspec_eval::evaluate_resolving(&spec_path, &runner, &fetch, &old.loads, keep)?;
             if *images {
                 let registry = registry_for(registry.as_deref(), &runner, &spec_dir)?;
                 let u = fspec_image::update_images(&spec.hosts, &old, &registry, &fetch)?;
@@ -442,6 +445,14 @@ fn main() -> Result<()> {
             for line in &result.changes {
                 println!("{line}");
             }
+            for (key, load) in &spec.loads {
+                match old.loads.get(key) {
+                    Some(was) if was.rev == load.rev => {}
+                    Some(was) => println!("{key} {} -> {}", &was.rev[..12], &load.rev[..12]),
+                    None => println!("+ {key} {}", &load.rev[..12]),
+                }
+            }
+            result.lock.loads = spec.loads.clone();
             if *cache {
                 let registry = fspec_build::cache::registry(&runner, &spec_dir, registry.as_deref())?;
                 let (lines, failed) = fspec_build::cache::record(&mut result.lock, &spec.hosts, &registry, &runner)?;
@@ -559,6 +570,7 @@ fn main() -> Result<()> {
                 spec_dir: spec_dir.clone(),
                 spec_file: file_name(&spec_path)?,
                 dirty: *dirty,
+                loads_cache: None,
             };
             let apply_one = |h: &Host| -> Result<()> {
                 match remote_alias(h, &this, &paths, *local) {
@@ -1234,8 +1246,13 @@ fn plan_local(paths: &Paths, spec_path: &Path, host: &Host, scope: Option<ScopeA
 fn plan_all(spec: &fspec_eval::Spec, paths: &Paths, spec_path: &Path, dirty: bool) -> Result<()> {
     let spec_dir = spec_path.parent().context("spec has no parent directory")?;
     let this = local_hostname();
-    let remote =
-        Remote { runner: &LiveRunner, spec_dir: spec_dir.to_path_buf(), spec_file: file_name(spec_path)?, dirty };
+    let remote = Remote {
+        runner: &LiveRunner,
+        spec_dir: spec_dir.to_path_buf(),
+        spec_file: file_name(spec_path)?,
+        dirty,
+        loads_cache: None,
+    };
     let mut failed = 0;
     for host in &spec.hosts {
         let outcome = match remote_alias(host, &this, paths, false) {
