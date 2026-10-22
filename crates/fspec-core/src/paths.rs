@@ -11,15 +11,28 @@ pub struct Paths {
     pub home: PathBuf,
 }
 
+fn passwd_home(passwd: &str, uid: u32) -> Option<PathBuf> {
+    passwd.lines().map(|l| l.split(':').collect::<Vec<_>>()).find_map(|f| {
+        (f.len() >= 6 && f[2].parse() == Ok(uid)).then(|| PathBuf::from(f[5]))
+    })
+}
+
 impl Paths {
     pub fn new(root: PathBuf, home: PathBuf) -> Paths {
         Paths { root, home }
     }
 
-    /// `/` and `$HOME`.
+    /// `/` and `$HOME`, or the user's home in /etc/passwd when HOME is unset, as it is for a
+    /// systemd system service.
     pub fn live() -> Result<Paths> {
-        let home = std::env::var_os("HOME").context("HOME is not set")?;
-        Ok(Paths::new(PathBuf::from("/"), PathBuf::from(home)))
+        let home = match std::env::var_os("HOME") {
+            Some(home) => PathBuf::from(home),
+            None => {
+                let passwd = std::fs::read_to_string("/etc/passwd").context("HOME is not set")?;
+                passwd_home(&passwd, unsafe { libc::getuid() }).context("HOME is not set")?
+            }
+        };
+        Ok(Paths::new(PathBuf::from("/"), home))
     }
 
     /// A path from the system root, e.g. `system("/etc/hosts")`.
@@ -63,5 +76,18 @@ impl Paths {
     /// `/opt/fspec`: the store, generations and `current`.
     pub fn fspec_root(&self) -> PathBuf {
         self.system("/opt/fspec")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_home_comes_from_the_passwd_line_of_the_uid() {
+        let passwd = "root:x:0:0:root:/root:/bin/bash\nkyan:x:1000:1000::/home/kyan:/usr/bin/fish\n";
+        assert_eq!(passwd_home(passwd, 0), Some(PathBuf::from("/root")));
+        assert_eq!(passwd_home(passwd, 1000), Some(PathBuf::from("/home/kyan")));
+        assert_eq!(passwd_home(passwd, 7), None);
     }
 }
