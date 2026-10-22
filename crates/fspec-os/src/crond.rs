@@ -41,7 +41,17 @@ fn line(t: &Timer) -> Result<String> {
         bail!("exec is empty");
     }
     let schedule = t.schedule.split_whitespace().collect::<Vec<_>>().join(" ");
-    Ok(format!("{schedule} {}", exec.replace('%', "\\%")))
+    let mut words: Vec<String> = t.env.iter().map(|(k, v)| format!("{k}={v}")).collect();
+    for w in &words {
+        check_line("env", w)?;
+    }
+    let env = if words.is_empty() {
+        String::new()
+    } else {
+        words.insert(0, "env".into());
+        format!("{} ", shell_words::join(&words))
+    };
+    Ok(format!("{schedule} {env}{}", exec.replace('%', "\\%")))
 }
 
 pub(crate) fn render_file(t: &Timer) -> Result<String> {

@@ -43,6 +43,7 @@ impl Backend for SystemdBackend {
         if let Some(s) = distro(r) {
             return crate::distro_unit::check(Init::Systemd, s);
         }
+        crate::reject_init_extras(Init::Systemd, r)?;
         units(r).map(drop)
     }
 
@@ -361,6 +362,9 @@ fn render_timer_service(t: &Timer) -> Result<String> {
     unit.push("Description", format!("{} (run by fspec-{}.timer)", t.name, t.name));
     service.push("Type", "oneshot");
     service.push("ExecStart", exec_start(&t.exec)?);
+    for (k, v) in &t.env {
+        service.push("Environment", format!("\"{k}={v}\""));
+    }
     Ok(assemble([("Unit", &unit), ("Service", &service), ("Install", &Section::default())]))
 }
 

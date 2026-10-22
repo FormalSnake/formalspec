@@ -536,6 +536,10 @@ pub struct Service {
     /// systemd-only directives. `plan` fails on any other init when this is set.
     #[serde(default)]
     pub systemd: BTreeMap<String, Value>,
+    /// launchd-only plist keys, merged over the ones fspec writes (`RunAtLoad = False` wins).
+    /// `plan` fails on any other init when this is set.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub launchd: BTreeMap<String, Value>,
     /// A distro unit that is the login screen: on systemd the host boots to graphical.target
     /// while it is declared.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -567,6 +571,8 @@ pub struct Timer {
     pub schedule: String,
     #[serde(default)]
     pub user: bool,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]

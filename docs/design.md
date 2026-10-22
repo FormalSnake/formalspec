@@ -762,8 +762,10 @@ another default, and removal puts back the default it replaced.
 A timer's `schedule` is a five-field cron expression or one of `@hourly`,
 `@daily`, `@weekly` and `@monthly`. Timers become systemd timers, cron entries or launchd
 calendar intervals. Features only systemd has (socket activation, cgroup
-limits, `graphical-session.target`) go under `systemd = {...}`; on another init
-`plan` fails and says which field, rather than dropping it.
+limits, `graphical-session.target`) go under `systemd = {...}`, and launchd's
+own keys under `launchd = {...}`; on another init `plan` fails and says which
+field, rather than dropping it. A timer's `env` reaches its command on every
+init (an `env K=V` prefix in a cron entry).
 
 systemd units are `fspec-<name>.service` (and `.timer`) under
 `/etc/systemd/system` or `~/.config/systemd/user`. A bare command name in `exec`
@@ -780,7 +782,12 @@ launchd jobs are `fspec.<name>` plists. `exec` is split with shell rules into
 `ProgramArguments`; when it holds shell syntax (pipes, redirects, `$`, globs) it
 runs as `/bin/sh -c`. `after` and `description` have no launchd equivalent and
 are ignored. A timer becomes one `StartCalendarInterval` entry per combination of
-listed values, capped at 64 entries.
+listed values, capped at 64 entries. `launchd = {...}` holds raw plist keys
+merged over the ones fspec writes, so `RunAtLoad = False, KeepAlive = False`
+gives a job that is loaded but idle until `launchctl kickstart`, and
+`StartInterval`, `WatchPaths`, `ThrottleInterval`, `StandardOutPath`,
+`ProcessType` or `LimitLoadToSessionType` go in as written. Booleans, numbers,
+strings, lists and dicts map to their plist types.
 
 runit, OpenRC, dinit and s6 share two rules. `after = ["network"]` maps where the
 init has a network service (OpenRC `need net`, dinit `depends-on = network` for

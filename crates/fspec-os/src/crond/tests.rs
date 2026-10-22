@@ -138,3 +138,10 @@ fn system_timer_drift_reports_edits() {
         matches!(&p.changes[0].action, Action::Drift { notes } if notes == &["/etc/cron.d/fspec-backup was edited"])
     );
 }
+
+#[test]
+fn a_timer_env_prefixes_the_command() {
+    let r = resource(json!({"kind": "timer", "name": "scan", "exec": "/opt/scan", "schedule": "@hourly",
+        "env": {"VAULT": "/home/k/My Vault"}}));
+    assert!(render_file(&t(&r)).unwrap().ends_with("@hourly root env 'VAULT=/home/k/My Vault' /opt/scan\n"));
+}

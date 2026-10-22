@@ -20,7 +20,7 @@ use plist::{Dictionary, Value};
 use serde_json::{Map, json};
 
 use crate::cron::Schedule;
-use crate::{argv, check_name, read_or_empty, reject_systemd_extras, write_file};
+use crate::{argv, check_name, read_or_empty, reject_init_extras, write_file};
 
 pub struct LaunchdBackend;
 
@@ -43,7 +43,7 @@ impl Backend for LaunchdBackend {
         {
             return crate::distro_unit::check(Init::Launchd, s);
         }
-        reject_systemd_extras(cx.facts.init, r)?;
+        reject_init_extras(cx.facts.init, r)?;
         render(r).map(drop)
     }
 
@@ -172,14 +172,44 @@ fn service(s: &Service, d: &mut Dictionary) -> Result<()> {
             d.insert("KeepAlive".into(), Value::Dictionary(k));
         }
     }
-    if !s.env.is_empty() {
+    environment(&s.env, d);
+    for (k, v) in &s.launchd {
+        d.insert(k.clone(), plist_value(v).with_context(|| format!("launchd.{k}"))?);
+    }
+    Ok(())
+}
+
+fn environment(vars: &BTreeMap<String, String>, d: &mut Dictionary) {
+    if !vars.is_empty() {
         let mut env = Dictionary::new();
-        for (k, v) in &s.env {
+        for (k, v) in vars {
             env.insert(k.clone(), v.clone().into());
         }
         d.insert("EnvironmentVariables".into(), Value::Dictionary(env));
     }
-    Ok(())
+}
+
+/// A spec value as a plist value: Starlark has no dates or data, so neither does this.
+fn plist_value(v: &serde_json::Value) -> Result<Value> {
+    use serde_json::Value as J;
+    Ok(match v {
+        J::Bool(b) => Value::Boolean(*b),
+        J::Number(n) => match (n.as_i64(), n.as_f64()) {
+            (Some(i), _) => Value::Integer(i.into()),
+            (None, Some(f)) => Value::Real(f),
+            _ => anyhow::bail!("{n} is out of range"),
+        },
+        J::String(s) => Value::String(s.clone()),
+        J::Array(items) => Value::Array(items.iter().map(plist_value).collect::<Result<_>>()?),
+        J::Object(m) => {
+            let mut d = Dictionary::new();
+            for (k, v) in m {
+                d.insert(k.clone(), plist_value(v)?);
+            }
+            Value::Dictionary(d)
+        }
+        J::Null => anyhow::bail!("null has no plist form"),
+    })
 }
 
 fn timer(t: &Timer, d: &mut Dictionary) -> Result<()> {
@@ -201,6 +231,7 @@ fn timer(t: &Timer, d: &mut Dictionary) -> Result<()> {
         })
         .collect();
     d.insert("StartCalendarInterval".into(), Value::Array(list));
+    environment(&t.env, d);
     Ok(())
 }
 

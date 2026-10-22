@@ -36,17 +36,20 @@ pub use users::UsersBackend;
 
 /// Fails a service that sets `systemd = {...}` on an init other than systemd. Every non-systemd
 /// service backend calls it from `check`, so the plan names the field instead of dropping it.
-pub fn reject_systemd_extras(init: Init, r: &Resource) -> Result<()> {
+pub fn reject_init_extras(init: Init, r: &Resource) -> Result<()> {
     let Resource::Service(s) = r else { return Ok(()) };
-    if s.systemd.is_empty() {
-        return Ok(());
+    for (field, own, extras) in [("systemd", Init::Systemd, &s.systemd), ("launchd", Init::Launchd, &s.launchd)] {
+        if init == own || extras.is_empty() {
+            continue;
+        }
+        let keys: Vec<&str> = extras.keys().map(String::as_str).collect();
+        bail!(
+            "service:{} sets `{field}` ({}), which only {field} supports, and this host uses {init}",
+            s.name,
+            keys.join(", ")
+        )
     }
-    let keys: Vec<&str> = s.systemd.keys().map(String::as_str).collect();
-    bail!(
-        "service:{} sets `systemd` ({}), which only systemd supports, and this host uses {init}",
-        s.name,
-        keys.join(", ")
-    )
+    Ok(())
 }
 
 /// Service and timer names become file names and init labels.

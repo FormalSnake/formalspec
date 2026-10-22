@@ -16,7 +16,7 @@ use fspec_core::state::Entry;
 use serde_json::{Map, Value, json};
 
 use crate::{check_line, check_name, distro_unit};
-use crate::{crond, read_or_empty, reject_systemd_extras, write_file};
+use crate::{crond, read_or_empty, reject_init_extras, write_file};
 
 /// One file a service is rendered to. `path` is a spec path, resolved against the rooted paths.
 pub(crate) struct Part {
@@ -74,7 +74,7 @@ pub(crate) fn handles(f: &dyn Flavor, cx: &Cx, r: &Resource) -> bool {
 }
 
 pub(crate) fn check(f: &dyn Flavor, cx: &Cx, r: &Resource) -> Result<()> {
-    reject_systemd_extras(cx.facts.init, r)?;
+    reject_init_extras(cx.facts.init, r)?;
     match r {
         Resource::Service(s) if distro_unit::of(s).is_some() => distro_unit::check(f.init(), s),
         Resource::Service(s) => {

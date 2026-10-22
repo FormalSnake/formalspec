@@ -293,3 +293,10 @@ fn a_service_without_exec_enables_the_distro_unit() {
     let err = SystemdBackend.check(&w.cx(Scope::System), &bad).unwrap_err().to_string();
     assert!(err.contains("takes no restart"), "{err}");
 }
+
+#[test]
+fn a_timer_env_goes_into_its_service() {
+    let r = resource(json!({"kind": "timer", "name": "scan", "exec": "/opt/scan", "schedule": "@hourly",
+        "env": {"VAULT": "/v"}}));
+    assert!(units(&r).unwrap()[0].content.contains("Environment=\"VAULT=/v\"\n"));
+}

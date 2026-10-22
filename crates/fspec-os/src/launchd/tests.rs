@@ -91,9 +91,9 @@ fn check_rejects_systemd_extras_and_bad_schedules() {
         "service:s sets `systemd` (MemoryMax, unit), which only systemd supports, and this host uses launchd"
     );
 
-    let runit = reject_systemd_extras(Init::Runit, &with_extras).unwrap_err().to_string();
+    let runit = reject_init_extras(Init::Runit, &with_extras).unwrap_err().to_string();
     assert!(runit.contains("`systemd`") && runit.ends_with("this host uses runit"), "{runit}");
-    assert!(reject_systemd_extras(Init::Runit, &agent()).is_ok());
+    assert!(reject_init_extras(Init::Runit, &agent()).is_ok());
 
     let range = resource(json!({"kind": "timer", "name": "t", "exec": "x", "schedule": "*/2 */2 * * *"}));
     let err = LaunchdBackend.check(&cx, &range).unwrap_err();
@@ -170,4 +170,30 @@ fn drift_reports_an_edited_plist() {
     let state = State::load(&w.paths.system_state_dir().join("state.json")).unwrap();
     let p = plan_scope(&w.cx(Scope::System), backends, &want, &state).unwrap();
     assert_eq!(p.counts(), (0, 1, 0));
+}
+
+#[test]
+fn launchd_keys_merge_over_the_defaults() {
+    let idle = resource(json!({"kind": "service", "name": "usbflux", "exec": "/opt/x", "restart": "always",
+        "launchd": {"RunAtLoad": false, "KeepAlive": false, "ThrottleInterval": 30, "WatchPaths": ["/Users/k/Vault"],
+            "StandardOutPath": "/tmp/x.log", "ProcessType": "Interactive", "LimitLoadToSessionType": ["Aqua"]}}));
+    let text = render(&idle).unwrap();
+    assert!(text.contains("<key>RunAtLoad</key>\n\t<false/>"), "{text}");
+    assert!(text.contains("<key>KeepAlive</key>\n\t<false/>"), "{text}");
+    assert!(text.contains("<key>ThrottleInterval</key>\n\t<integer>30</integer>"));
+    assert!(text.contains("<key>WatchPaths</key>\n\t<array>\n\t\t<string>/Users/k/Vault</string>"));
+    assert!(text.contains("<key>LimitLoadToSessionType</key>\n\t<array>\n\t\t<string>Aqua</string>"));
+
+    let err = crate::reject_init_extras(Init::Systemd, &idle).unwrap_err().to_string();
+    assert!(err.contains("sets `launchd` (KeepAlive"), "{err}");
+    let null = resource(json!({"kind": "service", "name": "n", "exec": "x", "launchd": {"Nice": null}}));
+    assert!(render(&null).is_err());
+}
+
+#[test]
+fn a_timer_carries_its_environment() {
+    let r = resource(json!({"kind": "timer", "name": "scan", "exec": "/opt/scan", "schedule": "@hourly",
+        "env": {"VAULT": "/Users/k/Vault"}}));
+    let text = render(&r).unwrap();
+    assert!(text.contains("<key>EnvironmentVariables</key>\n\t<dict>\n\t\t<key>VAULT</key>"), "{text}");
 }
