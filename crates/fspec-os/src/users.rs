@@ -1,5 +1,6 @@
-//! Accounts. Linux accounts are created and adjusted with `useradd` and `usermod`, and join their
-//! supplementary groups once packages are in, since packages create groups like `docker`. On
+//! Accounts. Linux accounts are created with `useradd` before files are written, and get their
+//! uid, login shell and supplementary groups with `usermod` once packages are in, since packages
+//! install the shell, `usermod` itself and groups like `docker`. On
 //! macOS the account must already exist and only the login shell is managed. Removing a `user`
 //! never deletes the account.
 
@@ -93,7 +94,7 @@ impl Backend for UsersBackend {
             }
             let shell = u.shell.as_deref().map(|s| resolve_shell(cx, s));
             match cx.facts.os {
-                Os::Linux => linux(cx, u, shell.as_deref(), journal)?,
+                Os::Linux => create(cx, u, shell.as_deref(), journal)?,
                 Os::Darwin => darwin(cx, u, shell.as_deref(), journal)?,
             }
             let mut rec = Map::new();
@@ -111,6 +112,10 @@ impl Backend for UsersBackend {
         }
         for op in ops {
             let Resource::User(u) = op.resource() else { unreachable!("users claims users") };
+            if op.is_removal() {
+                continue;
+            }
+            modify(cx, u, u.shell.as_deref().map(|s| resolve_shell(cx, s)).as_deref(), journal)?;
             join_groups(cx, u, journal)?;
         }
         Ok(())
@@ -159,23 +164,30 @@ impl Passwd {
     }
 }
 
-fn linux(cx: &Cx, u: &User, shell: Option<&str>, journal: &mut Journal) -> Result<()> {
-    let out = cx.runner.run(&Cmd::new("getent").args(["passwd", &u.name]))?;
-    let live = if out.status == 0 { Passwd::parse(&out.stdout) } else { None };
+fn passwd(cx: &Cx, name: &str) -> Result<Option<Passwd>> {
+    let out = cx.runner.run(&Cmd::new("getent").args(["passwd", name]))?;
+    Ok(if out.status == 0 { Passwd::parse(&out.stdout) } else { None })
+}
 
-    let Some(live) = live else {
-        let mut add = Cmd::new("useradd").arg("-m");
-        if let Some(uid) = u.uid {
-            add = add.args(["-u".to_string(), uid.to_string()]);
-        }
-        if let Some(shell) = shell {
-            add = add.args(["-s", shell]);
-        }
-        journal.record(Undo::Run { cmd: Cmd::new("userdel").arg(&u.name) })?;
-        cx.runner.check(&add.arg(&u.name))?;
+fn create(cx: &Cx, u: &User, shell: Option<&str>, journal: &mut Journal) -> Result<()> {
+    if passwd(cx, &u.name)?.is_some() {
         return Ok(());
-    };
+    }
+    let mut add = Cmd::new("useradd").arg("-m");
+    if let Some(uid) = u.uid {
+        add = add.args(["-u".to_string(), uid.to_string()]);
+    }
+    if let Some(shell) = shell {
+        add = add.args(["-s", shell]);
+    }
+    journal.record(Undo::Run { cmd: Cmd::new("userdel").arg(&u.name) })?;
+    cx.runner.check(&add.arg(&u.name))?;
+    Ok(())
+}
 
+fn modify(cx: &Cx, u: &User, shell: Option<&str>, journal: &mut Journal) -> Result<()> {
+    // No entry yet means `create` ran `useradd` in this apply, which already set the uid and shell.
+    let Some(live) = passwd(cx, &u.name)? else { return Ok(()) };
     let (mut change, mut revert) = (Cmd::new("usermod"), Cmd::new("usermod"));
     let mut changed = false;
     if let Some(uid) = u.uid.filter(|uid| *uid != live.uid) {

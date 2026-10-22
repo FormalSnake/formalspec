@@ -30,6 +30,7 @@ fn creates_a_linux_account_with_a_shell_from_etc_shells() {
         [
             "getent passwd kyan",
             "useradd -m -u 1000 -s /usr/local/bin/fish kyan",
+            "getent passwd kyan",
             "id -nG kyan",
             "usermod -aG wheel,docker kyan",
         ]
@@ -85,7 +86,13 @@ fn adjusts_an_existing_linux_account() {
     apply_scope(&w.cx(Scope::System), backends, &[desired(kyan("fish"))]).unwrap();
     assert_eq!(
         w.runner.lines(),
-        ["getent passwd kyan", "usermod -s /usr/bin/fish kyan", "id -nG kyan", "usermod -aG docker kyan",]
+        [
+            "getent passwd kyan",
+            "getent passwd kyan",
+            "usermod -s /usr/bin/fish kyan",
+            "id -nG kyan",
+            "usermod -aG docker kyan",
+        ]
     );
 }
 
@@ -113,7 +120,7 @@ fn failed_usermod_undoes_the_earlier_change() {
     w.runner.respond("usermod -aG", Output { status: 6, ..Output::default() });
     apply_scope(&w.cx(Scope::System), backends, &[desired(kyan("fish"))]).unwrap_err();
     let lines = w.runner.lines();
-    assert_eq!(lines[1], "usermod -s /usr/bin/fish kyan");
+    assert_eq!(lines[2], "usermod -s /usr/bin/fish kyan");
     assert!(lines.contains(&"usermod -s /usr/bin/bash kyan".to_string()), "{lines:?}");
     assert!(lines.contains(&"gpasswd -d kyan wheel".to_string()), "{lines:?}");
 }
