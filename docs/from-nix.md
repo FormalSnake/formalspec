@@ -52,6 +52,7 @@ the store-wide build graph and hand-written hashes.
 | `overrideAttrs` with `patches` | `pkg(..., patches = [...], build_flags = [...])` |
 | `systemd.services`, `systemd.user.services`, `launchd.agents` | `service(...)` |
 | `homebrew.brews`, `homebrew.casks`, `homebrew.taps` | `pkg(..., source = brew(..., tap = "owner/repo"))` |
+| `home.packages` apps under `~/Applications/Home Manager Apps`, mac-app-util | `pkg(..., apps = ["Foo.app"])`, copied into /Applications |
 | `system.defaults` | `defaults(...)`, `system = True` for /Library/Preferences |
 | `power.sleep`, `system.activationScripts` running pmset, systemsetup or socketfilterfw | `setting("pmset", "sleep", 0)` and friends |
 | agenix | `secret(...)` |

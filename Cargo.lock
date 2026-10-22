@@ -1633,6 +1633,7 @@ dependencies = [
  "flate2",
  "fspec-build",
  "fspec-core",
+ "libc",
  "lzma-rs",
  "ruzstd",
  "serde",

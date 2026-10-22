@@ -13,6 +13,7 @@ diffy.workspace = true
 flate2.workspace = true
 fspec-build.workspace = true
 fspec-core.workspace = true
+libc.workspace = true
 lzma-rs.workspace = true
 ruzstd.workspace = true
 serde.workspace = true

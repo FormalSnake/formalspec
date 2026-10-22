@@ -390,6 +390,44 @@ fn a_data_only_pkg_links_its_share_trees() {
 }
 
 #[test]
+fn apps_are_copied_to_applications_and_go_with_the_package() {
+    let mut w = World::new();
+    let body = tgz(&[
+        ("Tool.app/Contents/Info.plist", "<plist/>", 0o644),
+        ("Tool.app/Contents/MacOS/tool", "#!/bin/sh\n", 0o755),
+    ]);
+    w.lock.upsert(locked("tool", "url:https://example/Tool.tgz", "1.0.0", "https://example/Tool.tgz", &body));
+    w.fetch = MapFetch::default().with("https://example/Tool.tgz", body);
+    let tool = |apps: serde_json::Value| {
+        with_fields(
+            pkg("tool", json!({"kind": "url", "url": "https://example/Tool.tgz"}), "pinned"),
+            json!({"apps": apps}),
+        )
+    };
+    let refused = w.plan(&[tool(json!(["Tool"]))]);
+    assert!(refused.unsupported[0].contains("must be the path of a .app bundle"), "{:?}", refused.unsupported);
+
+    w.apply(&[tool(json!(["Tool.app"]))]).unwrap();
+    let app = w.paths.system("/Applications/Tool.app");
+    assert!(app.join("Contents/MacOS/tool").is_file());
+    assert!(!fs::symlink_metadata(&app).unwrap().file_type().is_symlink());
+    assert!(w.plan(&[tool(json!(["Tool.app"]))]).changes.is_empty());
+
+    fs::remove_dir_all(&app).unwrap();
+    assert_eq!(w.plan(&[tool(json!(["Tool.app"]))]).changes.len(), 1);
+    w.apply(&[tool(json!(["Tool.app"]))]).unwrap();
+    assert!(app.is_dir());
+
+    w.apply(&[]).unwrap();
+    assert!(fs::symlink_metadata(&app).is_err());
+
+    fs::create_dir_all(&app).unwrap();
+    let err = w.apply(&[tool(json!(["Tool.app"]))]).unwrap_err();
+    assert!(format!("{err:#}").contains("fspec did not put it there"), "{err:#}");
+    assert!(app.is_dir());
+}
+
+#[test]
 fn npm_without_dependencies_links_its_bin() {
     let mut w = World::new();
     let body = tgz(&[

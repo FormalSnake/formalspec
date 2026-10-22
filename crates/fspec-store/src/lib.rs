@@ -47,6 +47,9 @@ struct Installed {
     /// Path under `/usr/local/share` to the path inside `store` it links to.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     share: BTreeMap<String, String>,
+    /// App bundles inside `store`, each cloned to /Applications/<its file name>.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    apps: Vec<String>,
     locked: LockedPkg,
 }
 
@@ -222,8 +225,16 @@ impl Backend for StoreBackend {
         if !p.share.is_empty() && cx.facts.os != Os::Linux {
             bail!("share links into /usr/local/share, which only Linux searches");
         }
+        if !p.apps.is_empty() && cx.facts.os != Os::Darwin {
+            bail!("apps go in /Applications, which only macOS has");
+        }
+        let normal = |s: &str| Path::new(s).components().all(|c| matches!(c, Component::Normal(_)));
+        for app in &p.apps {
+            if !normal(app) || !app.ends_with(".app") {
+                bail!("apps: `{app}` must be the path of a .app bundle inside the package");
+            }
+        }
         for (dest, rel) in &p.share {
-            let normal = |s: &str| Path::new(s).components().all(|c| matches!(c, Component::Normal(_)));
             if !normal(dest) || Path::new(dest).components().count() < 2 {
                 bail!("share: `{dest}` must name an entry inside a directory of /usr/local/share, like icons/<theme>");
             }
@@ -261,6 +272,10 @@ impl Backend for StoreBackend {
         let unshared: Vec<_> = inst.share.keys().filter(|d| !is_link(&share_path(cx, d))).cloned().collect();
         if !unshared.is_empty() {
             notes.push(format!("not linked in /usr/local/share: {}", unshared.join(", ")));
+        }
+        let missing: Vec<_> = inst.apps.iter().map(|a| app_name(a)).filter(|n| !app_path(cx, n).is_dir()).collect();
+        if !missing.is_empty() {
+            notes.push(format!("not in /Applications: {}", missing.join(", ")));
         }
         Ok(notes)
     }
@@ -306,13 +321,19 @@ impl Backend for StoreBackend {
                 for dest in before.share.keys() {
                     unshare(cx, dest, journal)?;
                 }
+                for app in &before.apps {
+                    let at = app_path(cx, app_name(app));
+                    journal.backup(&at)?;
+                    remove_any(&at)?;
+                }
                 generation.unlink_pkg(&p.name)?;
             }
             if op.is_removal() {
                 continue;
             }
             let inst = match keeps_installed(cx, op, p) {
-                Some(kept) => kept,
+                // A self-managed package keeps its tree, not the apps an older spec listed.
+                Some(kept) => Installed { apps: p.apps.clone(), ..kept },
                 None => install(cx, p, staging, journal).with_context(|| format!("installing {}", p.name))?,
             };
             for (name, rel) in &inst.bins {
@@ -321,6 +342,9 @@ impl Backend for StoreBackend {
             generation.link_pkg(&p.name, &link_target(&inst.store, ""))?;
             for (dest, rel) in &inst.share {
                 share(cx, dest, &live_path(&inst.store, rel), journal)?;
+            }
+            for app in &inst.apps {
+                place_app(cx, &root, &inst.store, app, journal)?;
             }
             records.insert(op.key.clone(), inst.to_record());
         }
@@ -342,6 +366,14 @@ fn build_tool_present(p: &Pkg, origin: &Origin) -> bool {
     std::env::var_os("PATH").is_some_and(|path| std::env::split_paths(&path).any(|d| d.join(tool).is_file()))
 }
 
+/// A disk image mounts through hdiutil; everything else unpacks in process.
+fn unpack(cx: &Cx, body: &[u8], dest: &Path, name: &str) -> Result<()> {
+    if archive::is_dmg(body) {
+        return archive::undmg(cx.runner, body, dest);
+    }
+    archive::unpack(body, dest, name)
+}
+
 fn unpack_into(cx: &Cx, p: &Pkg, origin: &Origin, dirname: &str, dest: &Path, scratch: &Path) -> Result<()> {
     match origin {
         Origin::Build { url, rev } => {
@@ -350,12 +382,12 @@ fn unpack_into(cx: &Cx, p: &Pkg, origin: &Origin, dirname: &str, dest: &Path, sc
             let built = fspec_build::builders::build_anywhere(cx.runner, cx.builders, &job)
                 .with_context(|| format!("building {}", p.name))?;
             let body = fs::read(&built)?;
-            archive::unpack(&body, dest, &p.name).with_context(|| format!("unpacking {}", built.display()))?;
+            unpack(cx, &body, dest, &p.name).with_context(|| format!("unpacking {}", built.display()))?;
         }
         Origin::Oci { reference } => {
             let body = oci::pull(cx.runner, reference, &scratch.join("oci").join(dirname))
                 .with_context(|| format!("pulling {reference}"))?;
-            archive::unpack(&body, dest, &p.name).with_context(|| format!("unpacking {reference}"))?;
+            unpack(cx, &body, dest, &p.name).with_context(|| format!("unpacking {reference}"))?;
         }
         Origin::Url { url, hash } => {
             let body = cx.fetch.get(url)?;
@@ -368,7 +400,7 @@ fn unpack_into(cx: &Cx, p: &Pkg, origin: &Origin, dirname: &str, dest: &Path, sc
                     fs::create_dir_all(dest)?;
                     fs::write(dest.join(name), &body)?;
                 }
-                _ => archive::unpack(&body, dest, &p.name).with_context(|| format!("unpacking {url}"))?,
+                _ => unpack(cx, &body, dest, &p.name).with_context(|| format!("unpacking {url}"))?,
             }
             if let Source::Npm { name } = &p.source {
                 let tarball = scratch.join("dl").join(format!("{dirname}.tgz"));
@@ -439,8 +471,8 @@ fn install(cx: &Cx, p: &Pkg, staging: &Path, journal: &mut Journal) -> Result<In
     };
     // A source build may install only a library or data (a PAM module), which current/pkgs/<name>
     // reaches; a download with nothing to link is a wrong artifact.
-    if bins.is_empty() && p.share.is_empty() && !matches!(p.source, Source::Git { .. }) {
-        bail!("it has no executables to link and no share");
+    if bins.is_empty() && p.share.is_empty() && p.apps.is_empty() && !matches!(p.source, Source::Git { .. }) {
+        bail!("it has no executables to link, no share and no apps");
     }
     let tree = if Path::new(&store).is_absolute() { PathBuf::from(&store) } else { root.join(&store) };
     for (dest, rel) in &p.share {
@@ -448,7 +480,20 @@ fn install(cx: &Cx, p: &Pkg, staging: &Path, journal: &mut Journal) -> Result<In
             bail!("share: `{rel}` (for {dest}) is not in the package");
         }
     }
-    Ok(Installed { store, version: t.version, id: t.id, bins, share: p.share.clone(), locked: t.locked.clone() })
+    for app in &p.apps {
+        if !tree.join(app).is_dir() {
+            bail!("apps: `{app}` is not in the package");
+        }
+    }
+    Ok(Installed {
+        store,
+        version: t.version,
+        id: t.id,
+        bins,
+        share: p.share.clone(),
+        apps: p.apps.clone(),
+        locked: t.locked.clone(),
+    })
 }
 
 fn is_link(path: &Path) -> bool {
@@ -476,6 +521,46 @@ fn share(cx: &Cx, dest: &str, target: &Path, journal: &mut Journal) -> Result<()
     remove_any(&at)?;
     fs::create_dir_all(at.parent().context("a share path has a parent")?)?;
     std::os::unix::fs::symlink(target, &at).with_context(|| format!("linking {}", at.display()))
+}
+
+fn app_name(app: &str) -> &str {
+    app.rsplit('/').next().unwrap_or(app)
+}
+
+fn app_path(cx: &Cx, name: &str) -> PathBuf {
+    cx.paths.system("/Applications").join(name)
+}
+
+/// Clone the bundle into /Applications. Spotlight, Launchpad and the Dock skip a symlink into
+/// the store, so the bundle is a copy; on APFS a clone shares the store's blocks. The commit has
+/// already removed the copy the previous install placed, so anything still there is not ours.
+fn place_app(cx: &Cx, root: &Path, store: &str, app: &str, journal: &mut Journal) -> Result<()> {
+    let at = app_path(cx, app_name(app));
+    if fs::symlink_metadata(&at).is_ok() {
+        bail!("{} exists and fspec did not put it there", at.display());
+    }
+    let from = if Path::new(store).is_absolute() { PathBuf::from(store) } else { root.join(store) }.join(app);
+    journal.backup(&at)?;
+    fs::create_dir_all(at.parent().context("an app path has a parent")?)?;
+    clone_tree(&from, &at).with_context(|| format!("copying {} to {}", from.display(), at.display()))
+}
+
+#[cfg(target_os = "macos")]
+fn clone_tree(from: &Path, to: &Path) -> Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let (src, dst) = (CString::new(from.as_os_str().as_bytes())?, CString::new(to.as_os_str().as_bytes())?);
+    // SAFETY: both are valid NUL-terminated paths for the duration of the call.
+    if unsafe { libc::clonefile(src.as_ptr(), dst.as_ptr(), 0) } == 0 {
+        return Ok(());
+    }
+    // Another volume, or a filesystem without clones.
+    copy_any(from, to)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn clone_tree(from: &Path, to: &Path) -> Result<()> {
+    copy_any(from, to)
 }
 
 fn unshare(cx: &Cx, dest: &str, journal: &mut Journal) -> Result<()> {

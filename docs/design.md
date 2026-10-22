@@ -383,13 +383,16 @@ archive whose top levels hold more executables than commands (Discord's
 `<hash8>-<name>-<version>`, never rewritten, and reused when present. An
 artifact is verified against its `sha256-` or `sha512-` SRI hash before
 anything is unpacked (`.tar.gz`, `.tar.xz`, `.tar.zst`, `.zip`, a
-brotli-compressed tar, an Electron `.asar`, or a bare binary named after the
-package). Formats are told apart by their bytes, not their names. Brotli has no
+brotli-compressed tar, an Electron `.asar`, a `.dmg` on macOS, or a bare
+binary named after the package). Formats are told apart by their bytes, not their names. Brotli has no
 magic number, so a download that matches nothing else is decoded and kept as a
 tar only when the result is one (`ustar` at offset 257): Discord publishes its
 Linux builds that way (`full.distro`). An asar is unpacked the way moonlight's
 own extractor reads it, refusing entries that name `..` or live outside the
-archive; moonlight's extensions ship as asars.
+archive; moonlight's extensions ship as asars. A `.dmg` (its `koly` trailer) is
+mounted read-only with `hdiutil` and its top level copied out with `ditto`,
+leaving out the `Applications` link and hidden files of a drag-to-install
+window. Release matching skips `.dmg` assets unless an `asset` glob names one.
 
 Data-only packages (fonts, icon and cursor themes, GTK themes) have no
 executables; they declare where their trees go with `share`, a map from a path
@@ -411,7 +414,21 @@ GTK theme lookups walk `XDG_DATA_DIRS`, which defaults to
 when the package changes, removed with it, and reported as drift when missing.
 A destination must sit inside a directory (`icons/<theme>`, never `icons`), and
 apply refuses to replace anything there that is not a link. A package with
-neither executables nor `share` is refused. `share` is Linux only.
+neither executables, `share` nor `apps` is refused. `share` is Linux only.
+
+macOS app bundles go where Spotlight, Launchpad, the Dock and `open -a` find
+them with `apps`, the bundle paths inside the package:
+
+```python
+pkg("kopuz", source = github("Kopuz-org/kopuz", asset = "*.dmg"), apps = ["Kopuz.app"])
+```
+
+Each bundle is copied to `/Applications/<its name>`, because Spotlight and
+Launchpad skip a symlink into the store (the reason nix-darwin users reach for
+mac-app-util). On APFS the copy is a clone, so it shares the store's blocks and
+costs no space. The copy is replaced when the package changes, removed with it,
+and reported as drift when missing; apply refuses to replace a bundle that fspec
+did not put there. `apps` is macOS only.
 
 Each pkg's record keeps the store path, version, linked bins and the lock entry
 it was installed from. `fspec rollback [gen]` re-applies that generation's

@@ -270,6 +270,10 @@ pub struct Pkg {
     /// with `share` may have no executables: fonts, icon, cursor and GTK themes.
     #[serde(default)]
     pub share: BTreeMap<String, String>,
+    /// macOS app bundles inside the package (`Kopuz.app`, `bin/kopuz.app`), cloned into
+    /// /Applications under their own name. A package with `apps` may have no executables.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub apps: Vec<String>,
     /// App data paths removed with the package.
     #[serde(default)]
     pub data: Vec<String>,

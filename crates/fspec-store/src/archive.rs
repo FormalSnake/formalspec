@@ -6,6 +6,8 @@ use std::path::Path;
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
+use fspec_core::journal::remove_any;
+use fspec_core::runner::{Cmd, Runner};
 use sha2::{Digest, Sha256, Sha512};
 
 /// `sha256-<base64>` of `body`, the form `fspec.lock` stores.
@@ -34,6 +36,7 @@ pub fn is_archive(body: &[u8]) -> bool {
         .iter()
         .any(|magic| body.starts_with(magic))
         || is_asar(body)
+        || is_dmg(body)
         || (!is_elf(body) && brotli_tar(body).is_some())
 }
 
@@ -73,6 +76,42 @@ pub fn unpack(body: &[u8], dest: &Path, name: &str) -> Result<()> {
     } else {
         write_command(body, dest, name)
     }
+}
+
+/// A UDIF disk image ends with a 512-byte `koly` trailer.
+pub fn is_dmg(body: &[u8]) -> bool {
+    body.len() >= 512 && body[body.len() - 512..].starts_with(b"koly")
+}
+
+/// Mount the image read-only beside `dest`, ditto its contents out (ditto keeps the bundles'
+/// extended attributes and signatures), then drop the `Applications` link and the hidden
+/// background files a drag-to-install window has.
+pub fn undmg(runner: &dyn Runner, body: &[u8], dest: &Path) -> Result<()> {
+    if !cfg!(target_os = "macos") {
+        bail!("a .dmg unpacks only on macOS");
+    }
+    let image = dest.with_extension("dmg");
+    let mount = dest.with_extension("mnt");
+    fs::write(&image, body)?;
+    fs::create_dir_all(&mount)?;
+    let attach = Cmd::new("hdiutil")
+        .args(["attach", "-nobrowse", "-readonly", "-noautoopen", "-mountpoint"])
+        .arg(mount.display().to_string())
+        .arg(image.display().to_string());
+    let copied = runner.check(&attach).and_then(|_| {
+        let copied = runner.check(&Cmd::new("ditto").arg(mount.display().to_string()).arg(dest.display().to_string()));
+        let _ = runner.run(&Cmd::new("hdiutil").args(["detach", "-quiet"]).arg(mount.display().to_string()));
+        copied
+    });
+    let _ = fs::remove_dir(&mount);
+    let _ = fs::remove_file(&image);
+    copied?;
+    for entry in fs::read_dir(dest).into_iter().flatten().flatten() {
+        if entry.file_name().to_string_lossy().starts_with('.') || entry.file_type()?.is_symlink() {
+            remove_any(&entry.path())?;
+        }
+    }
+    Ok(())
 }
 
 fn is_tar(bytes: &[u8]) -> bool {
@@ -251,5 +290,37 @@ mod tests {
 
         let escape = asar(r#"{"files":{"..":{"files":{}}}}"#, b"");
         assert!(unpack(&escape, tempfile::tempdir().unwrap().path(), "ext").is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_dmg_is_mounted_copied_out_and_pruned() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("out");
+        // Stands in for what ditto copied out of the mounted image.
+        fs::create_dir_all(dest.join("Tool.app/Contents")).unwrap();
+        fs::create_dir_all(dest.join(".background")).unwrap();
+        std::os::unix::fs::symlink("/Applications", dest.join("Applications")).unwrap();
+        let mut body = vec![0u8; 1024];
+        body[512..516].copy_from_slice(b"koly");
+        assert!(is_archive(&body) && is_dmg(&body));
+        let runner = fspec_core::runner::RecordingRunner::default();
+        undmg(&runner, &body, &dest).unwrap();
+        let (mnt, img, out) = (dest.with_extension("mnt"), dest.with_extension("dmg"), dest.display().to_string());
+        assert_eq!(
+            runner.lines(),
+            [
+                format!(
+                    "hdiutil attach -nobrowse -readonly -noautoopen -mountpoint {} {}",
+                    mnt.display(),
+                    img.display()
+                ),
+                format!("ditto {} {out}", mnt.display()),
+                format!("hdiutil detach -quiet {}", mnt.display()),
+            ]
+        );
+        assert!(dest.join("Tool.app").is_dir());
+        assert!(fs::symlink_metadata(dest.join("Applications")).is_err() && !dest.join(".background").exists());
+        assert!(!mnt.exists() && !img.exists());
     }
 }
