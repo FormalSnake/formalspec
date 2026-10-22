@@ -541,8 +541,14 @@ pub struct Secret {
     pub src: String,
     #[serde(default = "secret_perms")]
     pub perms: String,
+    /// `user` or `user:group`.
     #[serde(default)]
     pub owner: Option<String>,
+    /// agenix's `identityPaths`: SSH private keys or age identity files tried in order. Empty
+    /// means the host's SSH keys for a system secret, the user's for a user one, then
+    /// `~/.config/fspec/age.key`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub identities: Vec<String>,
 }
 
 fn secret_perms() -> String {

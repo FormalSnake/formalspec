@@ -1,5 +1,6 @@
 mod backends;
 mod dev;
+mod secret;
 
 use std::path::{Path, PathBuf};
 
@@ -170,6 +171,11 @@ enum Command {
         #[arg(value_parser = fspec_switch::DISTROS)]
         distro: String,
     },
+    /// agenix's workflow for the `.age` files listed in `secrets.star` next to the spec.
+    Secret {
+        #[command(subcommand)]
+        cmd: SecretCommand,
+    },
     /// Put a disk onto a layout that `switch --distro` installs roots side by side on.
     Disk {
         #[command(subcommand)]
@@ -235,6 +241,30 @@ enum CiCommand {
     /// Write .github/workflows/fspec-packages.yml: build every git package per platform and push
     /// it to the OCI cache.
     Packages,
+}
+
+#[derive(Subcommand)]
+enum SecretCommand {
+    /// Decrypt FILE (`openai`, `openai.age` or its path in secrets.star) into $EDITOR, then
+    /// encrypt the result to its recipients. A FILE that does not exist yet starts empty.
+    Edit {
+        file: String,
+        /// Identity to decrypt with, repeatable. Default ~/.ssh/id_ed25519, ~/.ssh/id_rsa and
+        /// ~/.config/fspec/age.key.
+        #[arg(short, long)]
+        identity: Vec<PathBuf>,
+    },
+    /// Re-encrypt every file in secrets.star to its current recipients.
+    Rekey {
+        #[arg(short, long)]
+        identity: Vec<PathBuf>,
+    },
+    /// Decrypt the secrets of the last apply again from their kept ciphertext. Run at boot, when
+    /// the tmpfs they live on starts empty.
+    Install {
+        #[arg(long, value_enum, default_value = "system")]
+        scope: ScopeArg,
+    },
 }
 
 #[derive(Subcommand)]
@@ -577,6 +607,18 @@ fn main() -> Result<()> {
         }
         Command::Forget { distro } => forget(&paths, distro),
         Command::Disk { cmd } => disk(&paths, &spec_path, cmd),
+        Command::Secret { cmd: SecretCommand::Edit { file, identity } } => {
+            secret::edit(&paths, &spec_dir, file, identity)
+        }
+        Command::Secret { cmd: SecretCommand::Rekey { identity } } => secret::rekey(&paths, &spec_dir, identity),
+        Command::Secret { cmd: SecretCommand::Install { scope } } => {
+            let scope = Scope::from(*scope);
+            let state = State::load(&state_dir(&paths, scope).join("state.json"))?;
+            for path in fspec_files::reinstall_secrets(&paths, scope, &state, &LiveRunner)? {
+                println!("{}", path.display());
+            }
+            Ok(())
+        }
         Command::Facts { json } => {
             let probe = Probe::local(local_hostname());
             if *json {

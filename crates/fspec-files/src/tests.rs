@@ -499,6 +499,7 @@ fn secret_decrypts_with_perms_owner_and_drift() {
         src,
         perms: "0400".into(),
         owner: Some("root:wheel".into()),
+        identities: vec![],
     });
     let want = vec![Desired { resource: s, owner: None }];
     w.apply(&want).unwrap();
@@ -517,12 +518,70 @@ fn secret_decrypts_with_perms_owner_and_drift() {
     assert!(!w.at(".config/token").exists());
 }
 
+const TEST_SSH_KEY: &str = "-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
+QyNTUxOQAAACDoh10A29aO/vlbh1q5CkfgtibH0F0YO1w8VMWX3bNXdwAAAJDlQWwQ5UFs
+EAAAAAtzc2gtZWQyNTUxOQAAACDoh10A29aO/vlbh1q5CkfgtibH0F0YO1w8VMWX3bNXdw
+AAAEAYymhLTGAcxGs16xzJ7kCRcERnBnaXJs9H4fWdI+69oeiHXQDb1o7++VuHWrkKR+C2
+JsfQXRg7XDxUxZfds1d3AAAACmZzcGVjLXRlc3QBAgM=
+-----END OPENSSH PRIVATE KEY-----
+";
+const TEST_SSH_PUB: &str =
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOiHXQDb1o7++VuHWrkKR+C2JsfQXRg7XDxUxZfds1d3 fspec-test";
+
+#[test]
+fn secret_decrypts_with_the_users_ssh_key_and_reinstalls_after_a_wipe() {
+    let w = World::new();
+    fs::create_dir_all(w.at(".ssh")).unwrap();
+    fs::write(w.at(".ssh/id_ed25519"), TEST_SSH_KEY).unwrap();
+    let ciphertext = crate::secret::encrypt(b"tok\n", &[TEST_SSH_PUB.to_string()]).unwrap();
+    fs::write(w.spec.join("tok.age"), ciphertext).unwrap();
+    let s = Resource::Secret(Secret {
+        path: "~/run/tok".into(),
+        src: "tok.age".into(),
+        perms: "0400".into(),
+        owner: None,
+        identities: vec![],
+    });
+    w.apply(&[Desired { resource: s, owner: None }]).unwrap();
+    assert_eq!(w.read("run/tok"), "tok\n");
+
+    fs::remove_file(w.at("run/tok")).unwrap();
+    fs::remove_file(w.spec.join("tok.age")).unwrap();
+    let written = crate::reinstall_secrets(&w.paths, Scope::User, &w.state(), &w.runner).unwrap();
+    assert_eq!(written, [w.at("run/tok")]);
+    assert_eq!(w.read("run/tok"), "tok\n");
+    assert_eq!(fs::metadata(w.at("run/tok")).unwrap().permissions().mode() & 0o7777, 0o400);
+}
+
+#[test]
+fn secret_identities_replace_the_defaults() {
+    let w = World::new();
+    let src = age_fixture(&w, "x");
+    fs::rename(w.at(".config/fspec/age.key"), w.at("keys.txt")).unwrap();
+    let s = Resource::Secret(Secret {
+        path: "~/t".into(),
+        src,
+        perms: "0400".into(),
+        owner: None,
+        identities: vec!["~/.ssh/missing".into(), "~/keys.txt".into()],
+    });
+    w.apply(&[Desired { resource: s, owner: None }]).unwrap();
+    assert_eq!(w.read("t"), "x");
+}
+
 #[test]
 fn secret_without_the_identity_fails_before_changing_anything() {
     let w = World::new();
     age_fixture(&w, "x");
     fs::remove_file(w.at(".config/fspec/age.key")).unwrap();
-    let s = Resource::Secret(Secret { path: "~/t".into(), src: "token.age".into(), perms: "0400".into(), owner: None });
+    let s = Resource::Secret(Secret {
+        path: "~/t".into(),
+        src: "token.age".into(),
+        perms: "0400".into(),
+        owner: None,
+        identities: vec![],
+    });
     let err = format!("{:#}", w.apply(&[Desired { resource: s, owner: None },]).unwrap_err());
     assert!(err.contains("age.key"), "{err}");
     assert!(!w.at("t").exists());
@@ -634,6 +693,7 @@ fn protected_paths_fail_the_plan() {
             src: "secrets/k.age".into(),
             perms: "0600".into(),
             owner: None,
+            identities: vec![],
         }),
         owner: None,
     };

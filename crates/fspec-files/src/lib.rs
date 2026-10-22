@@ -5,7 +5,7 @@ pub mod adopt;
 mod live;
 pub mod patch;
 mod render;
-mod secret;
+pub mod secret;
 pub mod watch;
 
 use std::fs;
@@ -91,8 +91,9 @@ impl Backend for FileBackend {
                     }
                 },
                 Resource::Secret(s) => {
-                    let key = cx.paths.home.join(".config/fspec/age.key");
-                    let plain = secret::decrypt(&cx.spec_dir.join(&s.src), &key).with_context(|| s.path.clone())?;
+                    let ids = secret::identity_paths(cx.paths, cx.scope, &s.identities)?;
+                    let plain =
+                        secret::decrypt_file(&cx.spec_dir.join(&s.src), &ids).with_context(|| s.path.clone())?;
                     stage(&staged, &plain)?;
                 }
                 _ => {}
@@ -219,6 +220,10 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
 /// file is created 0600 so a secret is never world-readable, even briefly.
 fn install(journal: &mut Journal, dest: &Path, bytes: &[u8], mode: Option<u32>) -> Result<()> {
     journal.backup(dest)?;
+    write_atomic(dest, bytes, mode)
+}
+
+fn write_atomic(dest: &Path, bytes: &[u8], mode: Option<u32>) -> Result<()> {
     let dir = dest.parent().context("path has no parent")?;
     fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     let name = dest.file_name().context("path has no file name")?.to_string_lossy();
@@ -403,9 +408,52 @@ fn commit_secret(
     if let Some(owner) = &s.owner {
         cx.runner.check(&Cmd::new("chown").arg(owner).arg(path.to_string_lossy()))?;
     }
+    // A copy of the ciphertext lets `fspec secret install` decrypt again at boot, since the
+    // plaintext usually lives on a tmpfs.
+    let ciphertext = fs::read(cx.spec_dir.join(&s.src))?;
+    let src_sha = sha256(&ciphertext);
+    let kept = fspec_core::apply::state_dir(cx.paths, cx.scope).join("secrets").join(format!("{src_sha}.age"));
+    if !kept.exists() {
+        install(journal, &kept, &ciphertext, Some(0o600))?;
+    }
+    let ids = secret::identity_paths(cx.paths, cx.scope, &s.identities)?;
     let mut rec = hash_record(&plain);
-    rec.insert("src_sha256".into(), sha256(&fs::read(cx.spec_dir.join(&s.src))?).into());
+    rec.insert("src_sha256".into(), src_sha.into());
+    rec.insert("identities".into(), ids.iter().map(|p| p.to_string_lossy()).collect::<Vec<_>>().into());
     Ok(Some(rec))
+}
+
+/// Decrypt every secret in `state` again from its kept ciphertext, for a boot that wiped the
+/// tmpfs they live on. Returns the paths written.
+pub fn reinstall_secrets(
+    paths: &fspec_core::paths::Paths,
+    scope: fspec_core::resource::Scope,
+    state: &fspec_core::state::State,
+    runner: &dyn fspec_core::runner::Runner,
+) -> Result<Vec<PathBuf>> {
+    let dir = fspec_core::apply::state_dir(paths, scope).join("secrets");
+    let mut written = Vec::new();
+    for entry in state.entries.values() {
+        let Resource::Secret(s) = &entry.resource else { continue };
+        let sha =
+            live::recorded(&entry.record, "src_sha256").with_context(|| format!("{}: no recorded source", s.path))?;
+        let ids: Vec<PathBuf> = entry
+            .record
+            .get("identities")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(Value::as_str).map(PathBuf::from).collect())
+            .unwrap_or_default();
+        let ciphertext = fs::read(dir.join(format!("{sha}.age")))
+            .with_context(|| format!("{}: the kept ciphertext is missing", s.path))?;
+        let plain = secret::decrypt(&ciphertext, &secret::load_identities(&ids)?).with_context(|| s.path.clone())?;
+        let path = paths.resolve(&s.path)?;
+        write_atomic(&path, &plain, Some(parse_perms(&s.perms)?)).with_context(|| s.path.clone())?;
+        if let Some(owner) = &s.owner {
+            runner.check(&Cmd::new("chown").arg(owner).arg(path.to_string_lossy()))?;
+        }
+        written.push(path);
+    }
+    Ok(written)
 }
 
 #[cfg(test)]

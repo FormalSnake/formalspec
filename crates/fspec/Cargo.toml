@@ -23,6 +23,4 @@ fspec-image.workspace = true
 fspec-switch.workspace = true
 libc.workspace = true
 serde_json.workspace = true
-
-[dev-dependencies]
 tempfile.workspace = true

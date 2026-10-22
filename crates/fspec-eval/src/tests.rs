@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use fspec_core::resource::{Resource, Source};
 
-use super::evaluate;
+use super::{evaluate, evaluate_recipients};
 
 fn example() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/basic/spec.star")
@@ -229,4 +229,17 @@ hosts = [host(
     let Resource::Pkg(tools) = &host.resources[2] else { panic!() };
     assert!(matches!(&tools.source, Source::Zypper(z) if z.names == ["htop", "jq"]));
     assert!(eval_str("x = repo(\"a\", url = \"u\", gpg = \"k\")\nhosts = []\n", &[]).is_err());
+}
+
+#[test]
+fn recipients_come_from_secrets_star() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("secrets.star");
+    std::fs::write(&path, "k = \"age1x\"\nsecrets = {\"secrets/\" + n + \".age\": [k] for n in [\"a\", \"b\"]}\n")
+        .unwrap();
+    let all = evaluate_recipients(&path).unwrap();
+    assert_eq!(all["secrets/a.age"], ["age1x"]);
+    assert_eq!(all.len(), 2);
+    std::fs::write(&path, "secrets = {\"a.age\": \"age1x\"}\n").unwrap();
+    assert!(evaluate_recipients(&path).is_err());
 }

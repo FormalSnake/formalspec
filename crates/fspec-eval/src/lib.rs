@@ -78,6 +78,20 @@ pub fn evaluate(spec_path: &Path) -> anyhow::Result<Spec> {
     })
 }
 
+/// Evaluate `secrets.star`, the counterpart of agenix's `secrets.nix`: it sets `secrets` to a dict
+/// from each `.age` file, relative to its own directory, to the public keys it is encrypted to.
+pub fn evaluate_recipients(path: &Path) -> anyhow::Result<std::collections::BTreeMap<String, Vec<String>>> {
+    let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let ast = AstModule::parse(&path.display().to_string(), text, &dialect()).map_err(|e| e.into_anyhow())?;
+    let globals = GlobalsBuilder::extended_by(&[LibraryExtension::StructType, LibraryExtension::Print]).build();
+    Module::with_temp_heap(|module| {
+        Evaluator::new(&module).eval_module(ast, &globals).map_err(|e| e.into_anyhow())?;
+        let secrets = module.get("secrets").with_context(|| format!("{} must set `secrets`", path.display()))?;
+        serde_json::from_value(secrets.to_json_value()?)
+            .with_context(|| format!("`secrets` in {} must map file names to lists of public keys", path.display()))
+    })
+}
+
 /// Evaluate a project's `dev.star` as seen from `platform` (`aarch64-darwin`), which the file
 /// reads as the global `platform`. The file calls `dev(...)` exactly once.
 pub fn evaluate_dev(path: &Path, platform: &str) -> anyhow::Result<Dev> {
