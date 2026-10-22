@@ -1358,8 +1358,12 @@ switch --adopt-boot` from the running root first. That way the bootloader
 never goes with a deleted root. It removes the root's kernels and entries from
 the ESP or its folder in the shared boot partition (and regenerates GRUB's
 menu on BIOS), then deletes the root with `btrfs subvolume delete --recursive`
-or `zfs destroy -r`, which takes every leftover system file with it. All of
-these need root; every step is a pure planning function in `fspec-switch`
+or `zfs destroy -r`, which takes every leftover system file with it.
+`fspec forget nixos` takes the NixOS a migration kept in `@nixos`, with its
+`EFI/nixos` folder and `nixos-*.conf` entries. Off the default layout, a root
+installed with `--beside` has no boot owner record, so forget checks two
+things instead: the running root still has its own entries on the ESP, and
+`loader.conf` does not name the root that goes. All of these need root; every step is a pure planning function in `fspec-switch`
 that returns the command list.
 
 Only the `system` block differs per distro. Everything from FormalSpec's own

@@ -166,11 +166,9 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
-    /// Delete a distro root created by `fspec switch --distro`, and its boot entry.
-    Forget {
-        #[arg(value_parser = fspec_switch::DISTROS)]
-        distro: String,
-    },
+    /// Delete a distro root created by `fspec switch --distro` or `--beside`, or the NixOS a
+    /// migration kept in @nixos, and its boot entries.
+    Forget { distro: String },
     /// agenix's workflow for the `.age` files listed in `secrets.star` next to the spec.
     Secret {
         #[command(subcommand)]

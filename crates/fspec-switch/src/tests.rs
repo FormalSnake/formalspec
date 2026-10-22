@@ -313,7 +313,7 @@ fn forget_clears_the_roots_boot_files_on_each_layout() {
         plan.lines()[5..],
         [
             "test -e /r/run/fspec/switch/top/@fedora",
-            r#"sh -c 'rm -rf "$1/$2" "$1"/EFI/Linux/"$2"-*.efi "$1"/loader/entries/"$2"-*.conf' sh /r/efi fedora"#,
+            r#"sh -c 'rm -rf "$1/$2" "$1/EFI/$2" "$1"/EFI/Linux/"$2"-*.efi "$1"/loader/entries/"$2"-*.conf' sh /r/efi fedora"#,
             "btrfs subvolume delete --recursive /r/run/fspec/switch/top/@fedora",
             "umount /r/run/fspec/switch/top",
             "umount /r/run/fspec/switch"
@@ -1325,9 +1325,41 @@ fn aerynos_needs_the_default_layout() {
 }
 
 #[test]
-fn forgetting_aerynos_clears_the_kernels_blsforme_keeps() {
-    let lines = forget(&paths(), &default_arch(), Some("arch"), "aerynos").unwrap().lines();
-    assert!(lines.contains(&"rm -rf /r/efi/EFI/aerynos".to_string()), "{lines:#?}");
+fn forget_takes_the_nixos_a_migration_kept() {
+    let lines = forget(&paths(), &default_arch(), Some("arch"), "nixos").unwrap().lines();
+    assert!(lines.iter().any(|l| l.ends_with("sh /r/efi nixos")), "{lines:#?}");
+    assert!(lines.contains(&"btrfs subvolume delete --recursive /r/run/fspec/switch/top/@nixos".to_string()));
+    let err = forget(&paths(), &default_arch(), Some("arch"), "gentoo").unwrap_err().to_string();
+    assert!(err.starts_with("`gentoo` is not a distro fspec switch creates"), "{err}");
+}
+
+/// e1504g after `fspec switch --beside tumbleweed`: the ESP stays at /boot/efi and NixOS in @nixos.
+fn tumbleweed_beside_nixos() -> Machine {
+    let l = lsblk("gpt", vec![esp("/dev/vda1", 1, 1024, &["/boot/efi"]), btrfs_part("/dev/vda2", 2, &["/", "/home"])]);
+    let mut f = facts("/@tumbleweed", l, true);
+    f.volumes = ["@tumbleweed", "@nixos", "@home", "@swap", "@fspec"].map(String::from).to_vec();
+    classify(&f, "opensuse-tumbleweed".into(), "root=UUID=u rootflags=subvol=@tumbleweed rw".into()).unwrap()
+}
+
+#[test]
+fn a_root_beside_another_forgets_it_without_a_boot_owner() {
+    let m = tumbleweed_beside_nixos();
+    assert!(matches!(m.layout, crate::Layout::Unsupported { .. }));
+    let lines = forget(&paths(), &m, None, "nixos").unwrap().lines();
+    let at = |l: &str| position(&lines, l);
+    assert!(
+        at(r#"sh -c 'ls "$1"/loader/entries/"$2"-*.conf' sh /r/boot/efi tumbleweed"#) < at("btrfs subvolume delete")
+    );
+    assert!(
+        lines.contains(
+            &r#"grep -Eqs ^(default|preferred)[[:space:]]+"?nixos /r/boot/efi/loader/loader.conf"#.to_string()
+        )
+    );
+    assert!(lines.iter().any(|l| l.ends_with("sh /r/boot/efi nixos")));
+    assert!(lines.contains(&"btrfs subvolume delete --recursive /r/run/fspec/switch/top/@nixos".to_string()));
+    let err = forget(&paths(), &m, None, "tumbleweed").unwrap_err().to_string();
+    assert!(err.contains("is the system you booted"), "{err}");
+    assert!(forget(&paths(), &m, None, "../x").is_err());
 }
 
 #[test]
