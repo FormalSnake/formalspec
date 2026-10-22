@@ -221,7 +221,7 @@ impl Backend for StoreBackend {
                     fs::write(&marker, out)?;
                 }
                 Kind::Archive { origin, dirname, .. } => {
-                    if root.join("store").join(&dirname).exists() {
+                    if root.join("store").join(&dirname).exists() || !build_tool_present(p, &origin) {
                         continue;
                     }
                     unpack_into(cx, p, &origin, &dirname, &staging.join("store").join(&dirname), staging)?;
@@ -263,6 +263,17 @@ impl Backend for StoreBackend {
 
 /// Download (or pull) a package's locked artifact, verify it and unpack it into `dest`, patched
 /// and, for npm, installed. `scratch` holds downloads on the way.
+/// Whether the tool `unpack_into` runs for `p` is on PATH. When it is not, the build waits for
+/// commit, which runs after the Packages phase that may install it.
+fn build_tool_present(p: &Pkg, origin: &Origin) -> bool {
+    let tool = match (origin, &p.source) {
+        (Origin::Oci { .. }, _) => "oras",
+        (_, Source::Npm { .. }) => "npm",
+        _ => return true,
+    };
+    std::env::var_os("PATH").is_some_and(|path| std::env::split_paths(&path).any(|d| d.join(tool).is_file()))
+}
+
 fn unpack_into(cx: &Cx, p: &Pkg, origin: &Origin, dirname: &str, dest: &Path, scratch: &Path) -> Result<()> {
     match origin {
         Origin::Oci { reference } => {
@@ -335,6 +346,11 @@ fn install(cx: &Cx, p: &Pkg, staging: &Path, journal: &mut Journal) -> Result<In
                 undo_create(journal, &live)?;
                 undo_create(journal, &sidecar)?;
                 let from = staging.join("store").join(&dirname);
+                if !from.exists() {
+                    // Prepare skipped it: its build tool was not installed yet.
+                    let Kind::Archive { origin, .. } = &target(cx, p)?.kind else { unreachable!() };
+                    unpack_into(cx, p, origin, &dirname, &from, staging)?;
+                }
                 fs::rename(&from, &live).or_else(|_| copy_any(&from, &live).and_then(|()| remove_any(&from)))?;
                 let meta =
                     Sidecar { name: p.name.clone(), version: t.version.clone(), bins: bins_of(p, artifact, &live)? };

@@ -105,10 +105,11 @@ pub fn state_dir(paths: &Paths, scope: Scope) -> PathBuf {
 pub enum Phase {
     Users,
     Files,
-    Store,
     /// The distro's repos and base packages, before any `pkg` installs from them.
     Distro,
     Packages,
+    /// After the packages, so a store build can use the npm or oras the same apply installs.
+    Store,
     Services,
     Defaults,
     System,
