@@ -286,7 +286,7 @@ pub fn classify(f: &Facts, running: String, cmdline: String) -> Result<Machine> 
     // The device the root filesystem sits on: a partition, a LUKS mapping, or a pool member.
     let root_dev = match fstype {
         "zfs" => {
-            f.zpool.lines().filter_map(|l| l.split_whitespace().next()).find(|d| d.starts_with("/dev/")).and_then(&find)
+            f.zpool.lines().filter_map(|l| l.split_whitespace().next()).find(|d| d.starts_with("/dev/")).and_then(find)
         }
         _ => find(source),
     };
