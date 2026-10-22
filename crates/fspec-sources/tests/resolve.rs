@@ -67,7 +67,8 @@ fn aqua_ripgrep() {
 #[test]
 fn aqua_gzipped_binary_is_stored_under_the_package_name() {
     let rel = release("2026-09-28", "2025-10-01T00:00:00Z", &["rust-analyzer-x86_64-unknown-linux-gnu.gz"]);
-    let fetch = registry().with("https://api.github.com/repos/rust-lang/rust-analyzer/releases/latest", rel.to_string());
+    let fetch =
+        registry().with("https://api.github.com/repos/rust-lang/rust-analyzer/releases/latest", rel.to_string());
     let runner = RecordingRunner::default();
     let p = pkg(json!({"name": "rust-analyzer", "source": {"kind": "aqua", "name": "rust-lang/rust-analyzer"}}));
     let locked = resolve(&p, &platforms(&["x86_64-linux"]), None, &cx(&fetch, &runner)).unwrap();

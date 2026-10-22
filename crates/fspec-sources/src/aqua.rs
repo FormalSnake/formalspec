@@ -242,11 +242,7 @@ pub fn resolve(
         for f in r.files.iter().flatten() {
             // A bare binary, or one compressed without a tar, is stored under the package's name,
             // whatever the download was called.
-            let path = if single {
-                pkg_name.to_string()
-            } else {
-                expand(f.src.as_deref().unwrap_or(&f.name), &vars)?
-            };
+            let path = if single { pkg_name.to_string() } else { expand(f.src.as_deref().unwrap_or(&f.name), &vars)? };
             bins.push(bin_entry(&f.name, &path));
         }
         if single && bins.is_empty() {

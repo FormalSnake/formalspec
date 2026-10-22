@@ -12,9 +12,10 @@ pub struct Paths {
 }
 
 fn passwd_home(passwd: &str, uid: u32) -> Option<PathBuf> {
-    passwd.lines().map(|l| l.split(':').collect::<Vec<_>>()).find_map(|f| {
-        (f.len() >= 6 && f[2].parse() == Ok(uid)).then(|| PathBuf::from(f[5]))
-    })
+    passwd
+        .lines()
+        .map(|l| l.split(':').collect::<Vec<_>>())
+        .find_map(|f| (f.len() >= 6 && f[2].parse() == Ok(uid)).then(|| PathBuf::from(f[5])))
 }
 
 impl Paths {

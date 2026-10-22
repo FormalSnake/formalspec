@@ -14,8 +14,8 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use fspec_core::apply::{Op, Records};
 use fspec_core::Scope;
+use fspec_core::apply::{Op, Records};
 use fspec_core::facts::Init;
 use fspec_core::journal::{Journal, Undo, remove_any};
 use fspec_core::resource::{File, FileMode, Format, OnDrift, Resource, Secret};
