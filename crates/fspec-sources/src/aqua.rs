@@ -237,17 +237,19 @@ pub fn resolve(
             (asset.browser_download_url.clone(), asset.digest.clone(), name)
         };
         let vars = vars.with_asset(&name);
+        let single = matches!(r.format.as_str(), "raw" | "gz" | "xz" | "zst");
         let mut bins = Vec::new();
         for f in r.files.iter().flatten() {
-            // A bare binary is stored under the package's name, whatever the download was called.
-            let path = if r.format == "raw" {
+            // A bare binary, or one compressed without a tar, is stored under the package's name,
+            // whatever the download was called.
+            let path = if single {
                 pkg_name.to_string()
             } else {
                 expand(f.src.as_deref().unwrap_or(&f.name), &vars)?
             };
             bins.push(bin_entry(&f.name, &path));
         }
-        if r.format == "raw" && bins.is_empty() {
+        if single && bins.is_empty() {
             bins.push(pkg_name.to_string());
         }
         out.artifacts.insert(
