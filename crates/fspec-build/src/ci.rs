@@ -1,7 +1,7 @@
 //! `.github/workflows/fspec-packages.yml`: builds every `git(...)` package on a runner of each
 //! platform a host declares and pushes the result to `ghcr.io/<owner>/fspec-cache`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Result, bail};
 use fspec_core::resource::{Host, Resource, Source};
@@ -35,15 +35,35 @@ fn runner(platform: &str) -> Result<&'static str> {
 
 pub const PATH: &str = ".github/workflows/fspec-packages.yml";
 
+/// Each `git(...)` package's `build_deps`, for the runner to install before building it.
+pub fn build_deps(hosts: &[Host]) -> BTreeMap<String, Vec<String>> {
+    hosts
+        .iter()
+        .flat_map(|h| &h.resources)
+        .filter_map(|r| match r {
+            Resource::Pkg(p) if matches!(p.source, Source::Git { .. }) && !p.build_deps.is_empty() => {
+                Some((p.name.clone(), p.build_deps.clone()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 /// `spec` is the spec file relative to the repo root, which is where the workflow lives.
-pub fn workflow(jobs: &[(String, String)], spec: &str) -> Result<String> {
+pub fn workflow(jobs: &[(String, String)], spec: &str, deps: &BTreeMap<String, Vec<String>>) -> Result<String> {
     if jobs.is_empty() {
         bail!("no host declares a git(...) package, there is nothing to cache");
     }
     let mut matrix = String::new();
     for (pkg, platform) in jobs {
-        matrix
-            .push_str(&format!("          - {{ pkg: {pkg}, platform: {platform}, runner: {} }}\n", runner(platform)?));
+        let deps = match deps.get(pkg) {
+            Some(d) => format!(", deps: \"{}\"", d.join(" ")),
+            None => String::new(),
+        };
+        matrix.push_str(&format!(
+            "          - {{ pkg: {pkg}, platform: {platform}, runner: {}{deps} }}\n",
+            runner(platform)?
+        ));
     }
     let dir = spec.rsplit_once('/').map(|(d, _)| format!("{d}/")).unwrap_or_default();
     Ok(format!(
@@ -70,6 +90,14 @@ jobs:
 {matrix}    steps:
       - uses: actions/checkout@v4
       - uses: oras-project/setup-oras@v1
+      - name: Install build dependencies
+        if: matrix.deps
+        run: |
+          if [ "$RUNNER_OS" = macOS ]; then
+            brew install ${{{{ matrix.deps }}}}
+          else
+            sudo apt-get update -q && sudo apt-get install -yq ${{{{ matrix.deps }}}}
+          fi
       - name: Install fspec
         run: cargo install --locked --git {repo} fspec
       - name: Build
