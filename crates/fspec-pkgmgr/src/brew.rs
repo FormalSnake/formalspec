@@ -18,6 +18,7 @@ pub struct BrewBackend;
 struct Formula {
     name: String,
     cask: bool,
+    tap: Option<String>,
 }
 
 struct Want {
@@ -28,8 +29,13 @@ struct Want {
 }
 
 fn formula(p: &Pkg) -> Result<Formula> {
-    let Source::Brew { name, cask } = &p.source else { bail!("pkg:{} is not a brew package", p.name) };
-    Ok(Formula { name: name.clone().unwrap_or_else(|| p.name.clone()), cask: *cask })
+    let Source::Brew { name, cask, tap } = &p.source else { bail!("pkg:{} is not a brew package", p.name) };
+    if let Some(t) = tap
+        && (t.split('/').count() != 2 || t.split('/').any(str::is_empty))
+    {
+        bail!("pkg:{}: tap `{t}` must be `owner/repo`", p.name);
+    }
+    Ok(Formula { name: name.clone().unwrap_or_else(|| p.name.clone()), cask: *cask, tap: tap.clone() })
 }
 
 fn want(cx: &Cx, p: &Pkg) -> Result<Want> {
@@ -63,8 +69,19 @@ fn same_version(installed: &str, locked: &str) -> bool {
 
 fn install(cx: &Cx, journal: &mut Journal, w: &Want) -> Result<Option<String>> {
     journal.record(Undo::Run { cmd: cmd("uninstall", &w.formula) })?;
-    cx.runner.check(&cmd("install", &w.formula))?;
-    version(cx, &w.formula)
+    let f = &w.formula;
+    match &f.tap {
+        // The tap stays when the package goes: other packages may come from it.
+        Some(tap) => {
+            cx.runner.check(&Cmd::new("brew").args(["tap", tap]))?;
+            let c = Cmd::new("brew").arg("install");
+            cx.runner.check(&if f.cask { c.arg("--cask") } else { c }.arg(format!("{tap}/{}", f.name)))?;
+        }
+        None => {
+            cx.runner.check(&cmd("install", f))?;
+        }
+    }
+    version(cx, f)
 }
 
 fn uninstall(cx: &Cx, journal: &mut Journal, f: &Formula) -> Result<()> {

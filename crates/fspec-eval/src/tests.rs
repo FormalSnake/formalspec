@@ -40,7 +40,7 @@ fn example_spec() {
         Resource::Pkg(p) if p.name == "aerospace" => Some(p.source.clone()),
         _ => None,
     });
-    assert_eq!(aerospace, Some(Source::Brew { name: None, cask: true }));
+    assert_eq!(aerospace, Some(Source::Brew { name: None, cask: true, tap: None }));
     let rg = mac.resources.iter().find_map(|r| match r {
         Resource::Pkg(p) if p.name == "ripgrep" => Some(p.source.clone()),
         _ => None,

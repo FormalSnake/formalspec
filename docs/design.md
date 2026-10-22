@@ -97,7 +97,7 @@ package name or service name fail the plan.
 | `npm(name)` | `npm("@anthropic-ai/claude-code")` |
 | `cargo(name)` | crates.io, prebuilt via cargo-binstall where available |
 | `flatpak(id)` | Flathub |
-| `brew(name)` | Homebrew bottles and casks on macOS |
+| `brew(name)` | Homebrew bottles and casks on macOS, `tap = "owner/repo"` for a third-party tap |
 | `dnf`, `pacman`, `apt`, `xbps`, `moss`, `zypper` | the distro's own repos, plus `repo(...)` ones on zypper |
 | `git(url, rev)` | build from source with a recipe |
 | `nix(attr)` | borrow a nixpkgs build on hosts that have Nix |
@@ -330,6 +330,11 @@ installs by name. Flatpak pins live in `any = { commit = … }`, brew records
 `version`; Homebrew can only install the current version, so the brew pin is
 checked (drift, then `brew upgrade`), not enforced, and an upgrade is not
 reversed on rollback.
+A `tap` is tapped before the install, and the package is installed by its full
+name (`felixkratz/formulae/sketchybar`), which trusts that one item of the tap
+rather than the whole tap. The tap stays when the package is removed. A tapped
+package has no version until it is installed: formulae.brew.sh only knows
+Homebrew's own taps.
 
 A nightly CI job can run `fspec update` and open a PR with each bump and a
 changelog link. Merging it is the auto-update.

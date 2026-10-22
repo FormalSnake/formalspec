@@ -320,6 +320,10 @@ pub enum Source {
         name: Option<String>,
         #[serde(default)]
         cask: bool,
+        /// A third-party tap (`felixkratz/formulae`), tapped before the install. The item is
+        /// installed by its full name, which is how Homebrew trusts one item of a tap.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tap: Option<String>,
     },
     Dnf(DistroPkgs),
     Pacman(DistroPkgs),
@@ -402,7 +406,10 @@ impl fmt::Display for Source {
             Source::Python => write!(f, "{kind}"),
             Source::Github { repo, .. } => write!(f, "{kind}:{repo}"),
             Source::Flatpak { id, .. } => write!(f, "{kind}{}", opt(id)),
-            Source::Brew { name, cask } => write!(f, "{kind}{}{}", if *cask { ":cask" } else { "" }, opt(name)),
+            Source::Brew { name, cask, tap } => {
+                let tap = tap.as_ref().map(|t| format!(":{t}")).unwrap_or_default();
+                write!(f, "{kind}{}{tap}{}", if *cask { ":cask" } else { "" }, opt(name))
+            }
             Source::Dnf(d)
             | Source::Pacman(d)
             | Source::Apt(d)

@@ -292,6 +292,30 @@ fn brew_installs_formula_and_cask_in_user_scope() {
 }
 
 #[test]
+fn a_tapped_brew_package_taps_then_installs_by_its_full_name() {
+    let w = World::darwin();
+    let want = [
+        pkg("sketchybar", json!({"kind": "brew", "tap": "felixkratz/formulae"}), "pinned"),
+        pkg("omniwm", json!({"kind": "brew", "cask": true, "tap": "barutsrb/tap"}), "pinned"),
+    ];
+    w.apply(Scope::User, &want).unwrap();
+    assert_eq!(
+        w.take(),
+        [
+            "brew tap barutsrb/tap",
+            "brew install --cask barutsrb/tap/omniwm",
+            "brew list --cask --versions omniwm",
+            "brew tap felixkratz/formulae",
+            "brew install felixkratz/formulae/sketchybar",
+            "brew list --versions sketchybar",
+        ]
+    );
+    let bad = [pkg("x", json!({"kind": "brew", "tap": "felixkratz"}), "pinned")];
+    let err = w.apply(Scope::User, &bad).unwrap_err();
+    assert!(format!("{err:#}").contains("must be `owner/repo`"), "{err:#}");
+}
+
+#[test]
 fn brew_pinned_upgrades_on_drift_and_self_managed_never_does() {
     let mut w = World::darwin();
     w.lock.upsert(locked("ripgrep", "brew", Some("14.1.0"), &[]));
