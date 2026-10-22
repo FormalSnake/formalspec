@@ -47,8 +47,10 @@ pub fn git_status(spec_dir: &Path) -> Cmd {
     Cmd::new("git").arg("-C").arg(spec_dir.display().to_string()).args(["status", "--porcelain", "--", "."])
 }
 
+/// Paths relative to the spec dir, which `tar_create` archives from, even when the spec lives in
+/// a subdirectory of its repo.
 pub fn git_files(spec_dir: &Path) -> Cmd {
-    Cmd::new("git").arg("-C").arg(spec_dir.display().to_string()).args(["ls-files", "--full-name", "--", "."])
+    Cmd::new("git").arg("-C").arg(spec_dir.display().to_string()).args(["ls-files", "--", "."])
 }
 
 /// Archives the listed files (one path per line on stdin) relative to the spec dir.
@@ -115,7 +117,7 @@ mod tests {
         let d = Path::new("/r/spec");
         assert_eq!(git_commit(d).to_string(), "git -C /r/spec rev-parse HEAD");
         assert_eq!(git_status(d).to_string(), "git -C /r/spec status --porcelain -- .");
-        assert_eq!(git_files(d).to_string(), "git -C /r/spec ls-files --full-name -- .");
+        assert_eq!(git_files(d).to_string(), "git -C /r/spec ls-files -- .");
     }
 
     #[test]
