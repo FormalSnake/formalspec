@@ -49,6 +49,9 @@ enum Command {
         /// Plan on this machine whatever the host is called. Set on the remote end of an ssh plan.
         #[arg(long, hide = true)]
         local: bool,
+        /// Plan one scope only; a non-root plan hands the system scope to sudo with it.
+        #[arg(long, hide = true)]
+        scope: Option<ScopeArg>,
     },
     /// Converge a host, over ssh when it is not this machine.
     Apply {
@@ -357,7 +360,7 @@ fn main() -> Result<()> {
             Command::Update { pkgs, .. } => dev::update(&paths, pkgs),
             _ => dev::plan_here(&paths),
         },
-        Command::Plan { host, json, all, dirty, local } => {
+        Command::Plan { host, json, all, dirty, local, scope } => {
             let spec = fspec_eval::evaluate(&spec_path)?;
             if *all {
                 return plan_all(&spec, &paths, &spec_path, *dirty);
@@ -396,7 +399,7 @@ fn main() -> Result<()> {
                         Planned::Unreachable => bail!("host {} is unreachable over ssh ({alias})", host.name),
                     }
                 }
-                None => plan_local(&paths, host, &spec_dir)?,
+                None => plan_local(&paths, &spec_path, host, *scope)?,
             };
             if *json {
                 println!("{}", serde_json::to_string_pretty(&plan)?);
@@ -1180,13 +1183,21 @@ fn remote_alias(host: &Host, this: &str, paths: &Paths, local: bool) -> Option<S
     }
 }
 
-fn plan_local(paths: &Paths, host: &Host, spec_dir: &Path) -> Result<Plan> {
+fn plan_local(paths: &Paths, spec_path: &Path, host: &Host, scope: Option<ScopeArg>) -> Result<Plan> {
     if is_live(paths) {
         check_declared(host)?;
     }
+    let spec_dir = spec_path.parent().context("spec has no parent directory")?;
     let env = Env::new(paths, host, spec_dir)?;
+    let scopes: Vec<Scope> = scope.map(|s| vec![s.into()]).unwrap_or(SCOPES.to_vec());
     let mut plans = Vec::new();
-    for scope in SCOPES {
+    for scope in scopes {
+        // The system scope reads root-only files (sudoers drop-ins, the ESP), as apply writes them.
+        if scope == Scope::System && is_live(paths) && !is_root(env.runner.as_ref())? {
+            let out = sudo_system(spec_path, &host.name, paths, &["plan", "--json", "--local"])?;
+            plans.push(serde_json::from_slice(&out).context("reading the system scope's plan from sudo")?);
+            continue;
+        }
         let state = State::load(&state_dir(paths, scope).join("state.json"))?;
         plans.push(plan_scope(&env.cx(scope, &state), &backends::all(), &host.desired(), &state)?);
     }
@@ -1205,7 +1216,7 @@ fn plan_all(spec: &fspec_eval::Spec, paths: &Paths, spec_path: &Path, dirty: boo
                 Planned::Plan(plan) => plan.to_string(),
                 Planned::Unreachable => format!("host {}\n  unreachable, skipped", host.name),
             }),
-            None => plan_local(paths, host, spec_dir).map(|p| p.to_string()),
+            None => plan_local(paths, spec_path, host, None).map(|p| p.to_string()),
         };
         match outcome {
             Ok(text) => println!("{text}"),
@@ -1423,24 +1434,28 @@ fn is_root(runner: &dyn Runner) -> Result<bool> {
     Ok(runner.check(&Cmd::new("id").arg("-u"))?.stdout.trim() == "0")
 }
 
-/// The system scope needs root and the user scope must not run as root, so a non-root apply
-/// or rollback hands the system scope to `sudo fspec <command> --scope system`.
-fn sudo_system(spec: &Path, host: &str, paths: &Paths, command: &[&str]) -> Result<()> {
+/// The system scope needs root and the user scope must not run as root, so a non-root apply,
+/// plan or rollback hands the system scope to `sudo fspec <command> --scope system`. What it
+/// prints is returned for `plan --json` and passed through otherwise.
+fn sudo_system(spec: &Path, host: &str, paths: &Paths, command: &[&str]) -> Result<Vec<u8>> {
     let exe = std::env::current_exe()?;
-    let status = std::process::Command::new("sudo")
-        .arg(exe)
+    let mut sudo = std::process::Command::new("sudo");
+    sudo.arg(exe)
         .arg("--spec")
         .arg(spec)
         .arg("--home")
         .arg(&paths.home)
         .args(command)
-        .args(["--scope", "system", "--host", host])
-        .status()
-        .context("running sudo")?;
-    if !status.success() {
+        .args(["--scope", "system", "--host", host]);
+    let capture = command.contains(&"--json");
+    if capture {
+        sudo.stdout(std::process::Stdio::piped());
+    }
+    let out = sudo.spawn().and_then(|c| c.wait_with_output()).context("running sudo")?;
+    if !out.status.success() {
         bail!("system scope {} failed", command[0]);
     }
-    Ok(())
+    Ok(out.stdout)
 }
 
 /// A host's declared platform must match the machine before fspec acts on it.
