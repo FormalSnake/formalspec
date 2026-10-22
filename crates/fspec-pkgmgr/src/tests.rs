@@ -366,8 +366,11 @@ fn dnf_installs_by_name_and_detects_drift() {
     assert_eq!(
         w.take(),
         [
+            "rpm -q --qf %{VERSION}-%{RELEASE} htop",
             "dnf install -y htop",
             "rpm -q --qf %{VERSION}-%{RELEASE} htop",
+            "rpm -q --qf %{VERSION}-%{RELEASE} jq",
+            "rpm -q --qf %{VERSION}-%{RELEASE} ripgrep",
             "dnf install -y jq ripgrep",
             "rpm -q --qf %{VERSION}-%{RELEASE} jq",
             "rpm -q --qf %{VERSION}-%{RELEASE} ripgrep",
@@ -409,7 +412,7 @@ fn dnf_caches_the_locked_rpm_and_installs_the_file() {
     w.apply(Scope::System, &want).unwrap();
     let cached = w.paths.root.join("var/cache/fspec/pkgs/htop-3.3-1.fc42.x86_64.rpm");
     assert_eq!(fs::read(&cached).unwrap(), b"rpm one");
-    assert_eq!(w.take()[0], format!("dnf install -y {}", cached.display()));
+    assert_eq!(w.take()[1], format!("dnf install -y {}", cached.display()));
     assert_eq!(w.state(Scope::System).entries[&want[0].resource.key()].record["file"], "htop-3.3-1.fc42.x86_64.rpm");
     assert!(w.plan(Scope::System, &want).unwrap().changes.is_empty());
 }
@@ -634,7 +637,8 @@ fn every_family_installs_by_name_reports_drift_and_removes() {
             f.without_queries(lines.clone()),
             [format!("{} htop", f.install), format!("{} jq ripgrep", f.install)]
         );
-        assert_eq!(lines.iter().filter(|l| f.is_query(l)).count(), 3, "{}", f.kind);
+        // Each name is queried before the install and again to record its version.
+        assert_eq!(lines.iter().filter(|l| f.is_query(l)).count(), 6, "{}", f.kind);
         assert!(w.plan(Scope::System, &want).unwrap().changes.is_empty(), "{}", f.kind);
 
         w.forget_answers();
@@ -789,6 +793,7 @@ fn distro_backend_rolls_back_a_failed_install_and_reports_drift() {
     w.apply(Scope::System, &want).unwrap();
     w.take();
 
+    w.answer(&format!("{} z", f.version), 1, "");
     w.answer(&format!("{} z", f.install), 1, "");
     assert!(w.apply(Scope::System, &[distro_res(f.distro, &["a", "z"])]).is_err());
     let lines = f.without_queries(w.take());
@@ -1100,4 +1105,16 @@ fn repo_on_a_package_needs_a_zypper_distro() {
     let err =
         w.apply(Scope::System, &[pkg("x", json!({"kind": "dnf", "names": [], "repo": "r"}), "pinned")]).unwrap_err();
     assert!(format!("{err:#}").contains("not a zypper distro"), "{err:#}");
+}
+
+#[test]
+fn a_failed_install_leaves_the_packages_that_were_already_there() {
+    let f = &FAMS[1];
+    let w = World::on(f.distro, &[]);
+    w.answer(f.version, 0, "a 1.0-1");
+    w.answer(&format!("{} new", f.version), 1, "");
+    w.answer(&format!("{} a new", f.install), 1, "");
+    assert!(w.apply(Scope::System, &[distro_res(f.distro, &["a", "new"])]).is_err());
+    let lines = f.without_queries(w.take());
+    assert_eq!(lines.last(), Some(&format!("{} new", f.remove)), "{lines:#?}");
 }

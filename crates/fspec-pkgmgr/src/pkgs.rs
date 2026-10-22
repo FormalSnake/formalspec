@@ -141,7 +141,9 @@ fn install_cmds(cx: &Cx, fam: Family, names: &[String], cached: Option<&Cached>)
     }
 }
 
-/// Install `names` (from `cached` when set), journaling their removal first.
+/// Install `names` (from `cached` when set), journaling the removal of the ones not installed
+/// yet. A name that was already there stays on rollback: removing it would also take every
+/// package that requires it, which for `tailscale` or `tar` is half the system.
 pub(crate) fn install(
     cx: &Cx,
     journal: &mut Journal,
@@ -149,7 +151,14 @@ pub(crate) fn install(
     names: &[String],
     cached: Option<&Cached>,
 ) -> Result<()> {
-    journal_undo(cx, journal, fam, || vec![fam.remove(names)])?;
+    let mut new = Vec::new();
+    for n in names {
+        let out = cx.runner.run(&fam.version(n))?;
+        if out.status != 0 || fam.parse_version(n, &out.stdout).is_empty() {
+            new.push(n.clone());
+        }
+    }
+    journal_undo(cx, journal, fam, || if new.is_empty() { Vec::new() } else { vec![fam.remove(&new)] })?;
     run_all(cx, &install_cmds(cx, fam, names, cached))
 }
 
