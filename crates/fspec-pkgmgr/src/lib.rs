@@ -34,11 +34,14 @@ fn pkg(r: &Resource) -> Result<&Pkg> {
 /// The lock entry for `p`. Fails when the lock was written for a different source, which
 /// `fspec update` fixes.
 fn locked<'a>(cx: &'a Cx, p: &Pkg) -> Result<Option<&'a LockedPkg>> {
-    let Some(l) = cx.lock.pkg(&p.name) else { return Ok(None) };
-    if l.source != p.source.to_string() {
-        bail!("fspec.lock has pkg:{} from `{}` but the spec says `{}`; run `fspec update`", p.name, l.source, p.source);
+    let source = p.source.to_string();
+    if let Some(l) = cx.lock.pkg(&p.name, &source) {
+        return Ok(Some(l));
     }
-    Ok(Some(l))
+    if let Some(other) = cx.lock.named(&p.name).next() {
+        bail!("fspec.lock has pkg:{} from `{}` but not from `{source}`; run `fspec update`", p.name, other.source);
+    }
+    Ok(None)
 }
 
 /// Trimmed stdout of a successful query, `None` when the command failed or printed nothing.

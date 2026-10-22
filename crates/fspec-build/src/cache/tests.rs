@@ -50,7 +50,7 @@ fn digests_land_in_the_lock_per_platform() {
     let (lines, errors) = record(&mut lock, &hosts, "ghcr.io/o/fspec-cache", &r).unwrap();
     assert_eq!(lines, ["librepods x86_64-linux sha256:dd"]);
     assert_eq!(errors.len(), 1, "the darwin tag returned no descriptor: {errors:?}");
-    let locked = lock.pkg("librepods").unwrap();
+    let locked = lock.named("librepods").next().unwrap();
     assert_eq!(locked.artifacts["x86_64-linux"].oci.as_deref(), Some("ghcr.io/o/fspec-cache/librepods@sha256:dd"));
     assert_eq!(locked.patches.as_deref(), Some("sha256-P"));
 }

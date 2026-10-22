@@ -137,7 +137,7 @@ fn plan(project: &Project, m: &Machine) -> Result<()> {
         return Ok(());
     }
     for p in &dev.packages {
-        match lock.pkg(&p.name).filter(|l| l.source == p.source.to_string()) {
+        match lock.pkg(&p.name, &p.source.to_string()) {
             Some(l) => {
                 println!("  pkg {} {}", p.name, l.version.as_deref().or(l.rev.as_deref()).unwrap_or("(unversioned)"))
             }

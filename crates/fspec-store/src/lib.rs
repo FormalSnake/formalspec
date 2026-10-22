@@ -113,7 +113,7 @@ static BUILT: std::sync::LazyLock<Artifact> = std::sync::LazyLock::new(Artifact:
 
 fn target<'a>(cx: &'a Cx, p: &'a Pkg) -> Result<Target<'a>> {
     let missing = || format!("pkg {} is not in fspec.lock, run fspec update", p.name);
-    let locked = cx.lock.pkg(&p.name).filter(|l| l.source == p.source.to_string()).with_context(missing)?;
+    let locked = cx.lock.pkg(&p.name, &p.source.to_string()).with_context(missing)?;
     let version = locked.version.clone().or_else(|| locked.rev.clone()).unwrap_or_else(|| "unversioned".into());
     if let Source::Nix { attr } = &p.source {
         let id = locked.rev.clone().unwrap_or_else(|| version.clone());
@@ -239,7 +239,7 @@ impl Backend for StoreBackend {
         let Some(inst) = Installed::from_record(&entry.record) else { return Ok(vec!["no install recorded".into()]) };
         let mut notes = Vec::new();
         if p.mode == PkgMode::Pinned {
-            let locked = cx.lock.pkg(&p.name).and_then(|l| l.patches.as_deref());
+            let locked = cx.lock.pkg(&p.name, &p.source.to_string()).and_then(|l| l.patches.as_deref());
             if let Err(e) = fspec_core::patches::check(cx.spec_dir, &p.patches, locked) {
                 notes.push(e.to_string());
             } else if let Ok(t) = target(cx, p)

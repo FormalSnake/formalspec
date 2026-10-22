@@ -114,15 +114,22 @@ impl Lock {
         self.native.iter().find(|n| n.kind == kind && n.name == name)
     }
 
-    pub fn pkg(&self, name: &str) -> Option<&LockedPkg> {
-        self.pkg.iter().find(|p| p.name == name)
+    /// The entry for `name` from `source` (`Source`'s display form). Hosts can take one package
+    /// name from different sources (brew on the macbook, github on Linux), so both are the key.
+    pub fn pkg(&self, name: &str, source: &str) -> Option<&LockedPkg> {
+        self.pkg.iter().find(|p| p.name == name && p.source == source)
     }
 
-    /// Insert or replace by name, keeping the file sorted so diffs stay small.
+    /// Every entry named `name`, whatever its source.
+    pub fn named<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a LockedPkg> {
+        self.pkg.iter().filter(move |p| p.name == name)
+    }
+
+    /// Insert or replace by name and source, keeping the file sorted so diffs stay small.
     pub fn upsert(&mut self, locked: LockedPkg) {
-        self.pkg.retain(|p| p.name != locked.name);
+        self.pkg.retain(|p| p.name != locked.name || p.source != locked.source);
         self.pkg.push(locked);
-        self.pkg.sort_by(|a, b| a.name.cmp(&b.name));
+        self.pkg.sort_by(|a, b| (&a.name, &a.source).cmp(&(&b.name, &b.source)));
     }
 }
 
@@ -154,11 +161,33 @@ image = "ghcr.io/ublue-os/bazzite-nvidia@sha256:ee"
 snapshot = "20261020"
 "#;
         let lock: Lock = toml::from_str(text).unwrap();
-        assert_eq!(lock.pkg("ripgrep").unwrap().artifacts["aarch64-darwin"].hash.as_deref(), Some("sha256-BBBB"));
-        assert!(lock.pkg("librepods").unwrap().artifacts["x86_64-linux"].oci.is_some());
+        assert_eq!(
+            lock.named("ripgrep").next().unwrap().artifacts["aarch64-darwin"].hash.as_deref(),
+            Some("sha256-BBBB")
+        );
+        assert!(lock.named("librepods").next().unwrap().artifacts["x86_64-linux"].oci.is_some());
         assert_eq!(lock.system["g815"].image, "ghcr.io/ublue-os/bazzite-nvidia@sha256:ee");
         assert_eq!(lock.zypper["e1504g"].snapshot, "20261020");
         let again: Lock = toml::from_str(&toml::to_string(&lock).unwrap()).unwrap();
         assert_eq!(again, lock);
+    }
+
+    #[test]
+    fn one_name_from_two_sources_keeps_both_entries() {
+        let entry = |source: &str, version: &str| LockedPkg {
+            name: "herdr".into(),
+            source: source.into(),
+            version: Some(version.into()),
+            rev: None,
+            patches: None,
+            artifacts: BTreeMap::new(),
+        };
+        let mut lock = Lock::default();
+        lock.upsert(entry("github:ogulcancelik/herdr", "0.4.0"));
+        lock.upsert(entry("brew:herdr", "0.4.1"));
+        lock.upsert(entry("brew:herdr", "0.4.2"));
+        assert_eq!(lock.pkg.len(), 2);
+        assert_eq!(lock.pkg("herdr", "brew:herdr").unwrap().version.as_deref(), Some("0.4.2"));
+        assert_eq!(lock.pkg("herdr", "github:ogulcancelik/herdr").unwrap().version.as_deref(), Some("0.4.0"));
     }
 }

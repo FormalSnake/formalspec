@@ -240,8 +240,7 @@ pub(crate) fn link_farm(project: &Project, dev: &Dev, lock: &Lock, m: &Machine, 
             let uv_bin = uv.dir.join(uv.bins.get("uv").context("the uv package has no uv command")?);
             for p in dev.packages.iter().filter(|p| python::is_pypi(p)) {
                 let locked = lock
-                    .pkg(&p.name)
-                    .filter(|l| l.source == p.source.to_string())
+                    .pkg(&p.name, &p.source.to_string())
                     .with_context(|| format!("pkg {} is not in fspec.lock, run fspec update", p.name))?;
                 out.push((p.name.clone(), python::venv(m.runner, &uv_bin, &py.dir, locked, own)?));
             }

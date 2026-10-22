@@ -299,7 +299,10 @@ fn update_collects_platforms_across_hosts_and_survives_a_failure() {
         host("b", "aarch64-darwin", None, vec![t.clone()]),
     ];
     let got = update(&hosts, &Lock::default(), &[], &cx(&fetch, &runner)).unwrap();
-    assert_eq!(got.lock.pkg("t").unwrap().artifacts.keys().collect::<Vec<_>>(), ["aarch64-darwin", "x86_64-linux"]);
+    assert_eq!(
+        got.lock.named("t").next().unwrap().artifacts.keys().collect::<Vec<_>>(),
+        ["aarch64-darwin", "x86_64-linux"]
+    );
     assert_eq!(got.errors.len(), 1);
     assert!(got.errors[0].contains("bad"), "{:?}", got.errors);
 }
@@ -342,7 +345,7 @@ fn update_keeps_recorded_oci_digests_while_commit_and_patches_stand() {
     let cx = Cx::new(&fetch, &runner).with_spec_dir(dir.path());
 
     let mut old = update(&hosts, &Lock::default(), &[], &cx).unwrap().lock;
-    let mut locked = old.pkg("tool").unwrap().clone();
+    let mut locked = old.named("tool").next().unwrap().clone();
     locked.artifacts.entry("x86_64-linux".into()).or_default().oci =
         Some("ghcr.io/o/fspec-cache/tool@sha256:dd".into());
     old.upsert(locked);
@@ -353,7 +356,7 @@ fn update_keeps_recorded_oci_digests_while_commit_and_patches_stand() {
 
     std::fs::write(dir.path().join("patches/a.patch"), "two").unwrap();
     let changed = update(&hosts, &old, &[], &cx).unwrap();
-    assert!(changed.lock.pkg("tool").unwrap().artifacts.is_empty());
+    assert!(changed.lock.named("tool").next().unwrap().artifacts.is_empty());
 }
 
 #[test]

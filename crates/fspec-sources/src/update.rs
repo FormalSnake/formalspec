@@ -25,7 +25,8 @@ struct Decl {
 /// Re-resolve `only` (every package and snapshot pin when empty), keep the other entries, and
 /// drop entries no host declares any more.
 pub fn update(hosts: &[Host], old: &Lock, only: &[String], cx: &Cx) -> Result<Update> {
-    let mut decls: BTreeMap<String, Decl> = BTreeMap::new();
+    // Keyed by name and source: hosts may take one name from different sources.
+    let mut decls: BTreeMap<(String, String), Decl> = BTreeMap::new();
     let mut errors = Vec::new();
     for host in hosts {
         let age = host
@@ -36,17 +37,11 @@ pub fn update(hosts: &[Host], old: &Lock, only: &[String], cx: &Cx) -> Result<Up
             .map_err(|e| anyhow::anyhow!("host {}: {e}", host.name))?;
         for r in &host.resources {
             let Resource::Pkg(p) = r else { continue };
-            let d = decls.entry(p.name.clone()).or_insert_with(|| Decl {
+            let d = decls.entry((p.name.clone(), p.source.to_string())).or_insert_with(|| Decl {
                 pkg: p.clone(),
                 platforms: BTreeSet::new(),
                 age: None,
             });
-            if d.pkg.source != p.source {
-                errors.push(format!(
-                    "{}: host {} declares {} but another host declares {}",
-                    p.name, host.name, p.source, d.pkg.source
-                ));
-            }
             if p.channel == Channel::Bleeding {
                 d.pkg.channel = Channel::Bleeding;
             }
@@ -55,7 +50,7 @@ pub fn update(hosts: &[Host], old: &Lock, only: &[String], cx: &Cx) -> Result<Up
         }
     }
     for name in only {
-        if !decls.contains_key(name) {
+        if !decls.keys().any(|(n, _)| n == name) {
             bail!("no host declares a package named `{name}`");
         }
     }
@@ -65,11 +60,11 @@ pub fn update(hosts: &[Host], old: &Lock, only: &[String], cx: &Cx) -> Result<Up
     if only.is_empty() {
         lock.zypper = crate::snapshot::update(hosts, &old.zypper, cx, &mut changes, &mut errors);
     }
-    for gone in old.pkg.iter().filter(|p| !decls.contains_key(&p.name)) {
+    for gone in old.pkg.iter().filter(|p| !decls.contains_key(&(p.name.clone(), p.source.clone()))) {
         changes.push(format!("- {} {}", gone.name, label(gone)));
     }
-    for (name, d) in &decls {
-        let before = old.pkg(name);
+    for ((name, source), d) in &decls {
+        let before = old.pkg(name, source);
         if !only.is_empty() && !only.contains(name) {
             if let Some(b) = before {
                 lock.upsert(b.clone());

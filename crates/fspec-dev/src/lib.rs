@@ -210,7 +210,7 @@ fn update_pypi(
     }
     let Some((python_pkg, uv_pkg)) = tools else { return Ok(()) };
     let python_version = lock
-        .pkg(&python_pkg.name)
+        .pkg(&python_pkg.name, &python_pkg.source.to_string())
         .and_then(|l| l.version.clone())
         .context("pkg python did not resolve, so pypi packages cannot be compiled")?;
     let local = &cx.local.0;
@@ -220,7 +220,7 @@ fn update_pypi(
         Ok(u.dir.join(rel))
     })?;
     for (name, p) in wanted {
-        let before = old.pkg(&name).filter(|l| l.source == p.source.to_string());
+        let before = old.pkg(&name, &p.source.to_string());
         if !only.is_empty() && !only.contains(&name) {
             if let Some(b) = before {
                 lock.upsert(b.clone());

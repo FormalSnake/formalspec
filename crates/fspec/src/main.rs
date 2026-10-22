@@ -494,8 +494,7 @@ fn main() -> Result<()> {
             }
             let lock = Lock::load(&spec_dir.join("fspec.lock"))?;
             let locked = lock
-                .pkg(&pkg.name)
-                .filter(|l| l.source == pkg.source.to_string())
+                .pkg(&pkg.name, &pkg.source.to_string())
                 .with_context(|| format!("pkg {} is not in fspec.lock, run fspec update", pkg.name))?;
             fspec_core::patches::check(&spec_dir, &pkg.patches, locked.patches.as_deref())?;
             let rev = locked.rev.as_deref().with_context(|| format!("pkg {} has no rev in fspec.lock", pkg.name))?;

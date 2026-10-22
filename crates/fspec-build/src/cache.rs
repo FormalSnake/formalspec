@@ -4,7 +4,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use fspec_core::lock::Lock;
-use fspec_core::resource::Host;
+use fspec_core::resource::{Host, Resource, Source};
 use fspec_core::runner::{Cmd, Runner};
 
 use crate::ci::jobs;
@@ -38,7 +38,8 @@ pub fn record(
 ) -> Result<(Vec<String>, Vec<String>)> {
     let (mut lines, mut errors) = (Vec::new(), Vec::new());
     for (name, platform) in jobs(hosts) {
-        let Some(rev) = lock.pkg(&name).and_then(|p| p.rev.clone()) else {
+        let source = git_source(hosts, &name);
+        let Some(rev) = lock.pkg(&name, &source).and_then(|p| p.rev.clone()) else {
             errors.push(format!("{name}: not in fspec.lock, run fspec update"));
             continue;
         };
@@ -49,7 +50,7 @@ pub fn record(
             .and_then(|o| digest(&o.stdout).with_context(|| format!("reading the descriptor of {tagged}")));
         match described {
             Ok(digest) => {
-                let locked = lock.pkg(&name).context("package vanished")?.clone();
+                let locked = lock.pkg(&name, &source).context("package vanished")?.clone();
                 let mut locked = locked;
                 locked.artifacts.entry(platform.clone()).or_default().oci = Some(format!("{repo}@{digest}"));
                 lock.upsert(locked);
@@ -72,3 +73,15 @@ fn digest(descriptor: &str) -> Result<String> {
 
 #[cfg(test)]
 mod tests;
+
+/// The source of the `git(...)` package `name`, as the lock keys it.
+fn git_source(hosts: &[Host], name: &str) -> String {
+    hosts
+        .iter()
+        .flat_map(|h| &h.resources)
+        .find_map(|r| match r {
+            Resource::Pkg(p) if p.name == name && matches!(p.source, Source::Git { .. }) => Some(p.source.to_string()),
+            _ => None,
+        })
+        .unwrap_or_default()
+}

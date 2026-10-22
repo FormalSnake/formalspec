@@ -294,7 +294,9 @@ stays installable after the distro moves on.
 
 `fspec update [pkg...]` resolves every package declared by any host (or only
 the named ones), keeps the other entries, drops entries no host declares and
-prints one line per change. A package gets an artifact for each platform its
+prints one line per change. Entries are keyed by name and source, so hosts can
+take one name from different sources (`brew` on the macbook, `github` on
+Linux) and each reads its own entry. A package gets an artifact for each platform its
 hosts declare. A distro source (`dnf`, `pacman`, `apt`, `xbps`) records the
 version plus the exact package file URL and hash per platform, found two ways.
 When the machine running `fspec update` is that distro on that arch, it asks its
