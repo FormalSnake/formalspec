@@ -74,9 +74,9 @@ impl Backend for SystemdBackend {
         let mut records = Records::new();
         for op in ops {
             if let Some(s) = distro(op.resource()) {
-                crate::distro_unit::commit(cx, Init::Systemd, journal, op, s)?;
+                let rec = crate::distro_unit::commit(cx, Init::Systemd, journal, op, s)?;
                 if !op.is_removal() {
-                    records.insert(op.key.clone(), Map::new());
+                    records.insert(op.key.clone(), rec);
                 }
                 continue;
             }

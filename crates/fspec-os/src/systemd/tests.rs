@@ -245,6 +245,33 @@ fn drift_reports_edited_and_missing_units() {
 }
 
 #[test]
+fn a_display_manager_boots_the_host_to_graphical_and_hands_the_old_default_back() {
+    let w = World::linux(Init::Systemd);
+    let backends: &[&dyn Backend] = &[&SystemdBackend];
+    w.runner.respond("systemctl get-default", Output { stdout: "multi-user.target\n".into(), ..Default::default() });
+    let greetd = resource(json!({"kind": "service", "name": "greetd", "display_manager": true}));
+    apply_scope(&w.cx(Scope::System), backends, &[desired(greetd.clone())]).unwrap();
+    assert_eq!(
+        w.runner.lines(),
+        ["systemctl enable greetd", "systemctl get-default", "systemctl set-default graphical.target"]
+    );
+    let state = State::load(&w.paths.system_state_dir().join("state.json")).unwrap();
+    assert_eq!(state.entries.values().next().unwrap().record["previous_default"], "multi-user.target");
+
+    w.runner.calls.lock().unwrap().clear();
+    w.runner.responses.lock().unwrap().clear();
+    w.runner.respond("systemctl get-default", Output { stdout: "graphical.target\n".into(), ..Default::default() });
+    apply_scope(&w.cx(Scope::System), backends, &[]).unwrap();
+    assert_eq!(
+        w.runner.lines(),
+        ["systemctl disable greetd", "systemctl get-default", "systemctl set-default multi-user.target"]
+    );
+
+    let user = resource(json!({"kind": "service", "name": "greetd", "display_manager": true, "user": true}));
+    assert!(SystemdBackend.check(&w.cx(Scope::User), &user).is_err());
+}
+
+#[test]
 fn a_service_without_exec_enables_the_distro_unit() {
     let w = World::linux(Init::Systemd);
     let backends: &[&dyn Backend] = &[&SystemdBackend];

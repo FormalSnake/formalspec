@@ -511,6 +511,10 @@ pub struct Service {
     /// systemd-only directives. `plan` fails on any other init when this is set.
     #[serde(default)]
     pub systemd: BTreeMap<String, Value>,
+    /// A distro unit that is the login screen: on systemd the host boots to graphical.target
+    /// while it is declared.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub display_manager: bool,
 }
 
 impl Service {

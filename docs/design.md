@@ -707,7 +707,11 @@ enables it at boot, without starting it, so the same apply works inside the chro
 package that ships it is missing), OpenRC runs `rc-update add gdm default` and dinit
 `dinitctl enable gdm`. Such a service takes no other field, s6 and launchd refuse
 it, and drift is the unit no longer being enabled. Removing it disables the unit
-and leaves the distro's files alone.
+and leaves the distro's files alone. On systemd it may set `user = True` to enable
+a user unit, and `display_manager = True` marks the login screen: the host then
+boots to `graphical.target` (a distro can default to `multi-user.target`, which
+never starts a display manager wanted by the graphical one), drift includes
+another default, and removal puts back the default it replaced.
 
 A timer's `schedule` is a five-field cron expression or one of `@hourly`,
 `@daily`, `@weekly` and `@monthly`. Timers become systemd timers, cron entries or launchd
