@@ -1434,7 +1434,10 @@ args in the file: it drops the ones it added last time and any option an arg
 sets to another value (`mitigations=off` replaces `mitigations=auto`), appends
 the current ones, and starts `fspec-esp-sync.service` so the entries carry
 them. The base options stay the switch's, and drift lists an arg that went
-missing. `/etc/fspec/esp-sync.sh` copies each installed kernel to
+missing. A spec that wrote the whole file with `file("/etc/kernel/cmdline", ...)`
+can switch to `kernel_args` in one apply: a removed `file` whose path another
+resource writes is handed over, dropped from the state and left on disk,
+because removals commit before the resource that now owns the path. `/etc/fspec/esp-sync.sh` copies each installed kernel to
 `<esp>/<name>/<kernel version>/linux` and its initrd to `initrd` beside it,
 and writes `<esp>/loader/entries/<name>-<kernel version>+3.conf`; a rewrite
 keeps the counter, and the kernels zypper removed go. While an entry still
@@ -1632,7 +1635,9 @@ Backends implement one trait: `handles` claims resources on a host (exactly
 one backend per resource, or `plan` lists it as unsupported and `apply`
 refuses), `drift` reports live divergence for unchanged resources, `prepare`
 fetches and renders into a staging directory, and `commit` makes changes live,
-journaling an undo step before each mutation. The engine commits removals in
+journaling an undo step before each mutation. A backend can name the live
+paths a resource writes (`writes`); a removed `file` at one of those paths is
+handed over instead of deleted. The engine commits removals in
 reverse phase order, then adds and updates in phase order (users, files, store,
 packages, services, defaults, system). A backend can then `settle` its adds
 and updates, in the same phase order, for work that needs what later phases

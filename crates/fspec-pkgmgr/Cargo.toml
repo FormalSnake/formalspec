@@ -14,4 +14,5 @@ sha2.workspace = true
 
 [dev-dependencies]
 fspec-eval.workspace = true
+fspec-files.workspace = true
 tempfile.workspace = true

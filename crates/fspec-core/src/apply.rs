@@ -184,6 +184,13 @@ pub trait Backend {
         Ok(vec![])
     }
 
+    /// Live paths `r` writes that a `file` could also have written. When a removed `file` names
+    /// one of them, the file is handed over: dropped from the state and left on disk, since the
+    /// removal runs before the resource that now owns the path commits.
+    fn writes(&self, _cx: &Cx, _r: &Resource) -> Vec<PathBuf> {
+        vec![]
+    }
+
     /// Fail the plan early when the host cannot apply this resource (a systemd-only field on runit).
     fn check(&self, _cx: &Cx, _r: &Resource) -> Result<()> {
         Ok(())
@@ -314,6 +321,18 @@ pub fn apply_scope(cx: &Cx, backends: &[&dyn Backend], desired: &[Desired]) -> R
         })
         .collect();
 
+    let mut claimed = Vec::new();
+    for d in wanted.values().filter(|d| d.resource.scope() == cx.scope) {
+        claimed.extend(backend_for(cx, backends, &d.resource)?.writes(cx, &d.resource));
+    }
+    let (handed, ops): (Vec<Op>, Vec<Op>) = ops.into_iter().partition(|op| match (&op.desired, op.resource()) {
+        (None, Resource::File(f)) => cx.resolve(&f.path).is_ok_and(|p| claimed.contains(&p)),
+        _ => false,
+    });
+    for op in &handed {
+        println!("{}: handed over to another resource; left in place", op.key);
+    }
+
     let mut by_backend: Vec<(&dyn Backend, Vec<Op>)> = Vec::new();
     for op in ops {
         let b = backend_for(cx, backends, op.resource())?;
@@ -346,6 +365,9 @@ pub fn apply_scope(cx: &Cx, backends: &[&dyn Backend], desired: &[Desired]) -> R
     };
 
     let mut next = State { generation: cx.generation, ..state.clone() };
+    for op in &handed {
+        next.entries.remove(&op.key);
+    }
     for (_, ops) in &by_backend {
         for op in ops {
             match &op.desired {

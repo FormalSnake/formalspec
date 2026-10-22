@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use fspec_core::apply::{Backend, Cx, Op, Phase, Records};
@@ -136,6 +136,13 @@ impl Backend for DistroBackend {
     /// Before `pkg` packages, which may come from the repos and need the snapshot in place.
     fn phase(&self) -> Phase {
         Phase::Distro
+    }
+
+    fn writes(&self, cx: &Cx, r: &Resource) -> Vec<PathBuf> {
+        match r {
+            Resource::Distro(d) if !d.kernel_args.is_empty() => vec![cx.paths.system(CMDLINE)],
+            _ => vec![],
+        }
     }
 
     fn check(&self, cx: &Cx, r: &Resource) -> Result<()> {

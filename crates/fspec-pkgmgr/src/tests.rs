@@ -1234,3 +1234,31 @@ fn kernel_args_replace_their_own_and_rewrite_the_boot_entries() {
     let plan = w.plan(Scope::System, &want).unwrap();
     assert!(plan.to_string().contains("not in /etc/kernel/cmdline: acpi_backlight=native"), "{plan}");
 }
+
+#[test]
+fn a_cmdline_file_handed_to_kernel_args_stays_on_disk() {
+    let w = tumbleweed();
+    let unit = w.paths.root.join("etc/systemd/system/fspec-esp-sync.service");
+    fs::create_dir_all(unit.parent().unwrap()).unwrap();
+    fs::write(&unit, "").unwrap();
+    let base = "root=UUID=u rootflags=subvol=@tumbleweed rw quiet";
+    let file = Desired {
+        resource: serde_json::from_value(
+            json!({"kind": "file", "path": "/etc/kernel/cmdline", "content": format!("{base}\n")}),
+        )
+        .unwrap(),
+        owner: None,
+    };
+    let backends: Vec<&dyn Backend> = ALL.iter().copied().chain([&fspec_files::FileBackend as &dyn Backend]).collect();
+    apply_scope(&w.cx(Scope::System), &backends, &[distro_res(TW, &[]), file]).unwrap();
+    disable_rolling(&w);
+
+    let want = [with_args(distro_res(TW, &[]), &["quiet", "mitigations=off"])];
+    apply_scope(&w.cx(Scope::System), &backends, &want).unwrap();
+    let cmdline = w.paths.root.join("etc/kernel/cmdline");
+    assert_eq!(
+        fs::read_to_string(&cmdline).unwrap(),
+        "root=UUID=u rootflags=subvol=@tumbleweed rw quiet mitigations=off\n"
+    );
+    assert!(!w.state(Scope::System).entries.keys().any(|k| k.kind == "file"));
+}
