@@ -1144,10 +1144,17 @@ fn a_bang_name_swaps_out_a_conflicting_package_and_puts_it_back_on_rollback() {
 }
 
 #[test]
-fn a_zypper_install_whose_scriptlet_failed_still_counts() {
+fn a_zypper_install_whose_scriptlet_failed_counts_and_reinstalls_that_package() {
     let w = tumbleweed();
     disable_rolling(&w);
-    w.answer("zypper --non-interactive install --auto-agree-with-licenses htop", 107, "");
-    w.apply(Scope::System, &[distro_res(TW, &["htop"])]).unwrap();
-    assert!(!w.take().iter().any(|l| l.contains("remove")));
+    let warning = "warning: %post(op-2.41.1-1.x86_64) scriptlet failed, exit status 127\n";
+    w.answer("zypper --non-interactive install --auto-agree-with-licenses htop op", 107, warning);
+    w.apply(Scope::System, &[distro_res(TW, &["htop", "op"])]).unwrap();
+    let lines = w.take();
+    assert!(
+        lines
+            .contains(&"zypper --non-interactive install --force --auto-agree-with-licenses op-2.41.1-1.x86_64".into()),
+        "{lines:#?}"
+    );
+    assert!(!lines.iter().any(|l| l.contains("remove")), "{lines:#?}");
 }

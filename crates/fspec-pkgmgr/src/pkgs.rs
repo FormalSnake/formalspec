@@ -123,17 +123,44 @@ fn cached_file(cx: &Cx, rec: &Map<String, Value>) -> Option<PathBuf> {
 }
 
 /// zypper exits 107 when the packages installed but one of their rpm scriptlets failed. The
-/// transaction is in, so that is a warning to read, not a failed apply.
+/// transaction is in, so the packages count as installed. A scriptlet usually fails because it
+/// ran before a package from the same transaction it needs but does not require (1password-cli's
+/// %post runs `groupadd` from shadow), so each such package is reinstalled once, with the whole
+/// transaction in place.
 const ZYPPER_SCRIPT_FAILED: i32 = 107;
 
 fn run_all(cx: &Cx, cmds: &[Cmd]) -> Result<()> {
     for c in cmds {
         let ok: &[i32] = if c.program == "zypper" { &[0, ZYPPER_SCRIPT_FAILED] } else { &[0] };
-        if cx.runner.check_ok(c, ok)?.status == ZYPPER_SCRIPT_FAILED {
+        let out = cx.runner.check_ok(c, ok)?;
+        if out.status != ZYPPER_SCRIPT_FAILED {
+            continue;
+        }
+        let failed = failed_scriptlets(&format!("{}\n{}", out.stdout, out.stderr));
+        if failed.is_empty() {
             eprintln!("fspec: `{c}` installed, but an rpm scriptlet failed; see /var/log/zypp/history");
+            continue;
+        }
+        let retry = crate::family::zypper(["install", "--force", "--auto-agree-with-licenses"]).args(&failed);
+        if cx.runner.check_ok(&retry, ok)?.status == ZYPPER_SCRIPT_FAILED {
+            eprintln!("fspec: the scriptlets of {} failed again; see /var/log/zypp/history", failed.join(" "));
         }
     }
     Ok(())
+}
+
+/// The packages rpm names in `warning: %post(1password-cli-2.41.1-1.x86_64) scriptlet failed`.
+fn failed_scriptlets(output: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for line in output.lines().filter(|l| l.contains("scriptlet failed")) {
+        let Some(nevra) = line.split_once('(').and_then(|(_, rest)| rest.split_once(')')).map(|(n, _)| n) else {
+            continue;
+        };
+        if !nevra.is_empty() && !out.iter().any(|n| n == nevra) {
+            out.push(nevra.to_string());
+        }
+    }
+    out
 }
 
 /// Records `cmds` so a rollback, which replays in reverse, runs them in the given order.
