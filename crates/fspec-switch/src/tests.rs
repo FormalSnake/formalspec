@@ -1422,7 +1422,16 @@ fn nixos_from_live() -> Machine {
 }
 
 fn tw(snapshot: &str) -> Tumbleweed<'_> {
-    Tumbleweed { name: "tumbleweed", snapshot, inherit: "@nixos", users: vec!["kyan".into()] }
+    Tumbleweed { name: "tumbleweed", snapshot, inherit: "@nixos", users: vec!["kyan".into()], kernel_args: &[] }
+}
+
+#[test]
+fn tumbleweed_kernel_args_follow_the_boot_options() {
+    let args = ["nvidia-drm.modeset=1".to_string(), "mitigations=off".to_string()];
+    let plan = tumbleweed(&paths(), &nixos_from_live(), &Tumbleweed { kernel_args: &args, ..tw("20261020") }).unwrap();
+    let lines = plan.lines();
+    let cmdline = lines.iter().find(|l| l.contains("/etc/kernel/cmdline root=")).unwrap();
+    assert!(cmdline.ends_with("rd.emergency=reboot nvidia-drm.modeset=1 mitigations=off"), "{cmdline}");
 }
 
 #[test]

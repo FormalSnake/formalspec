@@ -56,7 +56,7 @@ the store-wide build graph and hand-written hashes.
 | `system.defaults` | `defaults(...)`, `system = True` for /Library/Preferences |
 | `power.sleep`, `system.activationScripts` running pmset, systemsetup or socketfilterfw | `setting("pmset", "sleep", 0)` and friends |
 | agenix | `secret(...)` |
-| `boot.kernelPackages`, `boot.kernelParams`, NVIDIA module | `image(...)` with `kernel_args` |
+| `boot.kernelPackages`, `boot.kernelParams`, NVIDIA module | `image(...)` with `kernel_args`, or `tumbleweed(kernel_args = [...])` |
 | `services.flatpak` | `pkg(..., source = flatpak())` |
 | `nixos-rebuild switch --target-host` | `fspec apply --host` |
 | `nix.buildMachines`, `max-jobs = 0` | `host(builders = [builder("<host>", routes = [...])])` |

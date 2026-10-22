@@ -818,6 +818,10 @@ fn switch(paths: &Paths, spec_path: &Path, host: &Host, opts: &Switch, release: 
             snapshot,
             inherit: &inherit,
             users: host.users.iter().map(|u| u.name.clone()).collect(),
+            kernel_args: match &host.system {
+                Some(System::Distro(d)) => &d.kernel_args,
+                _ => &[],
+            },
         };
         run_plan(paths, runner.as_ref(), &fspec_switch::tumbleweed(paths, &m, &t)?)?;
         if live {

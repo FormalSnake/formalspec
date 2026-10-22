@@ -1428,8 +1428,13 @@ The initrd is dracut's generic one with the btrfs module, built in the
 container where host-only detection would see the wrong machine, from the
 options in `/etc/kernel/cmdline`: `root=UUID=<fs>
 rootflags=subvol=@<name>,noatime,compress=zstd:1 rw panic=10 rd.shell=0
-rd.emergency=reboot` and the `console=` options of the inherited root's
-entries. `/etc/fspec/esp-sync.sh` copies each installed kernel to
+rd.emergency=reboot`, the `console=` options of the inherited root's
+entries, then the host's `tumbleweed(kernel_args = [...])`. Apply keeps those
+args in the file: it drops the ones it added last time and any option an arg
+sets to another value (`mitigations=off` replaces `mitigations=auto`), appends
+the current ones, and starts `fspec-esp-sync.service` so the entries carry
+them. The base options stay the switch's, and drift lists an arg that went
+missing. `/etc/fspec/esp-sync.sh` copies each installed kernel to
 `<esp>/<name>/<kernel version>/linux` and its initrd to `initrd` beside it,
 and writes `<esp>/loader/entries/<name>-<kernel version>+3.conf`; a rewrite
 keeps the counter, and the kernels zypper removed go. While an entry still

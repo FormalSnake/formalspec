@@ -59,7 +59,8 @@ impl World {
     fn on(distro: &str, packages: &[&str]) -> World {
         let packages = packages.iter().map(ToString::to_string).collect();
         let tumbleweed = distro == TW;
-        let distro = Distro { distro: distro.into(), init: fspec_core::facts::Init::Systemd, packages };
+        let distro =
+            Distro { distro: distro.into(), init: fspec_core::facts::Init::Systemd, packages, kernel_args: vec![] };
         let mut w = World::new("x86_64-linux", Some(System::Distro(distro)));
         if tumbleweed {
             w.lock.zypper.insert("h".into(), LockedZypper { snapshot: "20261018".into() });
@@ -513,6 +514,7 @@ fn dnf_is_left_to_the_image_on_image_hosts() {
             distro: "arch".into(),
             init: fspec_core::facts::Init::Systemd,
             packages: vec![],
+            kernel_args: vec![],
         })),
     );
     assert!(!DnfBackend.handles(&arch.cx(Scope::System), &dnf("htop", &[], "pinned").resource));
@@ -786,7 +788,12 @@ fn distro_managers_claim_only_their_own_distro_and_never_image_hosts() {
 fn distro_res(distro: &str, packages: &[&str]) -> Desired {
     let packages: Vec<_> = packages.iter().map(ToString::to_string).collect();
     Desired {
-        resource: Resource::Distro(Distro { distro: distro.into(), init: fspec_core::facts::Init::Systemd, packages }),
+        resource: Resource::Distro(Distro {
+            distro: distro.into(),
+            init: fspec_core::facts::Init::Systemd,
+            packages,
+            kernel_args: vec![],
+        }),
         owner: None,
     }
 }
@@ -1182,4 +1189,48 @@ fn a_zypper_install_whose_scriptlet_failed_counts_and_reinstalls_that_package() 
         "{lines:#?}"
     );
     assert!(!lines.iter().any(|l| l.contains("remove")), "{lines:#?}");
+}
+
+fn with_args(mut d: Desired, args: &[&str]) -> Desired {
+    let Resource::Distro(distro) = &mut d.resource else { unreachable!() };
+    distro.kernel_args = args.iter().map(ToString::to_string).collect();
+    d
+}
+
+#[test]
+fn kernel_args_replace_their_own_and_rewrite_the_boot_entries() {
+    let w = tumbleweed();
+    let base = "root=UUID=u rootflags=subvol=@tumbleweed rw mitigations=auto";
+    let cmdline = w.paths.root.join("etc/kernel/cmdline");
+    fs::create_dir_all(cmdline.parent().unwrap()).unwrap();
+    fs::write(&cmdline, format!("{base}\n")).unwrap();
+    let want = [with_args(distro_res(TW, &[]), &["nvidia-drm.modeset=1", "mitigations=off"])];
+    let err = w.apply(Scope::System, &want).unwrap_err();
+    assert!(format!("{err:#}").contains("fspec switch --beside"), "{err:#}");
+
+    let unit = w.paths.root.join("etc/systemd/system/fspec-esp-sync.service");
+    fs::create_dir_all(unit.parent().unwrap()).unwrap();
+    fs::write(&unit, "").unwrap();
+    disable_rolling(&w);
+    w.take();
+    w.apply(Scope::System, &want).unwrap();
+    assert_eq!(
+        fs::read_to_string(&cmdline).unwrap(),
+        "root=UUID=u rootflags=subvol=@tumbleweed rw nvidia-drm.modeset=1 mitigations=off\n"
+    );
+    assert_eq!(w.take().iter().filter(|l| l.contains("fspec-esp-sync")).count(), 1);
+    disable_rolling(&w);
+    assert!(w.plan(Scope::System, &want).unwrap().changes.is_empty());
+
+    let want = [with_args(distro_res(TW, &[]), &["acpi_backlight=native"])];
+    w.apply(Scope::System, &want).unwrap();
+    assert_eq!(
+        fs::read_to_string(&cmdline).unwrap(),
+        "root=UUID=u rootflags=subvol=@tumbleweed rw acpi_backlight=native\n"
+    );
+
+    fs::write(&cmdline, "root=UUID=u rw\n").unwrap();
+    disable_rolling(&w);
+    let plan = w.plan(Scope::System, &want).unwrap();
+    assert!(plan.to_string().contains("not in /etc/kernel/cmdline: acpi_backlight=native"), "{plan}");
 }

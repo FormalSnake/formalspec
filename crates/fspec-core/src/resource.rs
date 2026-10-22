@@ -111,6 +111,10 @@ pub struct Distro {
     /// Base packages, named the way this distro names them.
     #[serde(default)]
     pub packages: Vec<String>,
+    /// Kernel options added to `/etc/kernel/cmdline`, which the boot entries of a root that
+    /// `fspec switch --beside` installed are written from (Tumbleweed only).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kernel_args: Vec<String>,
 }
 
 /// A third-party package repository on a zypper distro, e.g. 1Password's or Packman.

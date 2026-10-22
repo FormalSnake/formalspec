@@ -264,6 +264,8 @@ pub struct Tumbleweed<'a> {
     /// The subvolume whose identity the root keeps.
     pub inherit: &'a str,
     pub users: Vec<String>,
+    /// The host's `tumbleweed(kernel_args = ...)`, after the options the root needs to boot.
+    pub kernel_args: &'a [String],
 }
 
 /// Bootstrap openSUSE Tumbleweed into a new subvolume `@<name>` beside the other roots of the btrfs
@@ -350,6 +352,7 @@ pub fn tumbleweed(paths: &Paths, m: &Machine, t: &Tumbleweed) -> Result<Plan> {
     // A boot that fails in the initrd reboots instead of waiting at a shell, so the next try or the
     // next entry gets its turn.
     options.extend(["panic=10", "rd.shell=0", "rd.emergency=reboot"].map(String::from));
+    options.extend(t.kernel_args.iter().cloned());
     plan.run(Cmd::new("sh").args(["-c", CMDLINE, "sh", &esp_dir, from, &at("etc/kernel/cmdline")]).args(&options));
     write(
         &mut plan,

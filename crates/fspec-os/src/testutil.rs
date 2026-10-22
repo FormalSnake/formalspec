@@ -20,7 +20,7 @@ pub struct World {
 
 impl World {
     pub fn linux(init: fspec_core::facts::Init) -> World {
-        let system = System::Distro(Distro { distro: "fedora".into(), init, packages: vec![] });
+        let system = System::Distro(Distro { distro: "fedora".into(), init, packages: vec![], kernel_args: vec![] });
         World::new("x86_64-linux", Some(system))
     }
 

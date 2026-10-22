@@ -4,7 +4,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use fspec_core::apply::{Backend, Cx, Op, Phase, Records};
 use fspec_core::facts::Os;
-use fspec_core::journal::Journal;
+use fspec_core::journal::{Journal, Undo};
 use fspec_core::resource::{Distro, Repo, Resource};
 use fspec_core::runner::Cmd;
 use fspec_core::state::Entry;
@@ -43,6 +43,56 @@ fn snapshot_path(cx: &Cx) -> String {
 /// The record key for the Tumbleweed snapshot the last apply moved the repos to. `snapshot`
 /// already names the btrfs one.
 const REPO_SNAPSHOT: &str = "repo_snapshot";
+
+/// The record key for the kernel options the last apply added to `/etc/kernel/cmdline`.
+const KERNEL_ARGS: &str = "kernel_args";
+const CMDLINE: &str = "/etc/kernel/cmdline";
+/// Installed by `switch --beside`: it writes the boot entries on the ESP from `/etc/kernel/cmdline`.
+const ESP_SYNC_UNIT: &str = "/etc/systemd/system/fspec-esp-sync.service";
+
+fn recorded_args(rec: &serde_json::Map<String, Value>) -> Vec<String> {
+    rec.get(KERNEL_ARGS)
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
+        .unwrap_or_default()
+}
+
+/// `line` without the options the last apply added and without any option `want` sets to
+/// another value (`mitigations=auto` for `mitigations=off`), then `want`.
+fn merge_cmdline(line: &str, had: &[String], want: &[String]) -> String {
+    let key = |o: &str| o.split_once('=').map_or(o, |(k, _)| k).to_string();
+    let keys: Vec<String> = want.iter().map(|o| key(o)).collect();
+    let mut out: Vec<&str> =
+        line.split_whitespace().filter(|o| !had.iter().any(|h| h == o) && !keys.contains(&key(o))).collect();
+    out.extend(want.iter().map(String::as_str));
+    out.join(" ")
+}
+
+fn esp_sync() -> Cmd {
+    Cmd::new("systemctl").args(["start", "fspec-esp-sync.service"])
+}
+
+/// Rewrite `/etc/kernel/cmdline` with `want` in place of `had`, and the boot entries from it.
+fn set_kernel_args(cx: &Cx, journal: &mut Journal, had: &[String], want: &[String]) -> Result<()> {
+    if had.is_empty() && want.is_empty() {
+        return Ok(());
+    }
+    let path = cx.paths.system(CMDLINE);
+    if !cx.paths.system(ESP_SYNC_UNIT).exists() {
+        bail!("kernel_args need a root that `fspec switch --beside` installed; this one has no {ESP_SYNC_UNIT}");
+    }
+    let line = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let next = merge_cmdline(line.trim(), had, want);
+    if next == line.trim() {
+        return Ok(());
+    }
+    // Recorded first, so a rollback restores the file before it rewrites the entries.
+    journal.record(Undo::Run { cmd: esp_sync() })?;
+    journal.backup(&path)?;
+    fs::write(&path, format!("{next}\n")).with_context(|| format!("writing {}", path.display()))?;
+    cx.runner.check(&esp_sync())?;
+    Ok(())
+}
 
 fn repo(op: &Op) -> Option<&Repo> {
     match op.resource() {
@@ -98,6 +148,12 @@ impl Backend for DistroBackend {
             Resource::Distro(d) if fam != Family::Zypper && d.packages.iter().any(|n| n.starts_with('!')) => {
                 bail!("distro: `!name` packages are zypper syntax, {} is not a zypper distro", cx.facts.distro)
             }
+            Resource::Distro(d) if !d.kernel_args.is_empty() && d.distro != "opensuse-tumbleweed" => {
+                bail!("distro: kernel_args are for tumbleweed(), whose boot entries fspec writes")
+            }
+            Resource::Distro(d) if d.kernel_args.iter().any(|a| a.is_empty() || a.contains(char::is_whitespace)) => {
+                bail!("distro: each of kernel_args is one option without spaces")
+            }
             _ if fam == Family::Zypper => zypper::pin(cx).map(drop),
             _ => Ok(()),
         }
@@ -113,6 +169,14 @@ impl Backend for DistroBackend {
             notes.extend(zypper::snapshot_drift(cx, zypper::pin(cx)?));
         }
         notes.extend(drift_names(cx, fam, &recorded(entry), &entry.record)?);
+        let args = recorded_args(&entry.record);
+        if !args.is_empty() {
+            let line = fs::read_to_string(cx.paths.system(CMDLINE)).unwrap_or_default();
+            let missing: Vec<_> = args.iter().filter(|a| !line.split_whitespace().any(|o| o == *a)).cloned().collect();
+            if !missing.is_empty() {
+                notes.push(format!("not in {CMDLINE}: {}", missing.join(" ")));
+            }
+        }
         Ok(notes)
     }
 
@@ -178,7 +242,12 @@ impl Backend for DistroBackend {
             if !added.is_empty() {
                 install(cx, journal, fam, &added, None)?;
             }
+            let args = &distro(&d.resource)?.kernel_args;
+            set_kernel_args(cx, journal, &recorded_args(&rec), args)?;
             let mut next = record_names(cx, fam, want)?;
+            if !args.is_empty() {
+                next.insert(KERNEL_ARGS.into(), Value::from(args.clone()));
+            }
             let snap = snapshot_path(cx);
             if Path::new(&snap).exists() {
                 next.insert("snapshot".into(), Value::from(snap));

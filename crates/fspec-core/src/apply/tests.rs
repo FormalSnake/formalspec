@@ -81,6 +81,7 @@ impl World {
             distro: "fedora".into(),
             init: crate::facts::Init::Systemd,
             packages: vec![],
+            kernel_args: vec![],
         });
         let facts = Facts::declared("h", "x86_64-linux", Some(&system)).unwrap();
         World {
