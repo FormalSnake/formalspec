@@ -122,8 +122,18 @@ fn cached_file(cx: &Cx, rec: &Map<String, Value>) -> Option<PathBuf> {
     text(rec, "file").map(|f| cache_dir(cx).join(f)).filter(|p| p.exists())
 }
 
+/// zypper exits 107 when the packages installed but one of their rpm scriptlets failed. The
+/// transaction is in, so that is a warning to read, not a failed apply.
+const ZYPPER_SCRIPT_FAILED: i32 = 107;
+
 fn run_all(cx: &Cx, cmds: &[Cmd]) -> Result<()> {
-    cmds.iter().try_for_each(|c| cx.runner.check(c).map(drop))
+    for c in cmds {
+        let ok: &[i32] = if c.program == "zypper" { &[0, ZYPPER_SCRIPT_FAILED] } else { &[0] };
+        if cx.runner.check_ok(c, ok)?.status == ZYPPER_SCRIPT_FAILED {
+            eprintln!("fspec: `{c}` installed, but an rpm scriptlet failed; see /var/log/zypp/history");
+        }
+    }
+    Ok(())
 }
 
 /// Records `cmds` so a rollback, which replays in reverse, runs them in the given order.

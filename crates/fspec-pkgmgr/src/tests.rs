@@ -1142,3 +1142,12 @@ fn a_bang_name_swaps_out_a_conflicting_package_and_puts_it_back_on_rollback() {
     let err = World::on("arch", &[]).apply(Scope::System, &[distro_res("arch", &["!x"])]).unwrap_err();
     assert!(format!("{err:#}").contains("zypper syntax"), "{err:#}");
 }
+
+#[test]
+fn a_zypper_install_whose_scriptlet_failed_still_counts() {
+    let w = tumbleweed();
+    disable_rolling(&w);
+    w.answer("zypper --non-interactive install --auto-agree-with-licenses htop", 107, "");
+    w.apply(Scope::System, &[distro_res(TW, &["htop"])]).unwrap();
+    assert!(!w.take().iter().any(|l| l.contains("remove")));
+}

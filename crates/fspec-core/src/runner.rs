@@ -84,8 +84,13 @@ pub trait Runner: Sync {
     /// Run and fail on a non-zero exit, with stderr in the error, or the end of stdout for tools
     /// like moss that report errors there.
     fn check(&self, cmd: &Cmd) -> Result<Output> {
+        self.check_ok(cmd, &[0])
+    }
+
+    /// `check`, taking any of the `ok` exit codes as success.
+    fn check_ok(&self, cmd: &Cmd, ok: &[i32]) -> Result<Output> {
         let out = self.run(cmd)?;
-        if out.status != 0 {
+        if !ok.contains(&out.status) {
             let why = match out.stderr.trim() {
                 "" => {
                     let lines: Vec<&str> = out.stdout.trim().lines().collect();
