@@ -15,7 +15,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use fspec_core::apply::{Op, Records};
-use fspec_core::journal::{Journal, remove_any};
+use fspec_core::Scope;
+use fspec_core::facts::Init;
+use fspec_core::journal::{Journal, Undo, remove_any};
 use fspec_core::resource::{File, FileMode, Format, OnDrift, Resource, Secret};
 use fspec_core::runner::Cmd;
 use fspec_core::state::Entry;
@@ -104,6 +106,14 @@ impl Backend for FileBackend {
 
     fn commit(&self, cx: &Cx, ops: &[Op], staging: &Path, journal: &mut Journal) -> Result<Records> {
         let mut records = Records::new();
+        // A unit file written as a plain file (one an app's installer would write) is only seen
+        // by systemd after a reload. Undo replays backwards, so the reload recorded first runs
+        // after the files are restored.
+        let reload = (cx.facts.init == Init::Systemd && ops.iter().any(|op| is_unit_file(op.resource())))
+            .then(|| Cmd::new("systemctl").args((cx.scope == Scope::User).then_some("--user")).arg("daemon-reload"));
+        if let Some(cmd) = &reload {
+            journal.record(Undo::Run { cmd: cmd.clone() })?;
+        }
         for op in ops {
             let record = match op.resource() {
                 Resource::File(f) => commit_file(cx, op, f, staging, journal).with_context(|| f.path.clone())?,
@@ -114,8 +124,17 @@ impl Backend for FileBackend {
                 records.insert(op.key.clone(), record);
             }
         }
+        if let Some(cmd) = &reload {
+            // No manager answers inside a chroot or before the user's first login.
+            cx.runner.run(cmd)?;
+        }
         Ok(records)
     }
+}
+
+fn is_unit_file(r: &Resource) -> bool {
+    let Resource::File(f) = r else { return false };
+    ["/etc/systemd/system/", "/etc/systemd/user/", "~/.config/systemd/user/"].iter().any(|d| f.path.starts_with(d))
 }
 
 fn target_path(cx: &Cx, r: &Resource) -> Result<Option<PathBuf>> {

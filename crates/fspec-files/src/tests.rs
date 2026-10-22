@@ -715,3 +715,13 @@ fn protected_paths_fail_the_plan() {
     let ok = plan_scope(&cx, &[&FileBackend], &want([text("~/.config/ok", "x")]), &State::default()).unwrap();
     assert!(ok.unsupported.is_empty());
 }
+
+#[test]
+fn a_unit_file_written_as_a_file_reloads_systemd() {
+    let mut w = World::new();
+    w.facts.init = fspec_core::facts::Init::Systemd;
+    w.apply(&want([text("~/.config/notes.txt", "a")])).unwrap();
+    assert!(w.runner.lines().is_empty());
+    w.apply(&want([text("~/.config/notes.txt", "a"), text("~/.config/systemd/user/app.service", "[Unit]\n")])).unwrap();
+    assert_eq!(w.runner.lines(), ["systemctl --user daemon-reload"]);
+}
