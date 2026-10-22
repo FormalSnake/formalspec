@@ -439,7 +439,7 @@ fn expand<'v>(
     }
     if let Some(r) = Resource_::from_value(v) {
         match r.kind.as_str() {
-            "pkg" | "file" | "service" | "timer" | "user" | "secret" | "defaults" | "repo" => {}
+            "pkg" | "file" | "service" | "timer" | "user" | "secret" | "defaults" | "setting" | "repo" => {}
             "image" | "distro" => bail!("{what}: {}(...) goes in host(system = ...), not in modules", r.kind),
             kind => bail!("{what}: modules hold resources, got {kind}(...)"),
         }
@@ -593,6 +593,13 @@ fn builtins(builder: &mut GlobalsBuilder) {
         #[starlark(kwargs)] kwargs: Value<'v>,
     ) -> anyhow::Result<Resource_> {
         make::<Resource>("defaults", &["domain", "key", "value"], args, kwargs)
+    }
+
+    fn setting<'v>(
+        #[starlark(args)] args: UnpackTuple<Value<'v>>,
+        #[starlark(kwargs)] kwargs: Value<'v>,
+    ) -> anyhow::Result<Resource_> {
+        make::<Resource>("setting", &["tool", "key", "value"], args, kwargs)
     }
 
     fn image<'v>(

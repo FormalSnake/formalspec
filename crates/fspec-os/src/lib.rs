@@ -1,5 +1,5 @@
-//! Service managers, accounts and macOS defaults: the backends for `service`, `timer`, `user`
-//! and `defaults` resources. runit, OpenRC, dinit and s6 share `initsvc` and run timers as cron
+//! Service managers, accounts and macOS settings: the backends for `service`, `timer`, `user`,
+//! `defaults` and `setting` resources. runit, OpenRC, dinit and s6 share `initsvc` and run timers as cron
 //! entries through `crond`.
 
 mod cron;
@@ -12,6 +12,7 @@ mod launchd;
 mod openrc;
 mod runit;
 mod s6;
+mod setting;
 mod systemd;
 #[cfg(test)]
 mod testutil;
@@ -31,6 +32,7 @@ pub use launchd::LaunchdBackend;
 pub use openrc::OpenrcBackend;
 pub use runit::RunitBackend;
 pub use s6::S6Backend;
+pub use setting::SettingBackend;
 pub use systemd::SystemdBackend;
 pub use users::UsersBackend;
 

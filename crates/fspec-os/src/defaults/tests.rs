@@ -142,3 +142,20 @@ fn drift_compares_with_the_recorded_value() {
     let p = plan(&w2);
     assert!(matches!(&p.changes[0].action, Action::Drift { notes } if notes == &["key is missing"]));
 }
+
+#[test]
+fn a_system_key_is_written_to_library_preferences_as_root() {
+    let w = World::darwin();
+    let r = resource(json!({"kind": "defaults", "domain": "com.apple.SoftwareUpdate",
+        "key": "AutomaticallyInstallMacOSUpdates", "value": false, "system": true}));
+    assert_eq!(r.scope(), Scope::System);
+    assert_eq!(r.key().id, "/Library/Preferences/com.apple.SoftwareUpdate AutomaticallyInstallMacOSUpdates");
+    apply_scope(&w.cx(Scope::System), &[&DefaultsBackend], &[desired(r)]).unwrap();
+    assert_eq!(
+        w.runner.lines(),
+        [
+            "defaults export /Library/Preferences/com.apple.SoftwareUpdate -",
+            "defaults write /Library/Preferences/com.apple.SoftwareUpdate AutomaticallyInstallMacOSUpdates -bool false",
+        ]
+    );
+}

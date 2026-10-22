@@ -1,4 +1,4 @@
-//! macOS `defaults` keys.
+//! macOS `defaults` keys, in the user's domains or, with `system`, in /Library/Preferences.
 //!
 //! Scalars are written with their type flag (`-bool`, `-int`, `-float`, `-string`). Arrays and
 //! dicts use `-array` and `-dict` with every element given as an XML plist fragment, so element
@@ -45,7 +45,7 @@ impl Backend for DefaultsBackend {
 
     fn drift(&self, cx: &Cx, entry: &Entry) -> Result<Vec<String>> {
         let Resource::Defaults(d) = &entry.resource else { return Ok(vec![]) };
-        Ok(match read(cx.runner, &d.domain, &d.key)? {
+        Ok(match read(cx.runner, &d.target(), &d.key)? {
             Live::Unreadable => vec![],
             Live::Absent => vec!["key is missing".into()],
             Live::Value(v) if v != to_plist(&d.value)? => vec![format!("value is {}", brief(&v))],
@@ -58,7 +58,7 @@ impl Backend for DefaultsBackend {
         for op in ops {
             let Resource::Defaults(d) = op.resource() else { unreachable!("defaults claims defaults") };
             let want = to_plist(&d.value)?;
-            let live = read(cx.runner, &d.domain, &d.key)?;
+            let live = read(cx.runner, &d.target(), &d.key)?;
             if op.is_removal() {
                 match live {
                     Live::Value(v) if v == want => {
@@ -106,11 +106,11 @@ fn read(runner: &dyn Runner, domain: &str, key: &str) -> Result<Live> {
 }
 
 fn write(d: &Defaults, v: &Value) -> Result<Cmd> {
-    Ok(Cmd::new("defaults").args(["write", &d.domain, &d.key]).args(write_args(v)?))
+    Ok(Cmd::new("defaults").args(["write", &d.target(), &d.key]).args(write_args(v)?))
 }
 
 fn delete(d: &Defaults) -> Cmd {
-    Cmd::new("defaults").args(["delete", &d.domain, &d.key])
+    Cmd::new("defaults").args(["delete", &d.target(), &d.key])
 }
 
 fn to_plist(v: &serde_json::Value) -> Result<Value> {

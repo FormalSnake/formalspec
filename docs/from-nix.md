@@ -51,8 +51,9 @@ the store-wide build graph and hand-written hashes.
 | a JSON file you rewrite with `jq` on activation | `file(..., mode = "patch")` |
 | `overrideAttrs` with `patches` | `pkg(..., patches = [...], build_flags = [...])` |
 | `systemd.services`, `systemd.user.services`, `launchd.agents` | `service(...)` |
-| `homebrew.brews`, `homebrew.casks` | `pkg(..., source = brew(...))` |
-| `system.defaults` | `defaults(...)` |
+| `homebrew.brews`, `homebrew.casks`, `homebrew.taps` | `pkg(..., source = brew(..., tap = "owner/repo"))` |
+| `system.defaults` | `defaults(...)`, `system = True` for /Library/Preferences |
+| `power.sleep`, `system.activationScripts` running pmset, systemsetup or socketfilterfw | `setting("pmset", "sleep", 0)` and friends |
 | agenix | `secret(...)` |
 | `boot.kernelPackages`, `boot.kernelParams`, NVIDIA module | `image(...)` with `kernel_args` |
 | `services.flatpak` | `pkg(..., source = flatpak())` |

@@ -140,6 +140,7 @@ pub enum Resource {
     User(User),
     Secret(Secret),
     Defaults(Defaults),
+    Setting(Setting),
     Image(Image),
     Distro(Distro),
     Repo(Repo),
@@ -163,6 +164,7 @@ impl Resource {
             Resource::User(_) => "user",
             Resource::Secret(_) => "secret",
             Resource::Defaults(_) => "defaults",
+            Resource::Setting(_) => "setting",
             Resource::Image(_) => "image",
             Resource::Distro(_) => "distro",
             Resource::Repo(_) => "repo",
@@ -178,7 +180,8 @@ impl Resource {
             Resource::Timer(t) => t.name.clone(),
             Resource::User(u) => u.name.clone(),
             Resource::Secret(s) => s.path.clone(),
-            Resource::Defaults(d) => format!("{} {}", d.domain, d.key),
+            Resource::Defaults(d) => format!("{} {}", d.target(), d.key),
+            Resource::Setting(s) => format!("{} {}", s.tool.name(), s.key),
             Resource::Repo(r) => r.name.clone(),
             Resource::Image(_) | Resource::Distro(_) => "system".into(),
         };
@@ -192,7 +195,13 @@ impl Resource {
             Resource::Secret(s) => home(&s.path),
             Resource::Service(s) if s.user => Scope::User,
             Resource::Timer(t) if t.user => Scope::User,
-            Resource::Defaults(_) => Scope::User,
+            Resource::Defaults(d) => {
+                if d.system {
+                    Scope::System
+                } else {
+                    Scope::User
+                }
+            }
             // Homebrew refuses to run as root.
             Resource::Pkg(Pkg { source: Source::Brew { .. }, .. }) => Scope::User,
             _ => Scope::System,
@@ -622,6 +631,44 @@ pub struct Defaults {
     pub domain: String,
     pub key: String,
     pub value: Value,
+    /// The machine-wide domain in /Library/Preferences, written as root.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub system: bool,
+}
+
+impl Defaults {
+    /// The domain as the `defaults` command takes it.
+    pub fn target(&self) -> String {
+        if self.system { format!("/Library/Preferences/{}", self.domain) } else { self.domain.clone() }
+    }
+}
+
+/// A macOS system setting that has a command and no defaults domain: `pmset -a <key>`,
+/// `systemsetup -set<key>`, or the application firewall's `socketfilterfw --set<key>`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Setting {
+    pub tool: SettingTool,
+    pub key: String,
+    pub value: Value,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SettingTool {
+    Pmset,
+    Systemsetup,
+    Firewall,
+}
+
+impl SettingTool {
+    pub fn name(self) -> &'static str {
+        match self {
+            SettingTool::Pmset => "pmset",
+            SettingTool::Systemsetup => "systemsetup",
+            SettingTool::Firewall => "firewall",
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]

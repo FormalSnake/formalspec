@@ -108,6 +108,7 @@ fn detail(r: &Resource) -> String {
         Resource::User(u) => u.uid.map(|uid| format!("uid {uid}")).unwrap_or_default(),
         Resource::Secret(s) => s.src.clone(),
         Resource::Defaults(d) => d.value.to_string(),
+        Resource::Setting(s) => s.value.to_string(),
         Resource::Image(i) => i.base.clone(),
         Resource::Distro(d) => d.distro.clone(),
         Resource::Repo(r) => r.url.clone(),

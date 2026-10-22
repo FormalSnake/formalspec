@@ -70,7 +70,8 @@ A config evaluates to a list of resources:
 | `service` | A system or user service, rendered for the host's init |
 | `user` | Account, UID, shell, groups |
 | `secret` | An age-encrypted file decrypted at apply |
-| `defaults` | A macOS `defaults` key |
+| `defaults` | A macOS `defaults` key, `system = True` for /Library/Preferences |
+| `setting` | A macOS system setting behind `pmset`, `systemsetup` or the firewall |
 | `image` | A bootc base image for the system layer |
 | `timer` | A scheduled job (systemd timer, cron, launchd) |
 
@@ -867,7 +868,19 @@ one apply converges. On macOS it only sets the login shell
 and checks the account and uid; it never creates accounts. Removing a `user`
 stops managing it and leaves the account. `defaults` journals the previous value
 of each key so a failed apply restores it, and removal deletes a key only while
-it still holds the value fspec wrote.
+it still holds the value fspec wrote. `defaults(..., system = True)` writes the
+machine-wide domain in /Library/Preferences as root, in the system scope.
+
+`setting(tool, key, value)` covers the macOS settings that have a command and
+no defaults domain: `setting("pmset", "sleep", 0)` runs `pmset -a sleep 0` and
+checks every power source in `pmset -g custom`, `setting("systemsetup",
+"restartfreeze", True)` runs `systemsetup -setrestartfreeze on`, and
+`setting("firewall", "globalstate", False)` runs `socketfilterfw
+--setglobalstate off`. pmset takes a number, the others a bool. A failed apply
+restores the previous value (per power source for pmset). Removing a `setting`
+stops managing it and leaves the value, because turning one back has no safe
+default: remote login off cuts ssh. `systemsetup -setremotelogin` needs Full
+Disk Access for the terminal fspec runs in.
 
 ## System layer
 
@@ -998,7 +1011,7 @@ commit in later phases. A user's group that does not exist yet waits the same
 way. A fingerprint mismatch still stops the apply.
 
 macOS has no equivalent of either; the system layer there is `defaults`,
-launchd and Homebrew.
+`setting`, launchd and Homebrew.
 
 ### Secure Boot and signed kernels
 
@@ -1578,7 +1591,7 @@ A cargo workspace under `crates/`:
 | `fspec-image` | Containerfile and workflow generation, ghcr digest resolution, the bootc `image` backend |
 | `fspec-sources` | Resolvers (aqua, github, npm, cargo, flatpak, brew, git, nix, dnf, pacman, apt, xbps) and `fspec update` |
 | `fspec-pkgmgr` | Flatpak, Homebrew and the distro package backends (dnf, pacman, apt, xbps), and the base packages of a classic distro |
-| `fspec-os` | Services and timers per init (systemd, launchd, runit, OpenRC, dinit, s6, cron), users, macOS `defaults` |
+| `fspec-os` | Services and timers per init (systemd, launchd, runit, OpenRC, dinit, s6, cron), users, macOS `defaults` and `setting` |
 | `fspec-remote` | Remote hosts: ssh and tar command lines, the spec shipment, the probe check, `--all` ordering |
 | `fspec-switch` | `fspec switch` and `forget`: btrfs and bootloader detection, the boot owner record, the command plans per distro and for `--adopt-boot`, the `--reset-var` staging |
 | `fspec-build` | Source builds: recipe detection, the `.tar.zst` packer, builders over ssh with the local fallback, the `ci packages` workflow, `update --cache` |
