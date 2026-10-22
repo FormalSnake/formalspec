@@ -23,14 +23,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: oras-project/setup-oras@v1
-      - name: Install build dependencies
-        if: matrix.deps
-        run: |
-          if [ "$RUNNER_OS" = macOS ]; then
-            brew install ${{ matrix.deps }}
-          else
-            sudo apt-get update -q && sudo apt-get install -yq ${{ matrix.deps }}
-          fi
       - name: Install fspec
         run: cargo install --locked --git {{repo}} fspec
       - name: Build

@@ -21,27 +21,19 @@ jobs:
           - { pkg: clipssh, platform: x86_64-linux, runner: ubuntu-24.04 }
           - { pkg: fast, platform: x86_64-linux, runner: ubuntu-24.04 }
           - { pkg: fetch, platform: x86_64-linux, runner: ubuntu-24.04 }
-          - { pkg: formalmusic, platform: x86_64-linux, runner: ubuntu-24.04, deps: "libfontconfig-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-dev libx11-xcb-dev libasound2-dev libdbus-1-dev libssl-dev" }
+          - { pkg: formalmusic, platform: x86_64-linux, runner: ubuntu-24.04 }
           - { pkg: gopls, platform: x86_64-linux, runner: ubuntu-24.04 }
-          - { pkg: kopuzd, platform: x86_64-linux, runner: ubuntu-24.04, deps: "libasound2-dev libdbus-1-dev libssl-dev" }
-          - { pkg: librepods, platform: x86_64-linux, runner: ubuntu-24.04, deps: "qt6-base-dev qt6-declarative-dev qt6-connectivity-dev qt6-tools-dev qt6-tools-dev-tools qt6-l10n-tools libssl-dev libpulse-dev" }
+          - { pkg: kopuzd, platform: x86_64-linux, runner: ubuntu-24.04 }
+          - { pkg: librepods, platform: x86_64-linux, runner: ubuntu-24.04 }
           - { pkg: lumen, platform: x86_64-linux, runner: ubuntu-24.04 }
           - { pkg: meshtop, platform: x86_64-linux, runner: ubuntu-24.04 }
-          - { pkg: messages, platform: x86_64-linux, runner: ubuntu-24.04, deps: "libfontconfig-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-dev libx11-xcb-dev libasound2-dev libdbus-1-dev libssl-dev" }
-          - { pkg: nil, platform: x86_64-linux, runner: ubuntu-24.04, deps: "nix-bin" }
+          - { pkg: messages, platform: x86_64-linux, runner: ubuntu-24.04 }
+          - { pkg: nil, platform: x86_64-linux, runner: ubuntu-24.04 }
           - { pkg: wl-clip-persist, platform: x86_64-linux, runner: ubuntu-24.04 }
           - { pkg: wl-gammarelay-rs, platform: x86_64-linux, runner: ubuntu-24.04 }
     steps:
       - uses: actions/checkout@v4
       - uses: oras-project/setup-oras@v1
-      - name: Install build dependencies
-        if: matrix.deps
-        run: |
-          if [ "$RUNNER_OS" = macOS ]; then
-            brew install ${{ matrix.deps }}
-          else
-            sudo apt-get update -q && sudo apt-get install -yq ${{ matrix.deps }}
-          fi
       - name: Install fspec
         run: cargo install --locked --git https://github.com/FormalStudio/formalspec fspec
       - name: Build

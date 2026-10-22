@@ -493,11 +493,7 @@ fn main() -> Result<()> {
             let rel = spec_path
                 .strip_prefix(&top)
                 .with_context(|| format!("{} is outside its repo {}", spec_path.display(), top.display()))?;
-            let text = fspec_build::ci::workflow(
-                &fspec_build::ci::jobs(&spec.hosts),
-                &rel.to_string_lossy(),
-                &fspec_build::ci::build_deps(&spec.hosts),
-            )?;
+            let text = fspec_build::ci::workflow(&fspec_build::ci::jobs(&spec.hosts), &rel.to_string_lossy())?;
             let path = top.join(fspec_build::ci::PATH);
             std::fs::create_dir_all(path.parent().context("workflow has a parent")?)?;
             std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;

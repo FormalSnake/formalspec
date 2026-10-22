@@ -223,10 +223,6 @@ pub struct Pkg {
     pub patches: Vec<String>,
     #[serde(default)]
     pub build_flags: Vec<String>,
-    /// What the CI runner installs before building a `git(...)` package: apt package names on
-    /// the Ubuntu runners, Homebrew formulae on macOS.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub build_deps: Vec<String>,
     /// Replaces recipe detection for a `git(...)` package: a command that installs into
     /// `$FSPEC_OUT`, run with `$FSPEC_SRC` set to the patched checkout.
     #[serde(default)]
