@@ -58,6 +58,13 @@ the store-wide build graph and hand-written hashes.
 | `services.flatpak` | `pkg(..., source = flatpak())` |
 | `nixos-rebuild switch --target-host` | `fspec apply --host` |
 | `nix-collect-garbage --delete-older-than` | `fspec gc --older-than` |
+| `programs.neovim.plugins` | `vim.pack.add` in `init.lua`, with `nvim-pack-lock.json` as a `managed` file next to it |
+| `nvim-treesitter.withAllGrammars` | nvim-treesitter's own `install()`, which compiles parsers with `tree-sitter-cli` |
+| `launchd.daemons`, `launchd.user.agents` with `StartCalendarInterval` | `timer(...)` |
+| a login item (`open -g -j -a App.app` at load) | `service(..., user = True)` with the default `restart = "no"` |
+| `users.users.<u>.openssh.authorizedKeys` | a `file(...)` in `/etc/ssh/authorized_keys.d/<u>` named by `AuthorizedKeysFile`; fspec writes real files, so nix-darwin's `AuthorizedKeysCommand /bin/cat` is not needed |
+| `security.sudo.extraConfig` | `file("/etc/sudoers.d/...", perms = "0440")` |
+| `fonts.packages` with vendored files | `file("/Library/Fonts/<font>", src = ...)` on macOS |
 
 ### A three-host example
 
