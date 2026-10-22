@@ -80,6 +80,7 @@ the store-wide build graph and hand-written hashes.
 | `${pkg}/lib/...` named by absolute path (a PAM or Lua module) | `/opt/fspec/current/pkgs/<name>/lib/...` |
 | `power.sleep.computer`, `power.restartAfterFreeze`, `networking.applicationFirewall`, `pmset`/`systemsetup` in activation scripts | `setting("pmset" \| "systemsetup" \| "firewall", key, value)` |
 | `system.defaults` for a root domain, or `defaults write /Library/Preferences/...` in activation | `defaults(..., system = True)` |
+| `$out/Applications/Foo.app` with mac-app-util or `copyApps` | `pkg(..., apps = ["Foo.app"])`, from a release `.dmg` asset where upstream ships one |
 
 ### A three-host example
 
