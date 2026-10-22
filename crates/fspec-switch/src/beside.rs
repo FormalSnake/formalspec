@@ -236,8 +236,9 @@ pub(crate) const WATCHDOG: &str = "[Manager]
 RuntimeWatchdogSec=60s
 ";
 
-/// Gives the new root the identity of the root at `$1`: its ssh host keys, NetworkManager
-/// connections and tailscale state, and the users named after `$6` with their uid, gid, gecos,
+/// Gives the new root the identity of the root at `$1`: its hostname, ssh host keys,
+/// NetworkManager connections and tailscale state, the sudo rules of its wheel group (so the first
+/// `fspec apply` runs as it did there), and the users named after `$6` with their uid, gid, gecos,
 /// home and password hash, their shell found again in the new root, and their memberships of the
 /// groups the new root has. `$2` is the new root's `/usr` parent, `$3` and `$4` its `/etc` and
 /// `/var`, `$5` an fstab line for the shared home or empty. Nothing it copies is printed.
@@ -263,6 +264,32 @@ if [ -d "$src/var/lib/tailscale" ]; then
 	rm -rf "$var/lib/tailscale"
 	cp -a "$src/var/lib/tailscale" "$var/lib/"
 	chmod 700 "$var/lib/tailscale"
+fi
+# The path $2 inside the root $1, with its symlinks resolved against $1 rather than /: NixOS
+# links /etc/hostname to /etc/static, itself a link into /nix/store.
+inside() {
+	r=$1 p=${2#/} out= n=0
+	while [ -n "$p" ]; do
+		c=${p%%/*}
+		case $p in */*) p=${p#*/} ;; *) p= ;; esac
+		case $c in '' | .) continue ;; ..) out=${out%/*}; continue ;; esac
+		if [ -L "$r$out/$c" ] && [ "$n" -lt 40 ]; then
+			n=$((n + 1)) t=$(readlink "$r$out/$c")
+			case $t in /*) out= ;; esac
+			p=${t#/}${p:+/$p}
+		else
+			out=$out/$c
+		fi
+	done
+	printf '%s%s\n' "$r" "$out"
+}
+f=$(inside "$src" /etc/hostname)
+if [ -s "$f" ]; then cat "$f" >"$etc/hostname"; chmod 644 "$etc/hostname"; fi
+f=$(inside "$src" /etc/sudoers)
+if [ -f "$f" ] && grep -q '^[[:space:]]*%wheel[[:space:]]' "$f"; then
+	mkdir -p "$etc/sudoers.d"
+	grep '^[[:space:]]*%wheel[[:space:]]' "$f" >"$etc/sudoers.d/50-fspec-inherit"
+	chmod 440 "$etc/sudoers.d/50-fspec-inherit"
 fi
 if [ -n "$home" ]; then
 	touch "$etc/fstab"

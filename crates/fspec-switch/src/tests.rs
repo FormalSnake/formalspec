@@ -1206,6 +1206,14 @@ fn inherit_copies_the_identity_without_printing_it() {
     w("src/etc/ssh/ssh_host_ed25519_key.pub", "PUBLIC");
     w("src/etc/NetworkManager/system-connections/home.nmconnection", "[wifi]");
     w("src/var/lib/tailscale/tailscaled.state", "node");
+    w("src/nix/store/x-etc/etc/hostname", "e1504g\n");
+    w(
+        "src/nix/store/x-etc/etc/sudoers",
+        "root ALL=(ALL:ALL) SETENV: ALL\n%wheel  ALL=(ALL:ALL)    NOPASSWD:SETENV: ALL\n",
+    );
+    std::os::unix::fs::symlink("/nix/store/x-etc/etc", dir.path().join("src/etc/static")).unwrap();
+    std::os::unix::fs::symlink("/etc/static/hostname", dir.path().join("src/etc/hostname")).unwrap();
+    std::os::unix::fs::symlink("static/sudoers", dir.path().join("src/etc/sudoers")).unwrap();
     w(
         "src/etc/passwd",
         "root:x:0:0::/root:/run/current-system/sw/bin/bash\nkyan:x:1000:100:Kyan:/home/kyan:/run/current-system/sw/bin/fish\n",
@@ -1254,6 +1262,9 @@ fn inherit_copies_the_identity_without_printing_it() {
     assert_eq!(read("etc/group"), "wheel:x:10:kyan\nvideo:x:39:kyan\n");
     assert_eq!(read("etc/gshadow"), "wheel:!::kyan\nvideo:!::kyan\n");
     assert_eq!(read("etc/fstab"), format!("UUID=x / btrfs ro 0 0\n{home}\n"));
+    assert_eq!(read("etc/hostname"), "e1504g\n");
+    assert_eq!(read("etc/sudoers.d/50-fspec-inherit"), "%wheel  ALL=(ALL:ALL)    NOPASSWD:SETENV: ALL\n");
+    assert_eq!(mode(&format!("{deploy}/etc/sudoers.d/50-fspec-inherit")), 0o440);
 }
 
 #[test]
