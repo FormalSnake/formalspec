@@ -87,6 +87,7 @@ fn file(path: &str) -> File {
     File {
         path: path.into(),
         src: None,
+        target: None,
         content: None,
         format: None,
         mode: FileMode::Managed,
@@ -233,6 +234,46 @@ fn link_points_into_the_repo_and_copies_back_a_replaced_symlink() {
     w.apply(&[]).unwrap();
     assert!(fs::symlink_metadata(w.at(".rc")).is_err());
     assert!(w.spec.join("files/rc").exists());
+}
+
+#[test]
+fn a_link_can_point_outside_the_repo_at_a_directory_that_is_not_there_yet() {
+    let w = World::new();
+    let drive = w.spec.join("../Volumes/Kyan Drive/gradle");
+    let f = File { mode: FileMode::Link, target: Some(drive.display().to_string()), ..file("~/.gradle") };
+    w.apply(&want([f.clone()])).unwrap();
+    assert_eq!(fs::read_link(w.at(".gradle")).unwrap(), drive);
+    assert!(w.plan(&want([f.clone()])).changes.is_empty(), "a dangling target is not drift");
+
+    // The app wrote a file where the link was: nothing is copied into the target.
+    fs::remove_file(w.at(".gradle")).unwrap();
+    fs::write(w.at(".gradle"), "app").unwrap();
+    w.apply(&want([f.clone()])).unwrap();
+    assert!(!drive.exists());
+    assert_eq!(fs::read_link(w.at(".gradle")).unwrap(), drive);
+
+    let home =
+        File { mode: FileMode::Link, target: Some("~/.claude/plugins".into()), ..file("~/.claude-pulse/plugins") };
+    w.apply(&want([home])).unwrap();
+    assert_eq!(fs::read_link(w.at(".claude-pulse/plugins")).unwrap(), w.at(".claude/plugins"));
+
+    for bad in [
+        File { mode: FileMode::Link, target: Some("relative/x".into()), ..file("~/a") },
+        File { mode: FileMode::Link, target: Some("/x".into()), src: Some("files/x".into()), ..file("~/a") },
+    ] {
+        assert!(w.apply(&want([bad.clone()])).is_err(), "{bad:?}");
+    }
+}
+
+#[test]
+fn a_link_into_the_repo_can_be_a_directory() {
+    let w = World::new();
+    fs::create_dir_all(w.spec.join("files/nvim")).unwrap();
+    w.write_src("files/nvim/init.lua", "x");
+    let f = File { mode: FileMode::Link, src: Some("files/nvim".into()), ..file("~/.config/nvim") };
+    w.apply(&want([f.clone()])).unwrap();
+    assert_eq!(w.read(".config/nvim/init.lua"), "x");
+    assert!(w.plan(&want([f])).changes.is_empty());
 }
 
 #[test]

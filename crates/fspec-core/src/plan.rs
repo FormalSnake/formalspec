@@ -178,6 +178,7 @@ mod tests {
         Resource::File(File {
             path: path.into(),
             src: Some("files/x".into()),
+            target: None,
             content: None,
             format: None,
             mode,

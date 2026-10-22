@@ -86,7 +86,7 @@ impl Backend for FileBackend {
                 Resource::File(f) => match f.mode {
                     FileMode::Managed | FileMode::Seed => stage(&staged, &render_bytes(cx, f)?)?,
                     FileMode::Link => {
-                        require_src(cx, f.src.as_deref().unwrap_or_default()).with_context(|| f.path.clone())?
+                        link_target(cx, f).with_context(|| f.path.clone())?;
                     }
                     FileMode::Patch => {
                         patch_result(cx, op, f).with_context(|| f.path.clone())?;
@@ -160,6 +160,25 @@ fn require_src(cx: &Cx, src: &str) -> Result<()> {
     Ok(())
 }
 
+/// A link points into the repo (`src`, a file or a directory) or outside it (`target`).
+fn link_target(cx: &Cx, f: &File) -> Result<PathBuf> {
+    match (&f.src, &f.target) {
+        (Some(src), None) => {
+            let path = cx.spec_dir.join(src);
+            if !path.exists() {
+                bail!("src {} does not exist", path.display());
+            }
+            Ok(std::path::absolute(path)?)
+        }
+        (None, Some(t)) => match t.strip_prefix("~/") {
+            Some(rest) => Ok(cx.paths.home.join(rest)),
+            None if t.starts_with('/') => Ok(PathBuf::from(t)),
+            None => bail!("target {t} must be absolute or start with ~/"),
+        },
+        _ => bail!("a link takes exactly one of src and target"),
+    }
+}
+
 fn check_file(cx: &Cx, f: &File) -> Result<()> {
     if let Some(p) = &f.perms {
         parse_perms(p)?;
@@ -179,9 +198,9 @@ fn check_file(cx: &Cx, f: &File) -> Result<()> {
         }
         FileMode::Link => {
             if f.content.is_some() {
-                bail!("a link takes src, not content");
+                bail!("a link takes src or target, not content");
             }
-            require_src(cx, f.src.as_deref().context("a link needs src")?)
+            link_target(cx, f).map(drop)
         }
         FileMode::Patch => {
             if f.src.is_some() || f.content.is_some() {
@@ -339,10 +358,12 @@ fn file_mode(cx: &Cx, f: &File) -> Result<Option<u32>> {
 }
 
 fn commit_link(cx: &Cx, op: &Op, f: &File, path: &Path, journal: &mut Journal) -> Result<Map<String, Value>> {
-    let src = f.src.as_deref().context("a link needs src")?;
-    let target = std::path::absolute(cx.spec_dir.join(src))?;
+    let target = link_target(cx, f)?;
     let old = op.record();
-    if let (Some(prev), Live::File(_)) = (live::recorded(&old, "target"), read_live(path)?) {
+    let into_repo = f.src.is_some() && live::recorded(&old, "src").is_some();
+    if let (true, Some(prev), Live::File(_)) = (into_repo, live::recorded(&old, "target"), read_live(path)?)
+        && Path::new(prev).is_file()
+    {
         // The app replaced our symlink with a file; its content belongs in the repo.
         let prev = Path::new(prev);
         journal.backup(prev)?;
@@ -362,7 +383,9 @@ fn commit_link(cx: &Cx, op: &Op, f: &File, path: &Path, journal: &mut Journal) -
     }
     let mut rec = Map::new();
     rec.insert("target".into(), target.to_string_lossy().into_owned().into());
-    rec.insert("src".into(), src.into());
+    if let Some(src) = &f.src {
+        rec.insert("src".into(), src.as_str().into());
+    }
     Ok(rec)
 }
 

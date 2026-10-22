@@ -35,7 +35,9 @@ pub fn adopt(cx: &Cx, f: &File, record: &Map<String, Value>) -> Result<Outcome> 
             let notes = live::drift_notes(&fspec_core::Resource::File(f.clone()), record, &live);
             Ok(if notes.is_empty() { Outcome::InSync } else { Outcome::Patch { notes } })
         }
-        FileMode::Link => match (live, live::recorded(record, "target")) {
+        // Only a link into the repo has a copy there to adopt into; a target outside it is not
+        // fspec's to overwrite.
+        FileMode::Link => match (live, live::recorded(record, "target").filter(|_| f.src.is_some())) {
             (Live::File(bytes), Some(target)) => {
                 fs::write(target, bytes).with_context(|| format!("writing {target}"))?;
                 Ok(Outcome::Copied { to: target.into(), record: record.clone() })

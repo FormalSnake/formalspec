@@ -676,6 +676,19 @@ Configs are generated from Starlark data and serialized to the target format
 Copies are the default, not symlinks: a copy survives apps that rename, chmod
 or lock their config, and the hash in state detects drift just as well.
 
+A `link` takes `src`, a file or a directory in the repo, or `target`, a path
+outside it (absolute or `~/…`):
+
+```python
+file("~/.gradle", mode = "link", target = "/Volumes/Kyan Drive/gradle")
+file("~/.claude-pulse/plugins", mode = "link", target = "~/.claude/plugins")
+```
+
+A `target` may be a directory and may not exist yet, like a folder on an
+external drive that is not mounted; the link dangles until it is. FormalSpec
+owns only the link: when an app replaces it with a file, the link comes back
+and nothing is copied into the target, and `fspec adopt` leaves it alone.
+
 ### Three-way merge for `patch`
 
 ```python

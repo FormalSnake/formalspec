@@ -52,6 +52,7 @@ fn file(path: &str, content: &str) -> Desired {
     let resource = Resource::File(File {
         path: path.into(),
         src: None,
+        target: None,
         content: Some(content.into()),
         format: None,
         mode: FileMode::Managed,

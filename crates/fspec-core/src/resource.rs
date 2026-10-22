@@ -448,9 +448,13 @@ fn one_or_many<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error>
 pub struct File {
     /// Absolute, or starting with `~/` for a path in the user's home.
     pub path: String,
-    /// Repo-relative source file.
+    /// Repo-relative source file, or directory for a link.
     #[serde(default)]
     pub src: Option<String>,
+    /// `link` mode only: what the link points at outside the repo, absolute or `~/…`. It may be
+    /// a directory, and it may not exist (a drive that is not mounted yet).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
     /// A string is written as-is; any other value is serialized to `format`.
     #[serde(default)]
     pub content: Option<Value>,
