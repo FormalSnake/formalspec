@@ -235,7 +235,9 @@ change: GitHub's Ubuntu runners have podman.
   machine, which must be platform `<p>`. It writes
   `<dir>/<name>-<p>.tar.zst` with the executables at the top (sorted names,
   zeroed owners and times) and `<dir>/tag` holding `<rev>-<p>`. With
-  `--host <h>` it builds on that host's builders first (below).
+  `--host <h>` it builds on that host's builders first (below). When one
+  name is `git(...)` on one host and another source elsewhere, it builds the
+  git one, preferring a host of platform `<p>`.
 - `fspec ci packages` writes `.github/workflows/fspec-packages.yml` next to the
   spec: a matrix with one job per `git(...)` package and platform that a host
   declares (`ubuntu-24.04` for x86_64-linux, `ubuntu-24.04-arm` for

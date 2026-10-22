@@ -9,7 +9,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use fspec_core::apply::{apply_scope, desired_from_generation, plan_scope, state_dir};
 use fspec_core::facts::{Facts, local_hostname};
 use fspec_core::fetch::LiveFetch;
-use fspec_core::resource::{Source, System};
+use fspec_core::resource::{Pkg, Source, System};
 use fspec_core::runner::{Cmd, LiveRunner, LogRunner, Runner};
 use fspec_core::{Cx, Host, Lock, Paths, Plan, Resource, Scope, State};
 use fspec_remote::{Planned, Probe, Remote, Target};
@@ -487,18 +487,30 @@ fn main() -> Result<()> {
                 Some(h) => spec.host(h)?.builders.clone(),
                 None => vec![],
             };
-            let pkg = spec
+            // One name can come from brew on a Mac and git on Linux; the build wants the git one,
+            // from a host of the platform being built when there is one.
+            let named: Vec<(&Host, &Pkg)> = spec
                 .hosts
                 .iter()
-                .flat_map(|h| &h.resources)
-                .find_map(|r| match r {
-                    Resource::Pkg(p) if p.name == *pkg => Some(p),
+                .filter(|h| host.as_ref().is_none_or(|want| h.name == *want))
+                .flat_map(|h| h.resources.iter().map(move |r| (h, r)))
+                .filter_map(|(h, r)| match r {
+                    Resource::Pkg(p) if p.name == *pkg => Some((h, p)),
                     _ => None,
                 })
-                .with_context(|| format!("no host declares a package named `{pkg}`"))?;
-            let Source::Git { url, .. } = &pkg.source else {
-                bail!("{} is {}, only git packages build", pkg.name, pkg.source)
-            };
+                .collect();
+            let git = |p: &&Pkg| matches!(p.source, Source::Git { .. });
+            let pkg = named
+                .iter()
+                .filter(|(h, _)| h.platform == *platform)
+                .map(|(_, p)| *p)
+                .find(git)
+                .or_else(|| named.iter().map(|(_, p)| *p).find(git))
+                .with_context(|| match named.first() {
+                    None => format!("no host declares a package named `{pkg}`"),
+                    Some((_, p)) => format!("{} is {}, only git packages build", p.name, p.source),
+                })?;
+            let Source::Git { url, .. } = &pkg.source else { unreachable!("picked a git package") };
             let (local, _) = Facts::probe_local();
             if local != *platform {
                 bail!("this machine is {local}, build {platform} on a matching runner");
