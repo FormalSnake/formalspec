@@ -94,10 +94,10 @@ package name or service name fail the plan.
 | Source | Example |
 | --- | --- |
 | aqua registry (default for CLI tools) | `pkg("ripgrep")` |
-| `github(repo)` | release assets matched per platform |
+| `github(repo)` | release assets matched per platform, or picked by an `asset = "tool-*-x86_64.pkg.tar.zst"` glob, which may name a distro package |
 | `npm(name)` | `npm("@anthropic-ai/claude-code")` |
 | `cargo(name)` | crates.io, prebuilt via cargo-binstall where available |
-| `flatpak(id)` | Flathub |
+| `flatpak(id)` | Flathub, `id/arch/branch` for a runtime such as a Vulkan layer |
 | `brew(name)` | Homebrew bottles and casks on macOS, `tap = "owner/repo"` for a third-party tap |
 | `dnf`, `pacman`, `apt`, `xbps`, `moss`, `zypper` | the distro's own repos, plus `repo(...)` ones on zypper |
 | `git(url, rev)` | build from source with a recipe |
@@ -327,7 +327,10 @@ month of snapshots, so a pin older than that stops resolving and needs an
 update.
 The lock entry for a distro package holds one artifact per platform, so the
 cached file is used for single-name packages; a multi-name `dnf([...])` package
-installs by name. Flatpak pins live in `any = { commit = … }`, brew records
+installs by name. Flatpak pins live in `any = { commit = … }`, read over HTTP
+from the OSTree repo's `refs/heads` for flathub and flathub-beta, so a host
+without flatpak (the macbook) locks every Linux host's flatpaks; another remote
+is asked through the local `flatpak remote-info`. Brew records
 `version`; Homebrew can only install the current version, so the brew pin is
 checked (drift, then `brew upgrade`), not enforced, and an upgrade is not
 reversed on rollback.

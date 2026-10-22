@@ -7,7 +7,53 @@ use serde_json::Value;
 
 use crate::Cx;
 
-pub fn flatpak(id: &str, remote: &str, cx: &Cx, out: &mut LockedPkg) -> Result<()> {
+/// The commit a remote's branch points at, read over HTTP from the OSTree repo's
+/// `refs/heads`, so a host without flatpak can lock the flatpaks of every host. A remote fspec
+/// has no URL for is asked through the local flatpak.
+pub fn flatpak(id: &str, remote: &str, platforms: &[String], cx: &Cx, out: &mut LockedPkg) -> Result<()> {
+    let Some(repo) = remote_url(remote) else { return flatpak_local(id, remote, cx, out) };
+    let refs = match id.split('/').collect::<Vec<_>>()[..] {
+        [name, arch, branch] => vec![format!("app/{name}/{arch}/{branch}"), format!("runtime/{name}/{arch}/{branch}")],
+        [name] => vec![format!("app/{name}/{}/stable", flatpak_arch(platforms))],
+        _ => bail!("flatpak `{id}` must be an app id or `<id>/<arch>/<branch>`"),
+    };
+    let mut last = None;
+    for r in &refs {
+        match cx.fetch.get(&format!("{repo}/refs/heads/{r}")) {
+            Ok(body) => {
+                let commit = String::from_utf8(body)?.trim().to_string();
+                if commit.len() != 64 || !commit.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    bail!("{repo} has no commit for {r}: got {commit:?}");
+                }
+                out.artifacts.insert("any".into(), Artifact { commit: Some(commit), ..Default::default() });
+                let name = id.split('/').next().unwrap_or(id);
+                // The commit is the pin; the version is only shown, so a missing appstream entry is fine.
+                out.version = (remote == "flathub")
+                    .then(|| cx.fetch.get_json(&format!("https://flathub.org/api/v2/appstream/{name}")).ok())
+                    .flatten()
+                    .and_then(|doc| doc.pointer("/releases/0/version").and_then(Value::as_str).map(str::to_string));
+                return Ok(());
+            }
+            Err(e) => last = Some(e),
+        }
+    }
+    Err(last.unwrap_or_else(|| anyhow!("no ref to look up")).context(format!("{remote} has no {}", refs.join(" or "))))
+}
+
+fn remote_url(remote: &str) -> Option<&'static str> {
+    match remote {
+        "flathub" => Some("https://dl.flathub.org/repo"),
+        "flathub-beta" => Some("https://dl.flathub.org/beta-repo"),
+        _ => None,
+    }
+}
+
+/// The arch of the Linux hosts that install it; flatpaks are only ever installed on Linux.
+fn flatpak_arch(platforms: &[String]) -> &str {
+    platforms.iter().find_map(|p| p.strip_suffix("-linux")).unwrap_or("x86_64")
+}
+
+fn flatpak_local(id: &str, remote: &str, cx: &Cx, out: &mut LockedPkg) -> Result<()> {
     let o = cx.runner.check(&Cmd::new("flatpak").args(["remote-info", "--system", remote, id]))?;
     let field = |key: &str| o.stdout.lines().find_map(|l| l.trim().strip_prefix(key)).map(|v| v.trim().to_string());
     let commit =

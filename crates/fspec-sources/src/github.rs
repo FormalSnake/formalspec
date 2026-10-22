@@ -172,9 +172,11 @@ pub fn glob_match(glob: &str, name: &str) -> bool {
     go(glob.as_bytes(), name.as_bytes())
 }
 
-fn score(name: &str, p: Platform) -> Option<i32> {
+/// With `globbed` the spec's `asset` glob already chose the format and the OS, so a distro
+/// package is fine and the name need not say `linux` (Arch's `.pkg.tar.zst` names only the arch).
+fn score(name: &str, p: Platform, globbed: bool) -> Option<i32> {
     let lower = name.to_lowercase();
-    if SKIP_EXT.iter().chain(PACKAGE_EXT).any(|e| lower.ends_with(e)) {
+    if SKIP_EXT.iter().any(|e| lower.ends_with(e)) || !globbed && PACKAGE_EXT.iter().any(|e| lower.ends_with(e)) {
         return None;
     }
     let toks = tokens(name);
@@ -186,7 +188,7 @@ fn score(name: &str, p: Platform) -> Option<i32> {
         _ => (&["darwin", "macos", "apple", "osx", "mac"][..], "arm64", "x8664"),
     };
     let os_match = toks.iter().any(|t| want_os.iter().any(|w| t == w || t.starts_with("linux") && *w == "linux"));
-    if !os_match || has(OTHER_OS) {
+    if !os_match && !globbed || has(OTHER_OS) {
         return None;
     }
     let universal = p.goos == "darwin" && has(&["universal", "universal2"]);
@@ -207,6 +209,9 @@ fn score(name: &str, p: Platform) -> Option<i32> {
     if p.goos == "linux" && has(&["musl", "static"]) {
         s += 20;
     }
+    if has(&["debug", "dbg", "dbgsym"]) {
+        s -= 40;
+    }
     Some(s)
 }
 
@@ -216,7 +221,8 @@ pub fn match_asset<'a>(assets: &'a [Asset], glob: Option<&str>, p: Platform) -> 
         let names: Vec<_> = assets.iter().map(|a| a.name.as_str()).collect();
         bail!("no asset matches glob `{}`; assets: {}", glob.unwrap_or("*"), names.join(", "));
     }
-    let scored: Vec<(i32, &Asset)> = pool.iter().filter_map(|a| score(&a.name, p).map(|s| (s, *a))).collect();
+    let scored: Vec<(i32, &Asset)> =
+        pool.iter().filter_map(|a| score(&a.name, p, glob.is_some()).map(|s| (s, *a))).collect();
     let Some(best) = scored.iter().map(|(s, _)| *s).max() else {
         if glob.is_some() && pool.len() == 1 {
             return Ok(pool[0]);
@@ -292,6 +298,19 @@ mod tests {
         let err = pick(a, None, "x86_64-linux").unwrap_err().to_string();
         assert!(err.contains("t-linux-x86_64-a.tar.gz") && err.contains("t-linux-x86_64-b.tar.gz"), "{err}");
         assert_eq!(pick(a, Some("*-b.tar.gz"), "x86_64-linux").unwrap(), "t-linux-x86_64-b.tar.gz");
+    }
+
+    #[test]
+    fn a_glob_takes_a_distro_package_and_skips_its_debug_build() {
+        let a = &[
+            "asusctl-6.5.0.r0.gec09e762-1-x86_64.pkg.tar.zst",
+            "asusctl-debug-6.5.0.r0.gec09e762-1-x86_64.pkg.tar.zst",
+            "rog-control-center-6.5.0.r0.gec09e762-1-x86_64.pkg.tar.zst",
+        ];
+        let glob = Some("asusctl-*-x86_64.pkg.tar.zst");
+        assert_eq!(pick(a, glob, "x86_64-linux").unwrap(), a[0]);
+        assert!(pick(a, None, "x86_64-linux").is_err());
+        assert!(pick(&["t_1.0_amd64.deb"], None, "x86_64-linux").is_err());
     }
 
     #[test]

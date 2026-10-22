@@ -196,9 +196,9 @@ fn release_age_picks_the_newest_old_enough_and_bleeding_skips_it() {
 fn runner_backed_sources() {
     let (fetch, runner) = (MapFetch::default(), RecordingRunner::default());
     runner.respond(
-        "flatpak remote-info --system flathub org.mozilla.firefox",
+        "flatpak remote-info --system kde org.kde.kate",
         Output {
-            stdout: "Ref: app/org.mozilla.firefox/x86_64/stable\nVersion: 131.0\nCommit: abc123\n".into(),
+            stdout: "Ref: app/org.kde.kate/x86_64/stable\nVersion: 24.12\nCommit: abc123\n".into(),
             ..Default::default()
         },
     );
@@ -208,15 +208,15 @@ fn runner_backed_sources() {
     );
     runner.respond("nix eval --raw nixpkgs#hello.version", Output { stdout: "2.12.1\n".into(), ..Default::default() });
     let cx = cx(&fetch, &runner);
-    let ff = resolve(
-        &pkg(json!({"name": "firefox", "source": {"kind": "flatpak", "id": "org.mozilla.firefox"}})),
+    let kate = resolve(
+        &pkg(json!({"name": "kate", "source": {"kind": "flatpak", "id": "org.kde.kate", "remote": "kde"}})),
         &[],
         None,
         &cx,
     )
     .unwrap();
-    assert_eq!(ff.artifacts["any"].commit.as_deref(), Some("abc123"));
-    assert_eq!(ff.version.as_deref(), Some("131.0"));
+    assert_eq!(kate.artifacts["any"].commit.as_deref(), Some("abc123"));
+    assert_eq!(kate.version.as_deref(), Some("24.12"));
     let git =
         resolve(&pkg(json!({"name": "r", "source": {"kind": "git", "url": "https://h/r"}})), &[], None, &cx).unwrap();
     assert_eq!(git.rev.as_deref(), Some("deadbeef"));
@@ -226,6 +226,33 @@ fn runner_backed_sources() {
     let dnf =
         resolve(&pkg(json!({"name": "htop", "source": {"kind": "dnf", "names": ["htop"]}})), &[], None, &cx).unwrap();
     assert_eq!((dnf.source.as_str(), dnf.version), ("dnf:htop", None));
+}
+
+#[test]
+fn flathub_resolves_over_http_without_flatpak() {
+    let ff = "a".repeat(64);
+    let layer = "b".repeat(64);
+    let fetch = MapFetch::default()
+        .with("https://dl.flathub.org/repo/refs/heads/app/org.mozilla.firefox/aarch64/stable", format!("{ff}\n"))
+        .with("https://flathub.org/api/v2/appstream/org.mozilla.firefox", r#"{"releases": [{"version": "131.0"}]}"#)
+        .with(
+            "https://dl.flathub.org/repo/refs/heads/runtime/org.freedesktop.Platform.VulkanLayer.MangoHud/x86_64/25.08",
+            layer.clone(),
+        );
+    let runner = RecordingRunner::default();
+    let cx = cx(&fetch, &runner);
+    let got = resolve(
+        &pkg(json!({"name": "firefox", "source": {"kind": "flatpak", "id": "org.mozilla.firefox"}})),
+        &platforms(&["aarch64-darwin", "aarch64-linux"]),
+        None,
+        &cx,
+    )
+    .unwrap();
+    assert_eq!((got.artifacts["any"].commit.as_deref(), got.version.as_deref()), (Some(ff.as_str()), Some("131.0")));
+    let id = "org.freedesktop.Platform.VulkanLayer.MangoHud/x86_64/25.08";
+    let got = resolve(&pkg(json!({"name": "m", "source": {"kind": "flatpak", "id": id}})), &[], None, &cx).unwrap();
+    assert_eq!((got.artifacts["any"].commit.as_deref(), got.version), (Some(layer.as_str()), None));
+    assert!(runner.lines().is_empty(), "{:?}", runner.lines());
 }
 
 #[test]

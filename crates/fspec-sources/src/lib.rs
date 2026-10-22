@@ -95,7 +95,9 @@ pub fn resolve(pkg: &Pkg, platforms: &[String], min_age: Option<i64>, cx: &Cx) -
         }
         Source::Npm { name } => npm::resolve(name, version, cutoff, cx, &mut locked),
         Source::Cargo { name } => cargo::resolve(name, version, platforms, cutoff, cx, &mut locked),
-        Source::Flatpak { id, remote } => service::flatpak(id.as_deref().unwrap_or(&pkg.name), remote, cx, &mut locked),
+        Source::Flatpak { id, remote } => {
+            service::flatpak(id.as_deref().unwrap_or(&pkg.name), remote, platforms, cx, &mut locked)
+        }
         // formulae.brew.sh knows only Homebrew's own taps; a third-party one installs what it has.
         Source::Brew { tap: Some(_), .. } => Ok(()),
         Source::Brew { name, cask, .. } => service::brew(name.as_deref().unwrap_or(&pkg.name), *cask, cx, &mut locked),
