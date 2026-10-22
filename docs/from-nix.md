@@ -57,6 +57,13 @@ the store-wide build graph and hand-written hashes.
 | `boot.kernelPackages`, `boot.kernelParams`, NVIDIA module | `image(...)` with `kernel_args` |
 | `services.flatpak` | `pkg(..., source = flatpak())` |
 | `nixos-rebuild switch --target-host` | `fspec apply --host` |
+| `nix.buildMachines`, `max-jobs = 0` | `host(builders = [builder("<host>", routes = [...])])` |
+| `environment.systemPackages` that the distro ships | the distro's package list on `tumbleweed(...)`, before any `git(...)` build |
+| `fileSystems.<path>` | a `.mount` (and `.automount`) unit as a `file(...)` plus `service(...)` |
+| `programs.ssh.knownHosts` | `file("/etc/ssh/ssh_known_hosts", ...)` |
+| `networking.firewall` | firewalld zone files in `/etc/firewalld/zones` |
+| `nix.gc.automatic` | `timer(...)` running `fspec gc --older-than` |
+| a Home Manager `if host == ...` | a `<host>/home/` tree overlaid on the shared `home/` |
 | `nix-collect-garbage --delete-older-than` | `fspec gc --older-than` |
 | `programs.neovim.plugins` | `vim.pack.add` in `init.lua`, with `nvim-pack-lock.json` as a `managed` file next to it |
 | `nvim-treesitter.withAllGrammars` | nvim-treesitter's own `install()`, which compiles parsers with `tree-sitter-cli` |
@@ -76,16 +83,16 @@ The macbook ports most directly. Homebrew stays Homebrew, launchd agents become
 `defaults(...)` and files. A PAM module built from source for macOS becomes a
 `git(...)` package you maintain.
 
-The NVIDIA laptop moves to Bazzite with NVIDIA through
-`image(base = "ghcr.io/ublue-os/bazzite-nvidia:stable")`. Kernel arguments,
-the MUX service, asusd and tuned go into the image. Hyprland's Lua config and
+The NVIDIA laptop moves to Tumbleweed with NVIDIA's openSUSE repo. The MUX
+service, asusd and tuned become files and `service(...)` units; packages come
+from zypper first and `git(...)` only where no repo or release has them. Hyprland's Lua config and
 matugen templates are `managed` files with the same content as today. A desktop
 shell and a Bluetooth daemon with local patches become `git(...)` packages that
 CI builds. Steam and the other game launchers become Flatpaks in
 `self_managed` mode.
 
-The Intel laptop uses the same image without NVIDIA. It no longer needs a
-remote builder, because everything it installs is prebuilt.
+The Intel laptop uses the same modules without NVIDIA, and builds its
+`git(...)` packages on the NVIDIA laptop through `builders`.
 
 All three apply the same commit. `fspec plan --all` shows drift on every host
 at once.
