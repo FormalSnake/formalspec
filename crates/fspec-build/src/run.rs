@@ -56,6 +56,10 @@ pub fn build(runner: &dyn Runner, job: &Job) -> Result<Built> {
         Source::Git { image: Some(image), deps, .. } => {
             vec![in_container(runner, image, deps, work.path(), &dirs.src, &commands)]
         }
+        // macOS has no container of its own kind to build in; Homebrew is its package manager.
+        Source::Git { deps, .. } if !deps.is_empty() && job.platform.ends_with("-darwin") => {
+            std::iter::once(Cmd::new("brew").arg("install").args(deps)).chain(commands).collect()
+        }
         Source::Git { deps, .. } if !deps.is_empty() => {
             bail!("{} lists deps but no image to install them into, set git(image = ...)", job.pkg.name)
         }

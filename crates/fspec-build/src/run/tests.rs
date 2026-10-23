@@ -174,6 +174,23 @@ fn deps_without_an_image_fail() {
 }
 
 #[test]
+fn deps_on_macos_install_with_brew_before_the_recipe() {
+    let spec = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let mut p = pkg(serde_json::json!({"build": ["sh", "-c", "make install"]}));
+    p.source = serde_json::from_value(
+        serde_json::json!({"kind": "git", "url": "https://example/tool", "rev": "main", "deps": ["go"]}),
+    )
+    .unwrap();
+    let fake =
+        Fake { checkout: BTreeMap::from([("Makefile", "")]), produce: vec![("exe", "tool")], ..Default::default() };
+    build(&fake, &Job { platform: "aarch64-darwin", ..job(&p, spec.path(), out.path()) }).unwrap();
+    let calls = fake.calls.lock().unwrap();
+    let at = |prefix: &str| calls.iter().position(|c| c.starts_with(prefix)).unwrap();
+    assert!(at("brew install go") < at("sh -c 'make install'"), "{calls:?}");
+}
+
+#[test]
 fn a_missing_named_bin_fails() {
     let spec = tempfile::tempdir().unwrap();
     let out = tempfile::tempdir().unwrap();

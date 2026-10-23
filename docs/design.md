@@ -225,7 +225,10 @@ own path and `FSPEC_SRC` and `FSPEC_OUT` passed in. `deps` install first, by
 whichever of zypper, dnf, apt-get, pacman, xbps-install or apk the image has,
 so they are named the way that distro names them (`pkgconfig(gtk4)` works on
 zypper and dnf). Building in the host's own distro links against the same
-sonames the host has. `deps` without `image` fails the plan. Pin the image by
+sonames the host has. On Linux, `deps` without `image` fails the plan. A
+macOS build has no container of its kind, so there `image` fails the plan and
+`deps` are Homebrew formulae, installed with `brew install` before the recipe
+runs (`git(..., deps = ["go"])`); the CI's macOS runners have brew. Pin the image by
 digest (`…@sha256:…`) for builds that repeat exactly. The CI workflow needs no
 change: GitHub's Ubuntu runners have podman.
 

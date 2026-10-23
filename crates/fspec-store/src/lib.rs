@@ -223,10 +223,16 @@ impl Backend for StoreBackend {
 
     fn check(&self, cx: &Cx, r: &Resource) -> Result<()> {
         let Resource::Pkg(p) = r else { return Ok(()) };
-        if let Source::Git { deps, image: None, .. } = &p.source
-            && !deps.is_empty()
-        {
-            bail!("git(deps = ...) needs image = ... to install them into");
+        if let Source::Git { deps, image, .. } = &p.source {
+            match (image, cx.facts.os) {
+                (Some(_), Os::Darwin) => {
+                    bail!("git(image = ...) builds in a Linux container; on macOS deps install with brew")
+                }
+                (None, Os::Linux) if !deps.is_empty() => {
+                    bail!("git(deps = ...) needs image = ... to install them into")
+                }
+                _ => {}
+            }
         }
         if !p.share.is_empty() && cx.facts.os != Os::Linux {
             bail!("share links into /usr/local/share, which only Linux searches");
