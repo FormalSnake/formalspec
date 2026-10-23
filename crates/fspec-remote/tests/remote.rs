@@ -27,12 +27,17 @@ fn probe_json(platform: &str, distro: &str) -> String {
 const PROBE: &str = "ssh -o ConnectTimeout=5 -o BatchMode=yes g815";
 
 fn fixture(status: &str) -> (tempfile::TempDir, RecordingRunner) {
+    with_untracked(status, "")
+}
+
+fn with_untracked(status: &str, untracked: &str) -> (tempfile::TempDir, RecordingRunner) {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("fspec.lock"), "").unwrap();
     let runner = RecordingRunner::default();
     let git = format!("git -C {}", dir.path().display());
     runner.respond(&format!("{git} rev-parse"), ok("abc123\n"));
     runner.respond(&format!("{git} status"), ok(status));
+    runner.respond(&format!("{git} ls-files --others"), ok(untracked));
     runner.respond(&format!("{git} ls-files"), ok("spec.star\nmodules/cli.star\n"));
     (dir, runner)
 }
@@ -98,7 +103,23 @@ fn dirty_tree_is_refused_unless_allowed() {
 
     remote(dir.path(), &runner, true).apply(&h, "g815", None).unwrap();
     let lines = runner.lines();
-    assert!(lines.iter().any(|l| l.contains("rm -rf \"$HOME/.cache/fspec/spec/abc123-dirty\"")));
+    assert!(lines.iter().any(|l| l.contains("rm -rf \"$HOME/.cache/fspec/spec/abc123-dirty\"*")));
+}
+
+#[test]
+fn a_dirty_ship_is_named_after_its_contents_and_carries_untracked_files() {
+    let (dir, runner) = with_untracked(" M spec.star\n", "new.star\n");
+    fs::write(dir.path().join("spec.star"), "one").unwrap();
+    fs::write(dir.path().join("new.star"), "x").unwrap();
+    let r = remote(dir.path(), &runner, true);
+    let first = r.ship("g815").unwrap();
+    fs::write(dir.path().join("spec.star"), "two").unwrap();
+    let second = r.ship("g815").unwrap();
+    assert!(first.contains("abc123-dirty-") && first != second, "{first} {second}");
+    let calls = runner.calls.lock().unwrap();
+    let tar = calls.iter().find(|c| c.program == "tar").unwrap();
+    // modules/cli.star is listed but deleted in the working tree, so it is not shipped.
+    assert_eq!(tar.stdin.as_deref(), Some("spec.star\nnew.star\nfspec.lock"));
 }
 
 #[test]

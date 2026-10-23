@@ -20,10 +20,13 @@ pub fn target(host: &Host, local_name: &str) -> Target {
     }
 }
 
-/// Where a shipped spec lands on the remote, as a shell word. A dirty tree gets its own directory
-/// that is wiped on every ship, since its contents are not pinned by the commit.
-pub fn spec_dir(commit: &str, dirty: bool) -> String {
-    let leaf = if dirty { format!("{commit}-dirty") } else { commit.to_string() };
+/// Where a shipped spec lands on the remote, as a shell word. A dirty tree's contents are not
+/// pinned by the commit, so its directory is named after a hash of what is shipped.
+pub fn spec_dir(commit: &str, dirty: Option<&str>) -> String {
+    let leaf = match dirty {
+        Some(hash) => format!("{commit}-dirty-{hash}"),
+        None => commit.to_string(),
+    };
     format!("\"$HOME/.cache/fspec/spec/{leaf}\"")
 }
 
@@ -53,6 +56,16 @@ pub fn git_files(spec_dir: &Path) -> Cmd {
     Cmd::new("git").arg("-C").arg(spec_dir.display().to_string()).args(["ls-files", "--", "."])
 }
 
+pub fn git_untracked(spec_dir: &Path) -> Cmd {
+    Cmd::new("git").arg("-C").arg(spec_dir.display().to_string()).args([
+        "ls-files",
+        "--others",
+        "--exclude-standard",
+        "--",
+        ".",
+    ])
+}
+
 /// Archives the listed files (one path per line on stdin) relative to the spec dir.
 pub fn tar_create(spec_dir: &Path, archive: &Path, files: &[String]) -> Cmd {
     Cmd::new("tar")
@@ -65,8 +78,9 @@ pub fn ship_into(alias: &str, dir: &str, archive: &Path) -> Cmd {
     batch(alias).arg(format!("mkdir -p {dir} && tar -xf - -C {dir}")).stdin_file(archive)
 }
 
-pub fn ship(alias: &str, dest: &str, archive: &Path, dirty: bool) -> Cmd {
-    let wipe = if dirty { format!("rm -rf {dest} && ") } else { String::new() };
+/// A dirty ship first drops the earlier dirty copies of the same commit.
+pub fn ship(alias: &str, commit: &str, dest: &str, archive: &Path, dirty: bool) -> Cmd {
+    let wipe = if dirty { format!("rm -rf \"$HOME/.cache/fspec/spec/{commit}-dirty\"* && ") } else { String::new() };
     batch(alias).arg(format!("{wipe}mkdir -p {dest} && tar -xf - -C {dest}")).stdin_file(archive)
 }
 
@@ -131,8 +145,8 @@ mod tests {
         assert_eq!(tar.to_string(), "tar -cf /t/s.tar -C /r/spec -T -");
         assert_eq!(tar.stdin.as_deref(), Some("spec.star\na/b.star"));
 
-        let dest = spec_dir("abc123", false);
-        let ship = ship("g815", &dest, Path::new("/t/s.tar"), false);
+        let dest = spec_dir("abc123", None);
+        let ship = ship("g815", "abc123", &dest, Path::new("/t/s.tar"), false);
         assert_eq!(
             ship.args,
             [
@@ -149,17 +163,17 @@ mod tests {
 
     #[test]
     fn dirty_ship_wipes_first() {
-        let dest = spec_dir("abc123", true);
-        let ship = ship("g815", &dest, Path::new("/t/s.tar"), true);
+        let dest = spec_dir("abc123", Some("0a1b2c3d4e5f"));
+        let ship = ship("g815", "abc123", &dest, Path::new("/t/s.tar"), true);
         assert_eq!(
             ship.args.last().unwrap(),
-            "rm -rf \"$HOME/.cache/fspec/spec/abc123-dirty\" && mkdir -p \"$HOME/.cache/fspec/spec/abc123-dirty\" && tar -xf - -C \"$HOME/.cache/fspec/spec/abc123-dirty\""
+            "rm -rf \"$HOME/.cache/fspec/spec/abc123-dirty\"* && mkdir -p \"$HOME/.cache/fspec/spec/abc123-dirty-0a1b2c3d4e5f\" && tar -xf - -C \"$HOME/.cache/fspec/spec/abc123-dirty-0a1b2c3d4e5f\""
         );
     }
 
     #[test]
     fn apply_and_plan_lines() {
-        let dest = spec_dir("abc123", false);
+        let dest = spec_dir("abc123", None);
         let apply = apply("g815", &dest, "spec.star", "g815", None);
         assert_eq!(apply.program, "ssh");
         assert_eq!(

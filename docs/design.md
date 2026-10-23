@@ -1645,7 +1645,10 @@ through the `Runner`:
    apply unless `--dirty` is passed.
 3. Ship: `git ls-files` in the spec directory plus `fspec.lock` go through
    `tar` and ssh into `~/.cache/fspec/spec/<commit>/` on the remote. A dirty
-   tree lands in `<commit>-dirty/`, wiped first. The `gh:` load files the
+   tree also ships its untracked files that git does not ignore, and lands in
+   `<commit>-dirty-<hash>/`, named after a hash of what is shipped, so a
+   second edit at the same commit never evaluates the first one's copy; the
+   earlier dirty copies of that commit are deleted first. The `gh:` load files the
    lock names follow from this machine's cache into `<dir>/.fspec/loads`, so
    the remote needs no GitHub token to evaluate them.
 4. Run `ssh -t h fspec --spec <dir>/spec.star apply --local --host h` with the

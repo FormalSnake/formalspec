@@ -106,7 +106,8 @@ impl Remote<'_> {
         Ok(reach)
     }
 
-    /// Copies the git-tracked files of the spec dir, plus `fspec.lock`, to the remote, and the
+    /// Copies the git-tracked files of the spec dir (and the untracked ones when it is dirty), plus
+    /// `fspec.lock`, to the remote, and the
     /// `gh:` load files this machine has cached, so the remote evaluates without fetching them
     /// (it may have no GitHub token for a private repo). Returns the remote directory as a shell
     /// word.
@@ -120,14 +121,19 @@ impl Remote<'_> {
             );
         }
         let mut files: Vec<String> = git(cmd::git_files(&self.spec_dir))?.stdout.lines().map(str::to_string).collect();
+        if tree_dirty {
+            files.extend(git(cmd::git_untracked(&self.spec_dir))?.stdout.lines().map(str::to_string));
+            files.retain(|f| self.spec_dir.join(f).exists());
+        }
         if self.spec_dir.join("fspec.lock").exists() && !files.iter().any(|f| f == "fspec.lock") {
             files.push("fspec.lock".into());
         }
-        let dest = cmd::spec_dir(&commit, tree_dirty);
+        let content = tree_dirty.then(|| content_hash(&self.spec_dir, &files)).transpose()?;
+        let dest = cmd::spec_dir(&commit, content.as_deref());
         let tmp = tempfile::tempdir()?;
         let archive = tmp.path().join("spec.tar");
         self.runner.check(&cmd::tar_create(&self.spec_dir, &archive, &files))?;
-        self.runner.check(&cmd::ship(alias, &dest, &archive, tree_dirty))?;
+        self.runner.check(&cmd::ship(alias, &commit, &dest, &archive, tree_dirty))?;
         let lock = Lock::load(&self.spec_dir.join("fspec.lock"))?;
         if let Some(cache) = self.loads_cache.clone().or_else(loads_cache) {
             let loads: Vec<String> = lock
@@ -168,6 +174,21 @@ impl Remote<'_> {
             .with_context(|| format!("`fspec plan --json` on {alias} printed: {}", out.stdout.trim()))?;
         Ok(Planned::Plan(plan))
     }
+}
+
+/// The first 12 hex digits of a sha256 over each file's path and bytes, naming a dirty ship so
+/// one edit never evaluates another's copy.
+fn content_hash(dir: &std::path::Path, files: &[String]) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    for f in files {
+        let bytes = std::fs::read(dir.join(f)).with_context(|| format!("reading {f} to ship it"))?;
+        h.update(f.as_bytes());
+        h.update([0]);
+        h.update((bytes.len() as u64).to_le_bytes());
+        h.update(&bytes);
+    }
+    Ok(h.finalize().iter().take(6).map(|b| format!("{b:02x}")).collect())
 }
 
 fn failure(out: &Output) -> String {
