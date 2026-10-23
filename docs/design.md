@@ -763,6 +763,10 @@ Configs are generated from Starlark data and serialized to the target format
 | `seed` | Written once if missing | Never touched again |
 | `patch` | A file the app owns; FormalSpec owns only the declared keys | Three-way merge, below |
 
+Moving a `managed` file's `src` to another repo path with the same bytes, or
+any `src` change of a `seed` file, is not a change: the plan shows nothing and
+the next apply records the new `src` without rewriting the file.
+
 Copies are the default, not symlinks: a copy survives apps that rename, chmod
 or lock their config, and the hash in state detects drift just as well.
 

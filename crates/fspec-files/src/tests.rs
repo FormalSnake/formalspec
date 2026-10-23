@@ -148,6 +148,25 @@ fn managed_src_and_perms_and_source_change() {
 }
 
 #[test]
+fn a_src_moved_with_the_same_bytes_is_not_rewritten() {
+    let w = World::new();
+    w.write_src("files/a.conf", "same\n");
+    w.write_src("b.conf", "same\n");
+    let f = File { src: Some("files/a.conf".into()), ..file("~/a.conf") };
+    w.apply(&want([f.clone()])).unwrap();
+    let moved = File { src: Some("b.conf".into()), ..f.clone() };
+    assert!(w.plan(&want([moved.clone()])).changes.is_empty());
+    let generation = w.state().generation;
+    w.apply(&want([moved.clone()])).unwrap();
+    let state = w.state();
+    assert_eq!(state.generation, generation);
+    assert_eq!(state.entries[&Resource::File(moved.clone()).key()].resource, Resource::File(moved.clone()));
+
+    w.write_src("b.conf", "other\n");
+    assert!(matches!(&w.plan(&want([moved])).changes[0].action, Action::Drift { .. }));
+}
+
+#[test]
 fn on_drift_fail_points_at_adopt() {
     let w = World::new();
     let f = File { on_drift: OnDrift::Fail, ..text("~/.x", "one") };

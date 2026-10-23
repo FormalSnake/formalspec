@@ -79,6 +79,18 @@ impl Backend for FileBackend {
         Ok(notes)
     }
 
+    fn same_result(&self, cx: &Cx, entry: &Entry, new: &Resource) -> Result<bool> {
+        let Resource::File(f) = new else { return Ok(false) };
+        Ok(match f.mode {
+            // A seeded file is never written again, whatever its source.
+            FileMode::Seed => true,
+            FileMode::Managed => {
+                render_bytes(cx, f).is_ok_and(|b| live::recorded(&entry.record, "sha256") == Some(sha256(&b).as_str()))
+            }
+            FileMode::Link | FileMode::Patch => false,
+        })
+    }
+
     fn prepare(&self, cx: &Cx, ops: &[Op], staging: &Path) -> Result<()> {
         for op in ops.iter().filter(|o| !o.is_removal()) {
             let staged = staged_path(staging, op);

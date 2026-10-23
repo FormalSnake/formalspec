@@ -184,6 +184,13 @@ pub trait Backend {
         Ok(vec![])
     }
 
+    /// Whether `new`, which differs from the applied `entry` only in its `src`, yields what is
+    /// already live, as when a file's source moves to another path with the same bytes. Such a
+    /// change takes the new config into the state without a commit.
+    fn same_result(&self, _cx: &Cx, _entry: &Entry, _new: &Resource) -> Result<bool> {
+        Ok(false)
+    }
+
     /// Live paths `r` writes that a `file` could also have written. When a removed `file` names
     /// one of them, the file is handed over: dropped from the state and left on disk, since the
     /// removal runs before the resource that now owns the path commits.
@@ -238,6 +245,18 @@ pub fn plan_scope(cx: &Cx, backends: &[&dyn Backend], desired: &[Desired], state
             Err(e) => p.unsupported.push(e.to_string()),
         }
     }
+    let mut moved = Vec::new();
+    for c in &p.changes {
+        let Action::Update { fields } = &c.action else { continue };
+        let (Some(entry), Some(d)) = (state.entries.get(&c.key), desired.iter().find(|d| d.resource.key() == c.key))
+        else {
+            continue;
+        };
+        if fields == &["src"] && backend_for(cx, backends, &d.resource)?.same_result(cx, entry, &d.resource)? {
+            moved.push(c.key.clone());
+        }
+    }
+    p.changes.retain(|c| !moved.contains(&c.key));
     let changed: Vec<Key> = p.changes.iter().map(|c| c.key.clone()).collect();
     for (key, entry) in &state.entries {
         if changed.contains(key) {
@@ -301,6 +320,21 @@ pub fn apply_scope(cx: &Cx, backends: &[&dyn Backend], desired: &[Desired]) -> R
     let p = plan_scope(cx, backends, desired, &state)?;
     if !p.unsupported.is_empty() {
         bail!("cannot apply:\n  {}", p.unsupported.join("\n  "));
+    }
+    // What the plan dropped as already live still takes its new config.
+    let mut refreshed = false;
+    for d in desired.iter().filter(|d| d.resource.scope() == cx.scope) {
+        let key = d.resource.key();
+        if p.changes.iter().any(|c| c.key == key) {
+            continue;
+        }
+        if let Some(entry) = state.entries.get_mut(&key).filter(|e| e.resource != d.resource) {
+            entry.resource = d.resource.clone();
+            refreshed = true;
+        }
+    }
+    if refreshed {
+        state.save(&state_path)?;
     }
     if p.changes.is_empty() {
         return Ok(p);
