@@ -131,5 +131,5 @@ fn ci_packages_writes_the_workflow() {
     let out = fspec(work, &["ci", "packages"]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let text = fs::read_to_string(work.join(".github/workflows/fspec-packages.yml")).unwrap();
-    assert!(text.contains("{ pkg: librepods, platform: aarch64-darwin, runner: macos-14 }"), "{text}");
+    assert!(text.contains("{ pkg: librepods, platform: aarch64-darwin, runner: macos-15 }"), "{text}");
 }

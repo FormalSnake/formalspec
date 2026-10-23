@@ -244,7 +244,7 @@ change: GitHub's Ubuntu runners have podman.
 - `fspec ci packages` writes `.github/workflows/fspec-packages.yml` next to the
   spec: a matrix with one job per `git(...)` package and platform that a host
   declares (`ubuntu-24.04` for x86_64-linux, `ubuntu-24.04-arm` for
-  aarch64-linux, `macos-14` for aarch64-darwin). Each job installs fspec and
+  aarch64-linux, `macos-15` for aarch64-darwin). Each job installs fspec and
   oras, runs `fspec build` and pushes with `oras push`. Regenerate it when the
   set of packages or platforms changes; the lock and `patches/` changes trigger
   it.

@@ -26,7 +26,7 @@ fn runner(platform: &str) -> Result<&'static str> {
     Ok(match platform {
         "x86_64-linux" => "ubuntu-24.04",
         "aarch64-linux" => "ubuntu-24.04-arm",
-        "aarch64-darwin" => "macos-14",
+        "aarch64-darwin" => "macos-15",
         other => {
             bail!("no CI runner for platform {other}, the cache builds x86_64-linux, aarch64-linux and aarch64-darwin")
         }
