@@ -18,7 +18,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { pkg: librepods, platform: aarch64-darwin, runner: macos-15 }
+          - { pkg: librepods, platform: aarch64-darwin, runner: macos-26 }
           - { pkg: librepods, platform: x86_64-linux, runner: ubuntu-24.04 }
     steps:
       - uses: actions/checkout@v4
