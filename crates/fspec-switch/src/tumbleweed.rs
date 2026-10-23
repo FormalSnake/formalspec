@@ -59,7 +59,7 @@ nice -n 19 ionice -c3 zypper --root /mnt -n install --no-recommends "$@"
 /// Runs chrooted in the new root, from the Tumbleweed container, once fspec's files are in.
 const CONFIGURE: &str = r#"set -eu
 systemctl enable NetworkManager.service sshd.service tailscaled.service fspec-esp-sync.service \
-	fspec-boot-guard.service fspec-boot-deadline.timer fspec-power-saver.service
+	fspec-esp-sync.path fspec-boot-guard.service fspec-boot-deadline.timer fspec-power-saver.service
 systemctl set-default multi-user.target
 # snapper reads the mounts from /etc/mtab, which a booted system gets from tmpfiles.
 [ -e /etc/mtab ] || ln -s ../proc/self/mounts /etc/mtab
@@ -169,6 +169,18 @@ if [ -f "$root/etc/fspec/limine.conf" ] && [ -d "${limine%/*}" ]; then
 fi
 sync -f "$entries"
 "#;
+
+/// Reruns the sync when a spec writes Limine's menu header, whichever resource writes it.
+pub const ESP_SYNC_PATH: &str = "[Unit]
+Description=Rewrite Limine's menu when its header changes (fspec)
+
+[Path]
+PathChanged=/etc/fspec/limine.conf
+Unit=fspec-esp-sync.service
+
+[Install]
+WantedBy=multi-user.target
+";
 
 /// libzypp commit plugin. COMMITEND comes after the transaction's scriptlets, so the initrds are
 /// rebuilt by then. Every frame ends in a NUL byte and gets an ACK; the plugin's stdout is the
@@ -412,6 +424,7 @@ pub fn tumbleweed(paths: &Paths, m: &Machine, t: &Tumbleweed) -> Result<Plan> {
         ("etc/fspec/boot-guard.sh", GUARD.to_string(), false),
         ("usr/lib/zypp/plugins/commit/fspec-esp-sync", zypp_plugin(name), true),
         ("etc/systemd/system/fspec-esp-sync.service", sync_service(name), false),
+        ("etc/systemd/system/fspec-esp-sync.path", ESP_SYNC_PATH.to_string(), false),
         ("etc/systemd/system/systemd-bless-boot.service.d/fspec.conf", bless_dropin(name), false),
         ("etc/systemd/system/fspec-power-saver.service", POWER_SAVER.to_string(), false),
         ("etc/systemd/system/fspec-boot-guard.service", guard_service(), false),

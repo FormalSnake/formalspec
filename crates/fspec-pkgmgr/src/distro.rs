@@ -49,9 +49,15 @@ const KERNEL_ARGS: &str = "kernel_args";
 const CMDLINE: &str = "/etc/kernel/cmdline";
 /// Installed by `switch --beside`: it writes the boot entries on the ESP from `/etc/kernel/cmdline`.
 const ESP_SYNC_UNIT: &str = "/etc/systemd/system/fspec-esp-sync.service";
-/// The script that unit runs. Switch wrote it once; apply keeps it at this fspec's version so a
-/// root installed by an older fspec gets newer entry generation (Limine's kernel list).
-const ESP_SYNC_SCRIPT: &str = "/etc/fspec/esp-sync.sh";
+/// What that unit needs beside it. Switch wrote them once; apply keeps them at this fspec's
+/// version so a root an older fspec installed gets newer entry generation (Limine's kernel
+/// list) and reruns the sync when `/etc/fspec/limine.conf` changes.
+const ESP_SYNC_FILES: [(&str, &str); 2] = [
+    ("/etc/fspec/esp-sync.sh", fspec_switch::TUMBLEWEED_ESP_SYNC),
+    ("/etc/systemd/system/fspec-esp-sync.path", fspec_switch::TUMBLEWEED_ESP_SYNC_PATH),
+];
+/// Written by the sync from `/etc/fspec/limine.conf`, so a `file` that wrote it is handed over.
+const LIMINE_CONF: &str = "/boot/efi/EFI/limine/limine.conf";
 
 fn recorded_args(rec: &serde_json::Map<String, Value>) -> Vec<String> {
     rec.get(KERNEL_ARGS)
@@ -97,26 +103,40 @@ fn set_kernel_args(cx: &Cx, journal: &mut Journal, had: &[String], want: &[Strin
     Ok(())
 }
 
-/// Whether this root runs fspec's ESP sync with a script other than this fspec's.
-fn stale_esp_sync(cx: &Cx) -> bool {
-    cx.facts.distro == "opensuse-tumbleweed"
-        && cx.paths.system(ESP_SYNC_UNIT).exists()
-        && fs::read_to_string(cx.paths.system(ESP_SYNC_SCRIPT)).ok().as_deref()
-            != Some(fspec_switch::TUMBLEWEED_ESP_SYNC)
+fn switched(cx: &Cx) -> bool {
+    cx.facts.distro == "opensuse-tumbleweed" && cx.paths.system(ESP_SYNC_UNIT).exists()
 }
 
-/// Writes this fspec's ESP sync script and runs it, so the entries follow at once.
+/// The files beside fspec's ESP sync that differ from this fspec's.
+fn stale_esp_sync(cx: &Cx) -> Vec<&'static str> {
+    if !switched(cx) {
+        return vec![];
+    }
+    ESP_SYNC_FILES
+        .iter()
+        .filter(|(path, want)| fs::read_to_string(cx.paths.system(path)).ok().as_deref() != Some(*want))
+        .map(|(path, _)| *path)
+        .collect()
+}
+
+/// Writes this fspec's files beside the ESP sync and runs it, so the entries and Limine's menu
+/// follow at once, from a header the `file` phase may have just written.
 fn refresh_esp_sync(cx: &Cx, journal: &mut Journal) -> Result<()> {
-    if !stale_esp_sync(cx) {
+    let stale = stale_esp_sync(cx);
+    if stale.is_empty() {
         return Ok(());
     }
-    let path = cx.paths.system(ESP_SYNC_SCRIPT);
     journal.record(Undo::Run { cmd: esp_sync() })?;
-    journal.backup(&path)?;
-    if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    for (path, text) in ESP_SYNC_FILES.iter().filter(|(p, _)| stale.contains(p)) {
+        let path = cx.paths.system(path);
+        journal.backup(&path)?;
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+        }
+        fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
     }
-    fs::write(&path, fspec_switch::TUMBLEWEED_ESP_SYNC).with_context(|| format!("writing {}", path.display()))?;
+    cx.runner.check(&Cmd::new("systemctl").arg("daemon-reload"))?;
+    cx.runner.check(&Cmd::new("systemctl").args(["enable", "--now", "fspec-esp-sync.path"]))?;
     cx.runner.check(&esp_sync())?;
     Ok(())
 }
@@ -166,10 +186,15 @@ impl Backend for DistroBackend {
     }
 
     fn writes(&self, cx: &Cx, r: &Resource) -> Vec<PathBuf> {
-        match r {
-            Resource::Distro(d) if !d.kernel_args.is_empty() => vec![cx.paths.system(CMDLINE)],
-            _ => vec![],
+        let Resource::Distro(d) = r else { return vec![] };
+        let mut paths = Vec::new();
+        if !d.kernel_args.is_empty() {
+            paths.push(cx.paths.system(CMDLINE));
         }
+        if switched(cx) {
+            paths.push(cx.paths.system(LIMINE_CONF));
+        }
+        paths
     }
 
     fn check(&self, cx: &Cx, r: &Resource) -> Result<()> {
@@ -203,8 +228,8 @@ impl Backend for DistroBackend {
             notes.extend(zypper::snapshot_drift(cx, zypper::pin(cx)?));
         }
         notes.extend(drift_names(cx, fam, &recorded(entry), &entry.record)?);
-        if stale_esp_sync(cx) {
-            notes.push(format!("{ESP_SYNC_SCRIPT} is not this fspec's"));
+        for path in stale_esp_sync(cx) {
+            notes.push(format!("{path} is not this fspec's"));
         }
         let args = recorded_args(&entry.record);
         if !args.is_empty() {

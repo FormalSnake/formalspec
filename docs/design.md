@@ -1537,10 +1537,14 @@ once the kernel scriptlets have rebuilt the initrds, and
 to systemd-boot, other systems), then a `Kernels` submenu with one `linux` entry
 per boot entry on the ESP, its kernel, initrds and options, booted straight and
 without counting tries. A spec themes or extends Limine by writing
-`/etc/fspec/limine.conf` with `file(...)`, never the ESP copy. Apply keeps the
-script itself at the running fspec's version: on a switched root whose
-`esp-sync.sh` differs, drift says so, and apply rewrites it (with a backup in
-the journal) and starts the service. The guard, the deadline timer and
+`/etc/fspec/limine.conf` with `file(...)`, never the ESP copy;
+`fspec-esp-sync.path` reruns the sync whenever that file changes. On a switched
+root the sync owns the ESP's `EFI/limine/limine.conf`, so a `file` that wrote it
+is handed over on removal and the menu stays on disk until the sync rewrites it.
+Apply keeps `esp-sync.sh` and the path unit at the running fspec's version: when
+either differs, drift says so, and apply rewrites them (with backups in the
+journal), enables the path unit and starts the service. The `file` phase runs
+first, so a header written in the same apply is the one the sync reads. The guard, the deadline timer and
 the watchdog are the bootc root's, except that the guard waits for tailscale
 only when the inherited root had tailscale state: tailscaled writes a state
 file of its own before anyone logs in, so the install leaves

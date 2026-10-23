@@ -1194,7 +1194,11 @@ fn a_zypper_install_whose_scriptlet_failed_counts_and_reinstalls_that_package() 
 
 /// A root `fspec switch --beside` installed, with `script` as its ESP sync.
 fn switched(w: &World, script: &str) {
-    for (path, text) in [("etc/systemd/system/fspec-esp-sync.service", ""), ("etc/fspec/esp-sync.sh", script)] {
+    for (path, text) in [
+        ("etc/systemd/system/fspec-esp-sync.service", ""),
+        ("etc/systemd/system/fspec-esp-sync.path", fspec_switch::TUMBLEWEED_ESP_SYNC_PATH),
+        ("etc/fspec/esp-sync.sh", script),
+    ] {
         let path = w.paths.root.join(path);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, text).unwrap();
@@ -1218,6 +1222,26 @@ fn apply_brings_an_older_esp_sync_script_up_to_this_fspec() {
     assert!(w.take().contains(&"systemctl start fspec-esp-sync.service".to_string()));
     disable_rolling(&w);
     assert!(w.plan(Scope::System, &want).unwrap().changes.is_empty());
+}
+
+#[test]
+fn limine_conf_on_the_esp_is_handed_to_the_esp_sync() {
+    let w = tumbleweed();
+    switched(&w, fspec_switch::TUMBLEWEED_ESP_SYNC);
+    let file = |path: &str, text: &str| Desired {
+        resource: serde_json::from_value(json!({"kind": "file", "path": path, "content": text})).unwrap(),
+        owner: None,
+    };
+    let backends: Vec<&dyn Backend> = ALL.iter().copied().chain([&fspec_files::FileBackend as &dyn Backend]).collect();
+    let esp = "/boot/efi/EFI/limine/limine.conf";
+    apply_scope(&w.cx(Scope::System), &backends, &[distro_res(TW, &[]), file(esp, "timeout: 3\n")]).unwrap();
+    disable_rolling(&w);
+
+    let want = [distro_res(TW, &[]), file("/etc/fspec/limine.conf", "timeout: 3\n")];
+    apply_scope(&w.cx(Scope::System), &backends, &want).unwrap();
+    assert_eq!(fs::read_to_string(w.paths.root.join(&esp[1..])).unwrap(), "timeout: 3\n");
+    let state = w.state(Scope::System);
+    assert!(!state.entries.keys().any(|k| k.kind == "file" && k.id == esp), "{:?}", state.entries.keys());
 }
 
 fn with_args(mut d: Desired, args: &[&str]) -> Desired {
