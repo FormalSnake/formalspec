@@ -441,3 +441,16 @@ fn a_rate_limit_is_reported_as_one_not_as_a_missing_release() {
     let locked = resolve(&p, &platforms(&["x86_64-linux"]), None, &cx(&fetch, &runner)).unwrap();
     assert_eq!(locked.version.as_deref(), Some("10.2.0"));
 }
+
+#[test]
+fn parts_lock_their_url_and_hash() {
+    let fetch = MapFetch::default().with("https://h/main.tar.br", "main").with("https://h/core.tar.br", "core");
+    let runner = RecordingRunner::default();
+    let cx = cx(&fetch, &runner);
+    let p = pkg(json!({"name": "discord", "source": {"kind": "url", "url": "https://h/main.tar.br"},
+        "parts": {"modules/core": {"kind": "url", "url": "https://h/core.tar.br"}}}));
+    let locked = resolve(&p, &[], None, &cx).unwrap();
+    let part = &locked.parts["modules/core"];
+    assert_eq!(part.url.as_deref(), Some("https://h/core.tar.br"));
+    assert_eq!(part.hash.as_deref(), Some("sha256-DUX1/UYrjHC/+xACGsG8/z9Y8psfr3VoWVCVQn1CgSw="));
+}

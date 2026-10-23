@@ -40,6 +40,7 @@ fn locked(name: &str, source: &str, version: &str, url: &str, body: &[u8]) -> Lo
         version: Some(version.into()),
         rev: None,
         patches: None,
+        parts: Default::default(),
         artifacts: BTreeMap::from([(PLATFORM.to_string(), artifact)]),
     }
 }
@@ -547,6 +548,7 @@ fn nix_builds_through_the_runner_and_links_its_bin() {
         version: Some("2.12".into()),
         rev: None,
         patches: None,
+        parts: Default::default(),
         artifacts: BTreeMap::new(),
     });
     w.apply(&[pkg("hello", json!({"kind": "nix", "attr": "hello"}), "pinned")]).unwrap();
@@ -801,6 +803,7 @@ fn lock_git(w: &mut World, reference: &str) {
         version: None,
         rev: Some("4f1c2a9d3e5b7a8c9d0e1f2a3b4c5d6e7f8a9b0c".into()),
         patches: None,
+        parts: Default::default(),
         artifacts: BTreeMap::from([(
             PLATFORM.to_string(),
             Artifact { oci: Some(reference.into()), ..Default::default() },
@@ -877,6 +880,7 @@ fn a_git_package_without_a_ci_artifact_is_built_on_the_host() {
         version: None,
         rev: Some("4f1c2a9d3e5b7a8c9d0e1f2a3b4c5d6e7f8a9b0c".into()),
         patches: None,
+        parts: Default::default(),
         artifacts: BTreeMap::new(),
     });
     w.runner = Box::new(BuildHere);
@@ -894,4 +898,31 @@ fn a_git_package_without_a_ci_artifact_is_built_on_the_host() {
     w.apply(&[Desired { resource: resource.unwrap(), owner: None }]).unwrap();
     assert_eq!(fs::read_to_string(w.root().join("current/pkgs/tool/lib/pam_x.so")).unwrap(), "so\n");
     assert!(!w.root().join("current/bin/tool").exists());
+}
+
+#[test]
+fn parts_unpack_into_the_package_root_at_their_locked_hash() {
+    let mut w = World::new();
+    let body = tgz(&[("files/discord", "#!/bin/sh\n", 0o755)]);
+    let core = tgz(&[("index.js", "module.exports = 1\n", 0o644)]);
+    let (main, part) = ("https://example/discord.tgz", "https://example/core.tgz");
+    let mut l = locked("discord", &format!("url:{main}"), "1.0.160", main, &body);
+    l.parts.insert(
+        "modules/core".into(),
+        Artifact { url: Some(part.into()), hash: Some(sri_sha256(&core)), ..Default::default() },
+    );
+    w.lock.upsert(l);
+    w.fetch = MapFetch::default().with(main, body).with(part, core);
+    let discord = with_fields(
+        pkg("discord", json!({"kind": "url", "url": main}), "pinned"),
+        json!({"parts": {"modules/core": {"kind": "url", "url": part}}}),
+    );
+    w.apply(std::slice::from_ref(&discord)).unwrap();
+    let js = w.root().join("current/pkgs/discord/files/modules/core/index.js");
+    assert_eq!(fs::read_to_string(js).unwrap(), "module.exports = 1\n");
+
+    let moved =
+        with_fields(discord, json!({"parts": {"modules/core": {"kind": "url", "url": "https://example/other.tgz"}}}));
+    let err = format!("{:#}", w.apply(&[moved]).unwrap_err());
+    assert!(err.contains("no hash for https://example/other.tgz"), "{err}");
 }

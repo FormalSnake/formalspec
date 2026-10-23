@@ -20,7 +20,7 @@ use std::sync::OnceLock;
 use anyhow::{Result, anyhow};
 use fspec_core::facts::Facts;
 use fspec_core::fetch::Fetch;
-use fspec_core::lock::LockedPkg;
+use fspec_core::lock::{Artifact, LockedPkg};
 use fspec_core::resource::{Channel, Pkg, Source};
 use fspec_core::runner::Runner;
 
@@ -70,6 +70,7 @@ pub fn resolve(pkg: &Pkg, platforms: &[String], min_age: Option<i64>, cx: &Cx) -
         version: None,
         rev: None,
         patches: None,
+        parts: Default::default(),
         artifacts: Default::default(),
     };
     let ctx = || format!("resolving {} ({})", pkg.name, pkg.source);
@@ -115,6 +116,11 @@ pub fn resolve(pkg: &Pkg, platforms: &[String], min_age: Option<i64>, cx: &Cx) -
         Source::Pypi { .. } => Err(anyhow!("pypi(...) packages belong in a dev.star, which fspec dev locks")),
     };
     result.map_err(|e| anyhow!("{}: {e:#}", ctx()))?;
+    for (dest, part) in &pkg.parts {
+        let Source::Url { url } = part else { return Err(anyhow!("{}: parts take url(...) sources", ctx())) };
+        let hash = hash::sri(&cx.fetch.get(url).map_err(|e| anyhow!("{}: part {dest}: {e:#}", ctx()))?);
+        locked.parts.insert(dest.clone(), Artifact { url: Some(url.clone()), hash: Some(hash), ..Default::default() });
+    }
     if !pkg.patches.is_empty() {
         locked.patches =
             Some(fspec_core::patches::hash(&cx.spec_dir, &pkg.patches).map_err(|e| anyhow!("{}: {e:#}", ctx()))?);

@@ -473,6 +473,22 @@ suits a unit whose `ExecStart` already names a path that exists; an upstream
 unit that runs `/usr/bin/asusd` needs a `service(exec = ...)` with the store
 path instead. `etc` is Linux only.
 
+An app that ships as several archives takes the rest as `parts`, a map from a
+path inside the package to a `url(...)`, each unpacked there after the main
+archive and before patches:
+
+```python
+pkg("discord", source = url(".../discord-1.0.160.distro"),
+    parts = {"modules/discord_desktop_core": url(".../discord_desktop_core-1.0.distro")})
+```
+
+Paths are relative to the package root, the archive's single top-level
+directory when it has one (Discord's `files/`), as for patches. `fspec update`
+locks each part's url and hash under the package's `parts`; a part whose url
+the lock does not have fails the apply until the next update. The parts'
+hashes are part of the store directory's name. A `git` or `nix` package has no
+downloaded archive and takes no `parts`.
+
 macOS app bundles go where Spotlight, Launchpad, the Dock and `open -a` find
 them with `apps`, the bundle paths inside the package:
 

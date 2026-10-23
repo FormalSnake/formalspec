@@ -134,6 +134,7 @@ fn locked(name: &str, source: &str, version: Option<&str>, artifacts: &[(&str, A
         version: version.map(Into::into),
         rev: None,
         patches: None,
+        parts: Default::default(),
         artifacts: artifacts.iter().map(|(k, a)| (k.to_string(), a.clone())).collect(),
     }
 }

@@ -161,6 +161,7 @@ mod tests {
             version: None,
             links: Default::default(),
             share: Default::default(),
+            parts: Default::default(),
             etc: Default::default(),
             apps: vec![],
             mode: Default::default(),

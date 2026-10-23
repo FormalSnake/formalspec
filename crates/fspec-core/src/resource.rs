@@ -278,6 +278,10 @@ pub struct Pkg {
     /// the package. Linux only.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub etc: BTreeMap<String, String>,
+    /// More `url(...)` archives unpacked into the package: a path inside it to the source. Paths
+    /// are relative to the package root, the archive's single top-level directory when it has one.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub parts: BTreeMap<String, Source>,
     /// macOS app bundles inside the package (`Kopuz.app`, `bin/kopuz.app`), cloned into
     /// /Applications under their own name. A package with `apps` may have no executables.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

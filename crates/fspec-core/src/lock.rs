@@ -87,6 +87,9 @@ pub struct LockedPkg {
     /// Hash over the package's patch files, for patched source builds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub patches: Option<String>,
+    /// `pkg(parts = ...)`, keyed by the path each unpacks into.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub parts: BTreeMap<String, Artifact>,
     /// Keyed by platform (`x86_64-linux`, `aarch64-darwin`), or `any` for platform-independent
     /// artifacts such as npm tarballs.
     #[serde(flatten)]
@@ -216,6 +219,7 @@ snapshot = "20261020"
             version: Some(version.into()),
             rev: None,
             patches: None,
+            parts: Default::default(),
             artifacts: BTreeMap::new(),
         };
         let mut lock = Lock::default();

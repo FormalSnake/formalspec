@@ -76,6 +76,7 @@ fn a_patched_npm_package_applies_into_the_rooted_store() {
         version: Some("1.0.0".into()),
         rev: None,
         patches: Some(fspec_core::patches::hash(work, &patches).unwrap()),
+        parts: Default::default(),
         artifacts: BTreeMap::from([(
             "aarch64-darwin".to_string(),
             Artifact {
@@ -91,6 +92,7 @@ fn a_patched_npm_package_applies_into_the_rooted_store() {
         version: None,
         rev: Some("4f1c2a9".into()),
         patches: None,
+        parts: Default::default(),
         artifacts: BTreeMap::new(),
     });
     lock.save(&work.join("fspec.lock")).unwrap();

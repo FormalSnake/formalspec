@@ -39,6 +39,7 @@ fn locked(name: &str, source: &str, version: &str, tarball: &Path) -> LockedPkg 
         version: Some(version.into()),
         rev: None,
         patches: None,
+        parts: Default::default(),
         artifacts: BTreeMap::from([("aarch64-darwin".to_string(), artifact)]),
     }
 }

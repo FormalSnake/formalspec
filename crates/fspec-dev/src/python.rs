@@ -95,6 +95,7 @@ pub fn compile(runner: &dyn Runner, uv: &Path, p: &Pkg, python_version: &str) ->
         version: Some(version),
         rev: None,
         patches: None,
+        parts: Default::default(),
         artifacts: BTreeMap::from([("any".to_string(), Artifact { requirements, ..Default::default() })]),
     })
 }

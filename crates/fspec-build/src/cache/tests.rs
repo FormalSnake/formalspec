@@ -40,6 +40,7 @@ fn digests_land_in_the_lock_per_platform() {
         version: None,
         rev: Some("abc".into()),
         patches: Some("sha256-P".into()),
+        parts: Default::default(),
         artifacts: Default::default(),
     });
     let r = RecordingRunner::default();

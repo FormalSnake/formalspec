@@ -164,10 +164,13 @@ fn target<'a>(cx: &'a Cx, p: &'a Pkg) -> Result<Target<'a>> {
             p.name
         );
     };
-    let identity = match &locked.patches {
+    let mut identity = match &locked.patches {
         Some(patches) => format!("{hash}+{patches}"),
         None => hash.to_string(),
     };
+    for (dest, part) in &p.parts {
+        identity = format!("{identity}+{dest}={}", part_hash(p, locked, dest, part)?);
+    }
     let dirname = format!("{}-{}-{version}", archive::hash8(&identity), p.name);
     Ok(Target {
         locked,
@@ -251,6 +254,14 @@ impl Backend for StoreBackend {
         for (dest, rel) in &p.etc {
             if !normal(dest) || !normal(rel) {
                 bail!("etc: `{dest}` and `{rel}` must be paths under /etc and inside the package");
+            }
+        }
+        if !p.parts.is_empty() && matches!(p.source, Source::Git { .. } | Source::Nix { .. }) {
+            bail!("parts unpack beside a downloaded archive; a {} package has none", p.source.kind());
+        }
+        for (dest, part) in &p.parts {
+            if !normal(dest) || !matches!(part, Source::Url { .. }) {
+                bail!("parts: `{dest}` must be a path inside the package and take a url(...) source");
             }
         }
         Ok(())
@@ -430,6 +441,7 @@ fn unpack_into(cx: &Cx, p: &Pkg, origin: &Origin, dirname: &str, dest: &Path, sc
                 }
                 _ => unpack(cx, &body, dest, &p.name).with_context(|| format!("unpacking {url}"))?,
             }
+            unpack_parts(cx, p, dest)?;
             if let Source::Npm { name } = &p.source {
                 let tarball = scratch.join("dl").join(format!("{dirname}.tgz"));
                 fs::create_dir_all(tarball.parent().context("tarball has a parent")?)?;
@@ -443,6 +455,34 @@ fn unpack_into(cx: &Cx, p: &Pkg, origin: &Origin, dirname: &str, dest: &Path, sc
         }
     }
     Ok(())
+}
+
+/// Each of `p.parts` at its locked url and hash, unpacked into its path under the package root.
+fn unpack_parts(cx: &Cx, p: &Pkg, dest: &Path) -> Result<()> {
+    if p.parts.is_empty() {
+        return Ok(());
+    }
+    let root = patch_root(dest, &p.source);
+    let locked = cx.lock.pkg(&p.name, &p.source.to_string()).context("the package is not in fspec.lock")?;
+    for (rel, part) in &p.parts {
+        let hash = part_hash(p, locked, rel, part)?;
+        let Source::Url { url } = part else { unreachable!("part_hash takes only url parts") };
+        let body = cx.fetch.get(url)?;
+        archive::verify(&body, hash).with_context(|| format!("verifying {url}"))?;
+        unpack(cx, &body, &root.join(rel), &p.name).with_context(|| format!("unpacking {url} into {rel}"))?;
+    }
+    Ok(())
+}
+
+/// The locked hash of the part at `dest`, when the lock has it for the url the spec names.
+fn part_hash<'l>(p: &Pkg, locked: &'l LockedPkg, dest: &str, part: &Source) -> Result<&'l str> {
+    let Source::Url { url } = part else { bail!("pkg {}: parts take url(...) sources", p.name) };
+    locked
+        .parts
+        .get(dest)
+        .filter(|a| a.url.as_deref() == Some(url.as_str()))
+        .and_then(|a| a.hash.as_deref())
+        .with_context(|| format!("pkg {} has no hash for {url} in fspec.lock, run fspec update", p.name))
 }
 
 /// Where patch paths are relative to: the package directory inside an npm install or the single
