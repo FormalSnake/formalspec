@@ -1804,6 +1804,8 @@ A cargo workspace under `crates/`:
 | `fspec-os` | Services and timers per init (systemd, launchd, runit, OpenRC, dinit, s6, cron), users, macOS `defaults` and `setting` |
 | `fspec-remote` | Remote hosts: ssh and tar command lines, the spec shipment, the probe check, `--all` ordering |
 | `fspec-switch` | `fspec switch` and `forget`: btrfs and bootloader detection, the boot owner record, the command plans per distro and for `--adopt-boot`, the `--reset-var` staging |
+| `fspec-sync` | `fspec sync` and `sync-agent`: scanning items into manifests, the three-way merge, tar and keyring transport over ssh, `prev` and `--rollback` |
+| `fspec-install` | The installer |
 | `fspec-build` | Source builds: recipe detection, the `.tar.zst` packer, builders over ssh with the local fallback, the `ci packages` workflow, `update --cache` |
 | `fspec` | The CLI |
 
