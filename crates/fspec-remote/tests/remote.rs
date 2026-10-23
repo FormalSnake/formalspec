@@ -80,6 +80,15 @@ fn apply_probes_ships_then_runs_with_a_terminal() {
 }
 
 #[test]
+fn sync_checks_only_the_platform() {
+    let h = host("g815", "x86_64-linux", "opensuse-tumbleweed");
+    let probe = |platform, distro| serde_json::from_str(&probe_json(platform, distro)).unwrap();
+    fspec_remote::verify_platform(&h, &probe("x86_64-linux", "nixos")).unwrap();
+    let err = fspec_remote::verify_platform(&h, &probe("aarch64-linux", "nixos")).unwrap_err();
+    assert_eq!(err.to_string(), "host g815 is declared as x86_64-linux but the machine is aarch64-linux");
+}
+
+#[test]
 fn probe_mismatch_fails_before_shipping() {
     let (dir, runner) = fixture("");
     runner.respond(PROBE, ok(&probe_json("aarch64-linux", "fedora")));

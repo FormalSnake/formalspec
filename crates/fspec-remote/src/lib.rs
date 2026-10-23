@@ -53,6 +53,16 @@ pub fn verify(host: &Host, probe: &Probe) -> Result<()> {
     Ok(())
 }
 
+/// Only the platform, for `fspec sync`, which touches only the home: a host declared as the
+/// distro it is moving to still syncs from the one it runs.
+pub fn verify_platform(host: &Host, probe: &Probe) -> Result<()> {
+    let facts = Facts::declared(&host.name, &host.platform, host.system.as_ref())?;
+    if facts.platform() != probe.platform {
+        bail!("host {} is declared as {} but the machine is {}", host.name, facts.platform(), probe.platform);
+    }
+    Ok(())
+}
+
 /// Fails when the fspec that printed `probe` is older than this one.
 pub fn current(alias: &str, probe: &Probe) -> Result<()> {
     if probe.engine < ENGINE {

@@ -208,7 +208,7 @@ pub fn run(
     Ok(())
 }
 
-/// The first route to `peer` that answers with a current fspec on the declared machine: the
+/// The first route to `peer` that answers with a current fspec on the declared platform: the
 /// routes of this host's builder of the same name, else the peer's ssh alias.
 fn reach(runner: &dyn Runner, this: &Host, peer: &Host) -> Result<Option<String>> {
     let alias = peer.ssh.clone().unwrap_or_else(|| peer.name.clone());
@@ -218,7 +218,7 @@ fn reach(runner: &dyn Runner, this: &Host, peer: &Host) -> Result<Option<String>
     };
     for route in routes {
         if let Reach::Reachable(probe) = fspec_remote::probe(runner, &route)? {
-            fspec_remote::verify(peer, &probe)?;
+            fspec_remote::verify_platform(peer, &probe)?;
             fspec_remote::current(&route, &probe)?;
             return Ok(Some(route));
         }

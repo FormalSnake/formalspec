@@ -1710,8 +1710,10 @@ itself: Flare (a Signal linked device), Beeper (Matrix device keys), 1Password
 
 **Transport.** A peer is reached over the routes of this host's builder of
 the same name when it declares one (the Tailscale name, then the LAN), else
-over its `ssh` alias, probed like a remote apply: it must be the machine its
-host declares, running an fspec at least as new as this one. An unreachable
+over its `ssh` alias, probed like a remote apply: it must run the platform its
+host declares and an fspec at least as new as this one. The distro is not
+checked, on either end, since an item touches only the home: a host declared
+as the distro it is moving to still syncs from the one it runs. An unreachable
 peer is skipped. The far end runs `fspec sync-agent`, one request per ssh
 call on stdin. Files travel as tar inside ssh, whose host keys authenticate
 both ends and encrypt the stream. Keyring secrets are read and stored with

@@ -705,7 +705,10 @@ fn main() -> Result<()> {
         }
         Command::Sync { items, peer, from, rollback, dry_run, watch } => {
             let spec = fspec_eval::evaluate(&spec_path)?;
-            let this = select(&spec, None, &paths)?;
+            let this = named(&spec, None)?;
+            if is_live(&paths) {
+                check_platform(this)?;
+            }
             let local = fspec_sync::Local::new(&LiveRunner, this.name.clone(), &paths);
             if *rollback {
                 for item in this.sync.iter().filter(|i| items.is_empty() || items.contains(&i.name)) {
@@ -1567,12 +1570,20 @@ fn sudo_system(spec: &Path, host: &str, paths: &Paths, command: &[&str]) -> Resu
 }
 
 /// A host's declared platform must match the machine before fspec acts on it.
-fn check_declared(host: &Host) -> Result<()> {
+fn check_platform(host: &Host) -> Result<()> {
     let facts = Facts::declared(&host.name, &host.platform, host.system.as_ref())?;
-    let (platform, distro) = Facts::probe_local();
+    let (platform, _) = Facts::probe_local();
     if facts.platform() != platform {
         bail!("host {} is declared as {} but this machine is {platform}", host.name, facts.platform());
     }
+    Ok(())
+}
+
+/// The platform and the distro too, for commands that drive the distro's packages and boot.
+fn check_declared(host: &Host) -> Result<()> {
+    check_platform(host)?;
+    let facts = Facts::declared(&host.name, &host.platform, host.system.as_ref())?;
+    let (_, distro) = Facts::probe_local();
     if facts.distro != distro {
         bail!("host {} is declared as {} but this machine runs {distro}", host.name, facts.distro);
     }
