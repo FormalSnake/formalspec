@@ -4,7 +4,7 @@ use std::path::Path;
 use anyhow::bail;
 use fspec_core::Host;
 use fspec_core::runner::{Output, RecordingRunner};
-use fspec_remote::{Planned, Remote, apply_all, order};
+use fspec_remote::{ENGINE, Planned, Remote, apply_all, order};
 use serde_json::json;
 
 fn host(name: &str, platform: &str, distro: &str) -> Host {
@@ -21,7 +21,7 @@ fn ok(stdout: &str) -> Output {
 }
 
 fn probe_json(platform: &str, distro: &str) -> String {
-    json!({"hostname": "g815", "platform": platform, "distro": distro}).to_string()
+    json!({"hostname": "g815", "platform": platform, "distro": distro, "engine": ENGINE}).to_string()
 }
 
 const PROBE: &str = "ssh -o ConnectTimeout=5 -o BatchMode=yes g815";
@@ -99,6 +99,17 @@ fn dirty_tree_is_refused_unless_allowed() {
     remote(dir.path(), &runner, true).apply(&h, "g815", None).unwrap();
     let lines = runner.lines();
     assert!(lines.iter().any(|l| l.contains("rm -rf \"$HOME/.cache/fspec/spec/abc123-dirty\"")));
+}
+
+#[test]
+fn an_older_fspec_on_the_remote_fails_before_shipping() {
+    let (dir, runner) = fixture("");
+    runner
+        .respond(PROBE, ok(&json!({"hostname": "g815", "platform": "x86_64-linux", "distro": "bazzite"}).to_string()));
+    let h = host("g815", "x86_64-linux", "bazzite");
+    let err = remote(dir.path(), &runner, false).plan(&h, "g815").err().unwrap();
+    assert!(err.to_string().starts_with("fspec on g815 is older than this one (engine 0 < "), "{err}");
+    assert_eq!(runner.lines().len(), 1);
 }
 
 #[test]

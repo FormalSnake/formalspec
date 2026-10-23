@@ -13,18 +13,26 @@ use serde::{Deserialize, Serialize};
 
 pub use cmd::{Target, target};
 
+/// What this fspec can read, compared against the remote's before shipping it a spec. Bump it
+/// with every builtin, builtin argument, resource field or lock key a spec can use, since an
+/// older fspec fails on them, or worse, ignores an unknown lock key.
+pub const ENGINE: u32 = 1;
+
 /// What `fspec facts --json` prints: the machine as it is, to compare against its declaration.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct Probe {
     pub hostname: String,
     pub platform: String,
     pub distro: String,
+    /// The remote fspec's [`ENGINE`]; one from before the field prints none, read as 0.
+    #[serde(default)]
+    pub engine: u32,
 }
 
 impl Probe {
     pub fn local(hostname: String) -> Probe {
         let (platform, distro) = Facts::probe_local();
-        Probe { hostname, platform, distro }
+        Probe { hostname, platform, distro, engine: ENGINE }
     }
 }
 
@@ -82,11 +90,18 @@ impl Remote<'_> {
         }
     }
 
-    /// Probes `alias` and checks it is the machine `host` declares.
+    /// Probes `alias` and checks it is the machine `host` declares, running an fspec that reads
+    /// what this one does.
     fn reach(&self, host: &Host, alias: &str) -> Result<Reach> {
         let reach = self.probe(alias)?;
         if let Reach::Reachable(probe) = &reach {
             verify(host, probe)?;
+            if probe.engine < ENGINE {
+                bail!(
+                    "fspec on {alias} is older than this one (engine {} < {ENGINE}) and may not read this spec; install a current fspec there first",
+                    probe.engine
+                );
+            }
         }
         Ok(reach)
     }

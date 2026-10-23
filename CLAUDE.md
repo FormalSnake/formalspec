@@ -56,5 +56,7 @@ add each mapping you settle there, and drop nix-isms that only exist to work aro
   `docs/design.md` (and `docs/from-nix.md` where it maps a nix construct) in the same commit.
 - Comments state constraints the code cannot show. No em dashes in code, docs or commits.
 - Commits are short lowercase conventional subjects (`feat(build): ...`), one unit of work each.
+- A new builtin, builtin argument, resource field or lock key bumps `fspec_remote::ENGINE`, so a
+  remote host running an older fspec is refused instead of misreading the spec.
 - Prefer a plan function that returns commands over code that runs them; it keeps the step
   testable and printable.

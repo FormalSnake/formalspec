@@ -1634,7 +1634,12 @@ through the `Runner`:
    declaration implies, otherwise apply fails before touching anything:
    `host g815 is declared as x86_64-linux/bazzite but the machine is
    aarch64-linux/fedora`. The probe is a check, never an input to evaluation.
-   A missing `fspec` on the remote fails with an install hint.
+   A missing `fspec` on the remote fails with an install hint. The probe also
+   prints the remote fspec's engine number, raised with every builtin, field
+   or lock key a spec can use; one lower than this fspec's fails the same way
+   (`fspec on g815 is older than this one (engine 0 < 1)`), since it may
+   reject the spec or ignore lock keys it does not know. Nothing ships it a
+   newer fspec: the driving binary may not run there.
 2. Refuse a dirty spec tree. Hosts that apply the same commit end up with the
    same software, so uncommitted changes under the spec directory stop the
    apply unless `--dirty` is passed.
