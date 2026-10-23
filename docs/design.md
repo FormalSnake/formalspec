@@ -1531,7 +1531,16 @@ without them, so a blessed root gets its emergency shell back. sdbootutil is not
 it unlinks entries it cannot parse and manages the default entry and the EFI
 boot order. A libzypp commit plugin runs the sync after every transaction,
 once the kernel scriptlets have rebuilt the initrds, and
-`fspec-esp-sync.service` runs it at boot. The guard, the deadline timer and
+`fspec-esp-sync.service` runs it at boot. When the root has
+`/etc/fspec/limine.conf` and the ESP has `EFI/limine/`, the sync also writes
+`<esp>/EFI/limine/limine.conf`: that file as the header (theme, the chain entry
+to systemd-boot, other systems), then a `Kernels` submenu with one `linux` entry
+per boot entry on the ESP, its kernel, initrds and options, booted straight and
+without counting tries. A spec themes or extends Limine by writing
+`/etc/fspec/limine.conf` with `file(...)`, never the ESP copy. Apply keeps the
+script itself at the running fspec's version: on a switched root whose
+`esp-sync.sh` differs, drift says so, and apply rewrites it (with a backup in
+the journal) and starts the service. The guard, the deadline timer and
 the watchdog are the bootc root's, except that the guard waits for tailscale
 only when the inherited root had tailscale state: tailscaled writes a state
 file of its own before anyone logs in, so the install leaves

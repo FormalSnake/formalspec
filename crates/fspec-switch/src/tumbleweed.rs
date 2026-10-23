@@ -78,8 +78,12 @@ done
 /// with a boot entry `$3-<kernel>.conf` each that counts three tries when it is new. While an entry
 /// still counts tries it masks the emergency and rescue targets, so a trial boot that fails a mount
 /// goes on to sshd degraded instead of waiting offline at a shell; a blessed entry gets the shell
-/// back for hands-on recovery. Touches only `$2/$3/` and `$2/loader/entries/$3-*.conf`.
-pub(crate) const ESP_SYNC: &str = r#"#!/bin/sh
+/// back for hands-on recovery. Touches only `$2/$3/` and `$2/loader/entries/$3-*.conf`, and
+/// `$2/EFI/limine/limine.conf` when the root has `/etc/fspec/limine.conf`: that file's menu,
+/// then a `Kernels` directory with every boot entry on the ESP, so Limine boots any kernel
+/// straight as well as through systemd-boot. Limine counts no tries, so those entries go
+/// around the boot guard; the menu's default entry is the one that should chainload systemd-boot.
+pub const ESP_SYNC: &str = r#"#!/bin/sh
 set -eu
 root=$1 esp=$2 name=$3
 dir=$esp/$name
@@ -92,7 +96,8 @@ options=$(cat "$root/etc/kernel/cmdline")
 trial="systemd.mask=emergency.target systemd.mask=emergency.service systemd.mask=rescue.target systemd.mask=rescue.service"
 title=$(sed -n 's/^PRETTY_NAME="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$root/usr/lib/os-release")
 mkdir -p "$dir"
-trap 'rm -f "$dir"/*/*.new "$entries/$name"-*.new' EXIT
+limine=$esp/EFI/limine/limine.conf
+trap 'rm -f "$dir"/*/*.new "$entries/$name"-*.new "$limine.new"' EXIT
 kernels=" "
 for m in "$root"/usr/lib/modules/*/; do
 	k=${m%/}
@@ -141,6 +146,27 @@ for d in "$dir"/*/; do
 	k=${k##*/}
 	case $kernels in *" $k "*) ;; *) rm -rf "$d" ;; esac
 done
+if [ -f "$root/etc/fspec/limine.conf" ] && [ -d "${limine%/*}" ]; then
+	{
+		cat "$root/etc/fspec/limine.conf"
+		printf '\n/Kernels\n    comment: Every kernel on this disk, booted straight, without counting tries\n'
+		for f in "$entries"/*.conf; do
+			[ -e "$f" ] || continue
+			awk '
+				/^title / { sub(/^title +/, ""); t = $0 }
+				/^version / { sub(/^version +/, ""); v = $0 }
+				/^linux / { l = $2 }
+				/^initrd / { i = i "    module_path: boot():" $2 "\n" }
+				/^options / { sub(/^options +/, ""); o = $0 }
+				END {
+					if (l == "") exit
+					if (v != "" && index(t, v) == 0) t = t " (" v ")"
+					printf "//%s\n    protocol: linux\n    path: boot():%s\n%s    cmdline: %s\n", t, l, i, o
+				}' "$f"
+		done
+	} >"$limine.new"
+	if cmp -s "$limine" "$limine.new"; then rm "$limine.new"; else mv "$limine.new" "$limine"; fi
+fi
 sync -f "$entries"
 "#;
 

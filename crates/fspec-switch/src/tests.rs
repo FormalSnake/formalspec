@@ -1593,6 +1593,53 @@ fn tumbleweed_esp_sync_follows_the_installed_kernels_and_keeps_their_counters() 
 }
 
 #[test]
+fn tumbleweed_esp_sync_lists_every_boot_entry_under_the_limine_menu() {
+    let dir = tempfile::tempdir().unwrap();
+    let (root, esp) = (dir.path().join("root"), dir.path().join("esp"));
+    std::fs::create_dir_all(root.join("etc/fspec")).unwrap();
+    std::fs::create_dir_all(root.join("usr/lib")).unwrap();
+    std::fs::create_dir_all(root.join("etc/kernel")).unwrap();
+    std::fs::write(root.join("etc/kernel/cmdline"), "root=UUID=u rw\n").unwrap();
+    std::fs::write(root.join("usr/lib/os-release"), "PRETTY_NAME=\"openSUSE Tumbleweed\"\n").unwrap();
+    std::fs::create_dir_all(esp.join("loader/entries")).unwrap();
+    std::fs::write(
+        esp.join("loader/entries/nixos-generation-427.conf"),
+        "title NixOS\nversion Generation 427\nlinux /EFI/nixos/k.efi\ninitrd /EFI/nixos/i.efi\noptions init=/nix/store/x/init\n",
+    )
+    .unwrap();
+    std::fs::write(esp.join("loader/entries/windows.conf"), "title Windows\nefi /EFI/Microsoft/Boot/bootmgfw.efi\n")
+        .unwrap();
+    tw_kernel(&root, "6.17.1-1-default");
+
+    // Without the header, Limine's config is not touched.
+    tw_sync(&root, &esp);
+    assert!(!esp.join("EFI/limine/limine.conf").exists());
+
+    std::fs::create_dir_all(esp.join("EFI/limine")).unwrap();
+    let head = "timeout: 4\n\n/FormalOS\n    protocol: efi\n    path: boot():/EFI/systemd/systemd-bootx64.efi\n";
+    std::fs::write(root.join("etc/fspec/limine.conf"), head).unwrap();
+    tw_sync(&root, &esp);
+    let conf = std::fs::read_to_string(esp.join("EFI/limine/limine.conf")).unwrap();
+    assert_eq!(
+        conf,
+        format!(
+            "{head}\n/Kernels\n    comment: Every kernel on this disk, booted straight, without counting tries\n\
+             //NixOS (Generation 427)\n    protocol: linux\n    path: boot():/EFI/nixos/k.efi\n\
+             \x20   module_path: boot():/EFI/nixos/i.efi\n    cmdline: init=/nix/store/x/init\n\
+             //openSUSE Tumbleweed (6.17.1-1-default)\n    protocol: linux\n    path: boot():/tumbleweed/6.17.1-1-default/linux\n\
+             \x20   module_path: boot():/tumbleweed/6.17.1-1-default/initrd\n\
+             \x20   cmdline: root=UUID=u rw systemd.mask=emergency.target systemd.mask=emergency.service \
+             systemd.mask=rescue.target systemd.mask=rescue.service\n"
+        )
+    );
+    // An unchanged menu is not rewritten, so the ESP sees no write.
+    let before = std::fs::metadata(esp.join("EFI/limine/limine.conf")).unwrap().modified().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    tw_sync(&root, &esp);
+    assert_eq!(std::fs::metadata(esp.join("EFI/limine/limine.conf")).unwrap().modified().unwrap(), before);
+}
+
+#[test]
 fn the_zypp_plugin_acks_every_frame_and_syncs_after_the_commit() {
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("log");

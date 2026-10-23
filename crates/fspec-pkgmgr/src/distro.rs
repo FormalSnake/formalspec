@@ -49,6 +49,9 @@ const KERNEL_ARGS: &str = "kernel_args";
 const CMDLINE: &str = "/etc/kernel/cmdline";
 /// Installed by `switch --beside`: it writes the boot entries on the ESP from `/etc/kernel/cmdline`.
 const ESP_SYNC_UNIT: &str = "/etc/systemd/system/fspec-esp-sync.service";
+/// The script that unit runs. Switch wrote it once; apply keeps it at this fspec's version so a
+/// root installed by an older fspec gets newer entry generation (Limine's kernel list).
+const ESP_SYNC_SCRIPT: &str = "/etc/fspec/esp-sync.sh";
 
 fn recorded_args(rec: &serde_json::Map<String, Value>) -> Vec<String> {
     rec.get(KERNEL_ARGS)
@@ -90,6 +93,30 @@ fn set_kernel_args(cx: &Cx, journal: &mut Journal, had: &[String], want: &[Strin
     journal.record(Undo::Run { cmd: esp_sync() })?;
     journal.backup(&path)?;
     fs::write(&path, format!("{next}\n")).with_context(|| format!("writing {}", path.display()))?;
+    cx.runner.check(&esp_sync())?;
+    Ok(())
+}
+
+/// Whether this root runs fspec's ESP sync with a script other than this fspec's.
+fn stale_esp_sync(cx: &Cx) -> bool {
+    cx.facts.distro == "opensuse-tumbleweed"
+        && cx.paths.system(ESP_SYNC_UNIT).exists()
+        && fs::read_to_string(cx.paths.system(ESP_SYNC_SCRIPT)).ok().as_deref()
+            != Some(fspec_switch::TUMBLEWEED_ESP_SYNC)
+}
+
+/// Writes this fspec's ESP sync script and runs it, so the entries follow at once.
+fn refresh_esp_sync(cx: &Cx, journal: &mut Journal) -> Result<()> {
+    if !stale_esp_sync(cx) {
+        return Ok(());
+    }
+    let path = cx.paths.system(ESP_SYNC_SCRIPT);
+    journal.record(Undo::Run { cmd: esp_sync() })?;
+    journal.backup(&path)?;
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+    fs::write(&path, fspec_switch::TUMBLEWEED_ESP_SYNC).with_context(|| format!("writing {}", path.display()))?;
     cx.runner.check(&esp_sync())?;
     Ok(())
 }
@@ -176,6 +203,9 @@ impl Backend for DistroBackend {
             notes.extend(zypper::snapshot_drift(cx, zypper::pin(cx)?));
         }
         notes.extend(drift_names(cx, fam, &recorded(entry), &entry.record)?);
+        if stale_esp_sync(cx) {
+            notes.push(format!("{ESP_SYNC_SCRIPT} is not this fspec's"));
+        }
         let args = recorded_args(&entry.record);
         if !args.is_empty() {
             let line = fs::read_to_string(cx.paths.system(CMDLINE)).unwrap_or_default();
@@ -249,6 +279,7 @@ impl Backend for DistroBackend {
             if !added.is_empty() {
                 install(cx, journal, fam, &added, None)?;
             }
+            refresh_esp_sync(cx, journal)?;
             let args = &distro(&d.resource)?.kernel_args;
             set_kernel_args(cx, journal, &recorded_args(&rec), args)?;
             let mut next = record_names(cx, fam, want)?;

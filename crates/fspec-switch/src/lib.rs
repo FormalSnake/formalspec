@@ -27,7 +27,7 @@ pub use machine::{
     Btrfs, Facts, Firmware, Layout, Machine, Part, assumed, boot_owner, classify, detect, detect_device,
 };
 pub use recipe::{Recipe, caveats, misfit, recipe};
-pub use tumbleweed::{TUMBLEWEED_IMAGE, Tumbleweed, tumbleweed};
+pub use tumbleweed::{ESP_SYNC as TUMBLEWEED_ESP_SYNC, TUMBLEWEED_IMAGE, Tumbleweed, tumbleweed};
 
 /// The distros `fspec switch --distro` can bootstrap.
 pub const DISTROS: [&str; 6] = ["fedora", "arch", "debian", "ubuntu", "void", "aerynos"];

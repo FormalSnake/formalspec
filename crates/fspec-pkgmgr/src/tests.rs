@@ -1192,6 +1192,34 @@ fn a_zypper_install_whose_scriptlet_failed_counts_and_reinstalls_that_package() 
     assert!(!lines.iter().any(|l| l.contains("remove")), "{lines:#?}");
 }
 
+/// A root `fspec switch --beside` installed, with `script` as its ESP sync.
+fn switched(w: &World, script: &str) {
+    for (path, text) in [("etc/systemd/system/fspec-esp-sync.service", ""), ("etc/fspec/esp-sync.sh", script)] {
+        let path = w.paths.root.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, text).unwrap();
+    }
+}
+
+#[test]
+fn apply_brings_an_older_esp_sync_script_up_to_this_fspec() {
+    let w = tumbleweed();
+    let want = [distro_res(TW, &[])];
+    w.apply(Scope::System, &want).unwrap();
+    switched(&w, "#!/bin/sh\n# an older fspec's\n");
+    disable_rolling(&w);
+    let plan = w.plan(Scope::System, &want).unwrap();
+    assert!(plan.to_string().contains("/etc/fspec/esp-sync.sh is not this fspec's"), "{plan}");
+
+    w.take();
+    w.apply(Scope::System, &want).unwrap();
+    let script = fs::read_to_string(w.paths.root.join("etc/fspec/esp-sync.sh")).unwrap();
+    assert_eq!(script, fspec_switch::TUMBLEWEED_ESP_SYNC);
+    assert!(w.take().contains(&"systemctl start fspec-esp-sync.service".to_string()));
+    disable_rolling(&w);
+    assert!(w.plan(Scope::System, &want).unwrap().changes.is_empty());
+}
+
 fn with_args(mut d: Desired, args: &[&str]) -> Desired {
     let Resource::Distro(distro) = &mut d.resource else { unreachable!() };
     distro.kernel_args = args.iter().map(ToString::to_string).collect();
@@ -1209,9 +1237,7 @@ fn kernel_args_replace_their_own_and_rewrite_the_boot_entries() {
     let err = w.apply(Scope::System, &want).unwrap_err();
     assert!(format!("{err:#}").contains("fspec switch --beside"), "{err:#}");
 
-    let unit = w.paths.root.join("etc/systemd/system/fspec-esp-sync.service");
-    fs::create_dir_all(unit.parent().unwrap()).unwrap();
-    fs::write(&unit, "").unwrap();
+    switched(&w, fspec_switch::TUMBLEWEED_ESP_SYNC);
     disable_rolling(&w);
     w.take();
     w.apply(Scope::System, &want).unwrap();
@@ -1239,9 +1265,7 @@ fn kernel_args_replace_their_own_and_rewrite_the_boot_entries() {
 #[test]
 fn a_cmdline_file_handed_to_kernel_args_stays_on_disk() {
     let w = tumbleweed();
-    let unit = w.paths.root.join("etc/systemd/system/fspec-esp-sync.service");
-    fs::create_dir_all(unit.parent().unwrap()).unwrap();
-    fs::write(&unit, "").unwrap();
+    switched(&w, fspec_switch::TUMBLEWEED_ESP_SYNC);
     let base = "root=UUID=u rootflags=subvol=@tumbleweed rw quiet";
     let file = Desired {
         resource: serde_json::from_value(
