@@ -376,6 +376,26 @@ fn make_untagged<'v, T: DeserializeOwned + Serialize>(
     Ok(Resource_ { kind: kind.into(), data })
 }
 
+fn sync_<'v>(args: UnpackTuple<Value<'v>>, kwargs: Value<'v>) -> anyhow::Result<Resource_> {
+    let mut map = fields("sync", &["name"], &args.items, kwargs)?;
+    let name = map.get("name").and_then(Json::as_str).context("sync() needs a name")?.to_string();
+    let what = format!("sync({name})");
+    if let Some(keyring) = map.get_mut("keyring") {
+        untag(&what, "keyring", "keyring", keyring)?;
+    }
+    if let Some(keys) = map.get_mut("keys") {
+        let mut list = Json::Array(vec![keys.take()]);
+        untag(&what, "keys", "json_keys", &mut list)?;
+        *keys = list.as_array_mut().and_then(|l| l.pop()).unwrap_or_default();
+    }
+    let mut data = validated::<fspec_core::resource::SyncItem>(&what, map)?;
+    serde_json::from_value::<fspec_core::resource::SyncItem>(data.clone())?.check()?;
+    if let Some(obj) = data.as_object_mut() {
+        obj.insert("kind".into(), "sync".into());
+    }
+    Ok(Resource_ { kind: "sync".into(), data })
+}
+
 /// `lib(...)` and `bin(...)`: a name plus a package name per manager the lookup cannot resolve.
 fn native_<'v>(kind: &str, args: UnpackTuple<Value<'v>>, kwargs: Value<'v>) -> anyhow::Result<Resource_> {
     let map = fields(kind, &["name"], &args.items, kwargs)?;
@@ -483,10 +503,24 @@ fn host_<'v>(
     if let Some(builders) = map.get_mut("builders") {
         untag(&what, "builders", "builder", builders)?;
     }
+    if let Some(sync) = map.get_mut("sync") {
+        untag(&what, "sync", "sync", sync)?;
+    }
 
     let facts_value = facts_struct(heap, &facts);
     let mut resources = Vec::new();
     expand(&what, modules, facts_value, eval, &mut resources)?;
+    let (mut synced, resources): (Vec<Json>, Vec<Json>) =
+        resources.into_iter().partition(|r| r.get("kind").and_then(Json::as_str) == Some("sync"));
+    if !synced.is_empty() {
+        for s in &mut synced {
+            s.as_object_mut().map(|o| o.remove("kind"));
+        }
+        match map.entry("sync").or_insert_with(|| Json::Array(vec![])) {
+            Json::Array(list) => list.extend(synced),
+            _ => bail!("{what}(sync = ...) must be a list"),
+        }
+    }
     map.insert("resources".into(), Json::Array(resources));
     let data = validated::<Host>(&what, map)?;
     Ok(Resource_ { kind: "host".into(), data })
@@ -526,7 +560,7 @@ fn expand<'v>(
     }
     if let Some(r) = Resource_::from_value(v) {
         match r.kind.as_str() {
-            "pkg" | "file" | "service" | "timer" | "user" | "secret" | "defaults" | "setting" | "repo" => {}
+            "pkg" | "file" | "service" | "timer" | "user" | "secret" | "defaults" | "setting" | "repo" | "sync" => {}
             "image" | "distro" => bail!("{what}: {}(...) goes in host(system = ...), not in modules", r.kind),
             kind => bail!("{what}: modules hold resources, got {kind}(...)"),
         }
@@ -684,6 +718,27 @@ fn builtins(builder: &mut GlobalsBuilder) {
         #[starlark(kwargs)] kwargs: Value<'v>,
     ) -> anyhow::Result<Resource_> {
         make_untagged::<fspec_core::resource::Builder>("builder", &["name"], args, kwargs)
+    }
+
+    fn sync<'v>(
+        #[starlark(args)] args: UnpackTuple<Value<'v>>,
+        #[starlark(kwargs)] kwargs: Value<'v>,
+    ) -> anyhow::Result<Resource_> {
+        sync_(args, kwargs)
+    }
+
+    fn keyring<'v>(
+        #[starlark(args)] args: UnpackTuple<Value<'v>>,
+        #[starlark(kwargs)] kwargs: Value<'v>,
+    ) -> anyhow::Result<Resource_> {
+        make_untagged::<fspec_core::resource::KeyringItem>("keyring", &[], args, kwargs)
+    }
+
+    fn json_keys<'v>(
+        #[starlark(args)] args: UnpackTuple<Value<'v>>,
+        #[starlark(kwargs)] kwargs: Value<'v>,
+    ) -> anyhow::Result<Resource_> {
+        make_untagged::<fspec_core::resource::JsonKeys>("json_keys", &["path", "keys"], args, kwargs)
     }
 
     fn secret<'v>(

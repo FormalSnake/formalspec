@@ -16,7 +16,7 @@ pub use cmd::{Target, target};
 /// What this fspec can read, compared against the remote's before shipping it a spec. Bump it
 /// with every builtin, builtin argument, resource field or lock key a spec can use, since an
 /// older fspec fails on them, or worse, ignores an unknown lock key.
-pub const ENGINE: u32 = 2;
+pub const ENGINE: u32 = 3;
 
 /// What `fspec facts --json` prints: the machine as it is, to compare against its declaration.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -53,6 +53,17 @@ pub fn verify(host: &Host, probe: &Probe) -> Result<()> {
     Ok(())
 }
 
+/// Fails when the fspec that printed `probe` is older than this one.
+pub fn current(alias: &str, probe: &Probe) -> Result<()> {
+    if probe.engine < ENGINE {
+        bail!(
+            "fspec on {alias} is older than this one (engine {} < {ENGINE}) and may not read this spec; install a current fspec there first",
+            probe.engine
+        );
+    }
+    Ok(())
+}
+
 pub enum Reach {
     Reachable(Probe),
     Unreachable(String),
@@ -74,34 +85,30 @@ pub struct Remote<'a> {
     pub loads_cache: Option<PathBuf>,
 }
 
-impl Remote<'_> {
-    pub fn probe(&self, alias: &str) -> Result<Reach> {
-        let out = self.runner.run(&cmd::probe(alias))?;
-        match out.status {
-            0 => Ok(Reach::Reachable(
-                serde_json::from_str(&out.stdout)
-                    .with_context(|| format!("`fspec facts --json` on {alias} printed: {}", out.stdout.trim()))?,
-            )),
-            255 => Ok(Reach::Unreachable(out.stderr.trim().to_string())),
-            127 => bail!(
-                "fspec is not installed on {alias} (not on PATH for a non-interactive ssh shell); install it there first, e.g. `cargo install --git https://github.com/FormalStudio/formalspec fspec`"
-            ),
-            _ => bail!("`fspec facts --json` failed on {alias}: {}", failure(&out)),
-        }
+/// Runs `fspec facts --json` on `alias`.
+pub fn probe(runner: &dyn Runner, alias: &str) -> Result<Reach> {
+    let out = runner.run(&cmd::probe(alias))?;
+    match out.status {
+        0 => Ok(Reach::Reachable(
+            serde_json::from_str(&out.stdout)
+                .with_context(|| format!("`fspec facts --json` on {alias} printed: {}", out.stdout.trim()))?,
+        )),
+        255 => Ok(Reach::Unreachable(out.stderr.trim().to_string())),
+        127 => bail!(
+            "fspec is not installed on {alias} (not on PATH for a non-interactive ssh shell); install it there first, e.g. `cargo install --git https://github.com/FormalStudio/formalspec fspec`"
+        ),
+        _ => bail!("`fspec facts --json` failed on {alias}: {}", failure(&out)),
     }
+}
 
+impl Remote<'_> {
     /// Probes `alias` and checks it is the machine `host` declares, running an fspec that reads
     /// what this one does.
     fn reach(&self, host: &Host, alias: &str) -> Result<Reach> {
-        let reach = self.probe(alias)?;
+        let reach = probe(self.runner, alias)?;
         if let Reach::Reachable(probe) = &reach {
             verify(host, probe)?;
-            if probe.engine < ENGINE {
-                bail!(
-                    "fspec on {alias} is older than this one (engine {} < {ENGINE}) and may not read this spec; install a current fspec there first",
-                    probe.engine
-                );
-            }
+            current(alias, probe)?;
         }
         Ok(reach)
     }

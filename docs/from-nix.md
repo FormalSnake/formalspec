@@ -81,6 +81,7 @@ the store-wide build graph and hand-written hashes.
 | `power.sleep.computer`, `power.restartAfterFreeze`, `networking.applicationFirewall`, `pmset`/`systemsetup` in activation scripts | `setting("pmset" \| "systemsetup" \| "firewall", key, value)` |
 | `system.defaults` for a root domain, or `defaults write /Library/Preferences/...` in activation | `defaults(..., system = True)` |
 | Extra `fetchurl` sources unpacked into `$out` in `installPhase` (Discord's modules) | `pkg(..., parts = {"<dir>": url(...)})` |
+| A syncthing folder that carries an app's profile or tokens between machines | `sync(...)`, with the keyring item that unlocks it |
 | `$out/Applications/Foo.app` with mac-app-util or `copyApps` | `pkg(..., apps = ["Foo.app"])`, from a release `.dmg` asset where upstream ships one |
 
 ### A three-host example

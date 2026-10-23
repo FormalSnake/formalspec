@@ -19,6 +19,7 @@ fspec-sources.workspace = true
 fspec-pkgmgr.workspace = true
 fspec-os.workspace = true
 fspec-remote.workspace = true
+fspec-sync.workspace = true
 fspec-image.workspace = true
 fspec-switch.workspace = true
 libc.workspace = true

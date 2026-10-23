@@ -189,6 +189,29 @@ enum Command {
         cmd: DiskCommand,
     },
     /// Print what this machine is, as `apply` compares it with the declaration.
+    /// Sync app data with the other hosts that list the same `sync(...)` item.
+    Sync {
+        /// Items to sync, default every item this host lists.
+        items: Vec<String>,
+        /// Only with this peer.
+        #[arg(long)]
+        peer: Option<String>,
+        /// Copy each item from this host over the other's copy: the handoff of a `seed` item.
+        #[arg(long)]
+        from: Option<String>,
+        /// Put the items' previous version back on this host.
+        #[arg(long, conflicts_with_all = ["from", "watch"])]
+        rollback: bool,
+        /// Print what would move, change nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Sync again every INTERVAL seconds until stopped.
+        #[arg(long, value_name = "INTERVAL", num_args = 0..=1, default_missing_value = "60")]
+        watch: Option<u64>,
+    },
+    /// One request of a peer's `fspec sync`, on stdin.
+    #[command(hide = true)]
+    SyncAgent { op: String, item: Option<String> },
     #[command(hide = true)]
     Facts {
         #[arg(long)]
@@ -679,6 +702,32 @@ fn main() -> Result<()> {
                 println!("{}", path.display());
             }
             Ok(())
+        }
+        Command::Sync { items, peer, from, rollback, dry_run, watch } => {
+            let spec = fspec_eval::evaluate(&spec_path)?;
+            let this = select(&spec, None, &paths)?;
+            let local = fspec_sync::Local::new(&LiveRunner, this.name.clone(), &paths);
+            if *rollback {
+                for item in this.sync.iter().filter(|i| items.is_empty() || items.contains(&i.name)) {
+                    let n = local.rollback(item)?;
+                    println!("{}: {n} restored", item.name);
+                }
+                return Ok(());
+            }
+            let opts = fspec_sync::Opts { from: from.clone(), dry_run: *dry_run, peer: peer.clone() };
+            let once = || fspec_sync::run(&LiveRunner, &local, &spec.hosts, this, items, &opts);
+            let Some(every) = watch else { return once() };
+            loop {
+                if let Err(e) = once() {
+                    eprintln!("fspec: {e:#}");
+                }
+                std::thread::sleep(std::time::Duration::from_secs(*every));
+            }
+        }
+        Command::SyncAgent { op, item } => {
+            let local = fspec_sync::Local::new(&LiveRunner, local_hostname(), &paths);
+            let mut out = std::io::stdout().lock();
+            fspec_sync::agent(&local, op, item.as_deref(), &mut std::io::stdin().lock(), &mut out)
         }
         Command::Facts { json } => {
             let probe = Probe::local(local_hostname());

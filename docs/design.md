@@ -1643,6 +1643,81 @@ shim are unverified.
 | `fspec disk plan [device]` | Steps that bring a disk onto a supported layout |
 | `fspec disk migrate [device]` | Run the in-place steps of `disk plan` |
 | `fspec disk init <device>` | Partition and format a disk with a supported layout |
+| `fspec sync [item...] [--peer h] [--from h] [--rollback] [--dry-run] [--watch [s]]` | Sync app data with the item's peers |
+
+## Sync between hosts
+
+App data a spec cannot declare (a signed-in account, a vault, a wallpaper
+folder) moves between the user's own machines with `fspec sync`. It is peer to
+peer over ssh: no server, no git remote, no relay. An item names every host
+that holds it in `peers`, and each of those hosts lists the same item, in
+`host(sync = [...])` or from a module:
+
+```python
+PAIR = ["g815", "e1504g"]
+sync("wallpapers", peers = PAIR, paths = ["~/Pictures/Wallpapers/"])
+sync("active-wallpaper", peers = PAIR,
+     keys = json_keys("~/.local/state/formalshell/state.json", ["wallpaper"]),
+     after = ["wallpapers"],
+     on_receive = "formalshell ipc --any-display call wallpaper set {wallpaper}")
+sync("helium", peers = PAIR, paths = ["~/.config/net.imput.helium/"], mode = "seed",
+     keyring = [keyring(schema = "chrome_libsecret_os_crypt_password_v2", attrs = {"application": "chromium"})],
+     unless_running = ["helium"])
+sync("gh", peers = PAIR, keyring = [keyring(schema = "org.freedesktop.Secret.Generic",
+     attrs = {"service": "gh:github.com", "username": "FormalSnake"})])
+```
+
+An item has the same definition on every peer (paths start with `~/` and
+resolve against each host's home), otherwise its sync fails naming both hosts.
+
+| Field | Means |
+| --- | --- |
+| `paths` | Files, or directories when they end in `/`, under `~/`. Regular files only: symlinks, sockets and empty directories are skipped |
+| `include`, `exclude` | Globs on paths inside a directory. A pattern without `/` matches any component (`Cache` drops every `Cache` directory); one with `/` matches from the directory. With `include`, only matching files sync |
+| `keys` | `json_keys(file, [keys])`: only these top-level keys of a JSON file sync, the rest of the file stays each host's own |
+| `keyring` | Secret Service items: `keyring(schema = ..., attrs = {...}, label = ...)` matches every item with that schema and those attributes (a value ending in `*` matches a prefix), and that label when given. The Secret Service searches by attribute, so a schema or an attribute is required. Chromium and Electron apps encrypt their cookies with one (`Chromium Safe Storage`), so a profile synced without it comes up signed out |
+| `mode` | `live` (default): every peer writes. `seed`: copied whole to a host that has none of it, then each keeps its own |
+| `conflict` | For `live`: `newest` (default) or `manual` |
+| `after` | Items that sync first; this one waits while one of them did not, so `on_receive` finds the file the key points at |
+| `on_receive` | A shell command run on a host after the item changed there; `{key}` is that key's new value, shell-quoted |
+| `unless_running` | Process names that hold the item open; while one runs on either host the item is skipped |
+
+**Modes.** A `live` item merges per file, keyring item and JSON key against
+the base, what both hosts held at the end of their last sync. Changed on one
+side only, it is copied, a deletion included. Changed on both, `newest` takes
+the later modification time and a change beats a deletion, while `manual`
+leaves both copies and `fspec sync` exits non-zero naming them. A keyring item
+is never deleted. `seed` is for single-writer data (LevelDB and SQLite
+profiles, OAuth refresh tokens that rotate): copied whole, never merged, to a
+host that has none of it. Once both hold it, `fspec sync helium --from g815`
+hands it over, replacing the other host's copy (`--from` on a `live` item does
+the same). Data bound to one device is not synced at all, and each host links
+itself: Flare (a Signal linked device), Beeper (Matrix device keys), 1Password
+(a registered device).
+
+**Transport.** A peer is reached over the routes of this host's builder of
+the same name when it declares one (the Tailscale name, then the LAN), else
+over its `ssh` alias, probed like a remote apply: it must be the machine its
+host declares, running an fspec at least as new as this one. An unreachable
+peer is skipped. The far end runs `fspec sync-agent`, one request per ssh
+call on stdin. Files travel as tar inside ssh, whose host keys authenticate
+both ends and encrypt the stream. Keyring secrets are read and stored with
+`secret-tool` (libsecret, the `secret-tool` package on Tumbleweed) and travel
+only through the ssh session's pipes, never through a file, so the login
+keyring must be unlocked on both hosts; a locked one fails the item.
+
+**State and rollback.** Each host keeps, per item and peer, the base in
+`~/.local/state/fspec/sync/<item>/peers/<peer>.json`: hashes, sizes and
+modification times, never contents or secrets (JSON key values excepted). A
+file whose size and modification time match the base is not hashed again, and
+a copy keeps the sender's modification time. Before a host replaces or
+deletes anything it moves it into `<item>/prev/`, and a replaced keyring item
+stays in the keyring under `fspec-prev:` attributes, which match no app's
+lookup. `fspec sync <item> --rollback` swaps the previous version back on this
+host and forgets the bases, so the next sync merges from scratch.
+`fspec sync --dry-run` prints what would move, `--peer` limits it to one peer,
+and `fspec sync --watch [seconds]` syncs again every 60 seconds (or the given
+interval) until stopped, for a user `service(...)` to run.
 
 ## Remote hosts
 

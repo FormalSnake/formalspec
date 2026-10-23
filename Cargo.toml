@@ -48,3 +48,4 @@ fspec-os = { path = "crates/fspec-os" }
 fspec-remote = { path = "crates/fspec-remote" }
 fspec-image = { path = "crates/fspec-image" }
 fspec-switch = { path = "crates/fspec-switch" }
+fspec-sync = { path = "crates/fspec-sync" }

@@ -1451,6 +1451,7 @@ dependencies = [
  "fspec-sources",
  "fspec-store",
  "fspec-switch",
+ "fspec-sync",
  "libc",
  "serde_json",
  "tempfile",
@@ -1656,6 +1657,23 @@ dependencies = [
  "anyhow",
  "fspec-core",
  "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "fspec-sync"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fspec-core",
+ "fspec-remote",
+ "glob",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "shell-words",
+ "tar",
  "tempfile",
 ]
 

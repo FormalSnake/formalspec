@@ -32,9 +32,9 @@ pub fn spec_dir(commit: &str, dirty: Option<&str>) -> String {
 
 /// fspec as the remote's shell finds it. `fspec switch` and `fspec disk init` install it in
 /// /usr/local/bin, which AerynOS's non-interactive ssh PATH leaves out.
-const FSPEC: &str = r#"PATH="$PATH:/usr/local/bin" fspec"#;
+pub const FSPEC: &str = r#"PATH="$PATH:/usr/local/bin" fspec"#;
 
-fn batch(alias: &str) -> Cmd {
+pub fn batch(alias: &str) -> Cmd {
     Cmd::new("ssh").args(["-o", "ConnectTimeout=5", "-o", "BatchMode=yes"]).arg(alias)
 }
 

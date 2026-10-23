@@ -387,3 +387,29 @@ hosts = [host("m", platform = "aarch64-darwin", modules = [[formalmusic()]])]
         }
     }
 }
+
+#[test]
+fn sync_items_come_from_the_host_and_its_modules() {
+    let spec = eval_str(
+        r#"
+PAIR = ["a", "b"]
+def wallpaper(facts):
+    return [sync("active", peers = PAIR, keys = json_keys("~/.local/state/s.json", ["wallpaper"]),
+                 on_receive = "set {wallpaper}", after = ["walls"])]
+hosts = [host(name = "a", platform = "aarch64-darwin", modules = [wallpaper],
+    sync = [sync("walls", peers = PAIR, paths = ["~/Pictures/Wallpapers/"]),
+            sync("gh", peers = PAIR, keyring = [keyring(schema = "org.freedesktop.Secret.Generic",
+                 attrs = {"service": "gh:github.com"})], mode = "seed")])]
+"#,
+        &[],
+    )
+    .unwrap();
+    let names: Vec<&str> = spec.hosts[0].sync.iter().map(|i| i.name.as_str()).collect();
+    assert_eq!(names, ["walls", "gh", "active"]);
+    assert!(spec.hosts[0].resources.is_empty());
+    assert_eq!(spec.hosts[0].sync[2].keys.as_ref().unwrap().keys, ["wallpaper"]);
+
+    let bad =
+        eval_str(r#"sync("x", peers = ["a", "b"], keys = json_keys("~/s.json", ["k"]), on_receive = "{nope}")"#, &[]);
+    assert!(format!("{:#}", bad.unwrap_err()).contains("{nope}"));
+}

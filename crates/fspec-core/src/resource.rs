@@ -35,6 +35,120 @@ pub struct Host {
     /// order before building on the host itself.
     #[serde(default)]
     pub builders: Vec<Builder>,
+    /// App data this host syncs with the other hosts that list an item of the same name.
+    #[serde(default)]
+    pub sync: Vec<SyncItem>,
+}
+
+/// `sync(...)`: app data that moves between the user's hosts with `fspec sync`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct SyncItem {
+    pub name: String,
+    /// The hosts that hold the item, this one included.
+    pub peers: Vec<String>,
+    /// Files or directories (ending in `/`) under `~/`.
+    #[serde(default)]
+    pub paths: Vec<String>,
+    #[serde(default)]
+    pub include: Vec<String>,
+    #[serde(default)]
+    pub exclude: Vec<String>,
+    #[serde(default)]
+    pub keys: Option<JsonKeys>,
+    #[serde(default)]
+    pub keyring: Vec<KeyringItem>,
+    #[serde(default)]
+    pub mode: SyncMode,
+    #[serde(default)]
+    pub conflict: Conflict,
+    /// Items that sync first; this one waits while one of them did not.
+    #[serde(default)]
+    pub after: Vec<String>,
+    /// Run on a host after the item changed there; `{key}` is a `keys` value, shell-quoted.
+    #[serde(default)]
+    pub on_receive: Option<String>,
+    /// Process names that hold the item open; it is skipped while one runs on either host.
+    #[serde(default)]
+    pub unless_running: Vec<String>,
+}
+
+/// `json_keys(path, [keys])`: only these top-level keys of a JSON file sync.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct JsonKeys {
+    pub path: String,
+    pub keys: Vec<String>,
+}
+
+/// Secret Service items: those with `schema` and every one of `attrs` (a value ending in `*`
+/// matches a prefix), and `label` when given.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct KeyringItem {
+    #[serde(default)]
+    pub schema: Option<String>,
+    #[serde(default)]
+    pub attrs: BTreeMap<String, String>,
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum SyncMode {
+    /// Every host writes; each change goes to the peers.
+    #[default]
+    Live,
+    /// Copied whole to a host that has none of it, then each host keeps its own.
+    Seed,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum Conflict {
+    /// The later modification wins, and a change beats a deletion.
+    #[default]
+    Newest,
+    /// Both copies stay and the sync reports it.
+    Manual,
+}
+
+impl SyncItem {
+    pub fn check(&self) -> anyhow::Result<()> {
+        let what = format!("sync({})", self.name);
+        let word = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+        if !word(&self.name) {
+            anyhow::bail!("{what}: the name takes letters, digits, `-` and `_`");
+        }
+        let json = self.keys.iter().map(|k| &k.path);
+        for p in self.paths.iter().chain(json) {
+            if !p.starts_with("~/") || p.len() < 3 || p.split('/').any(|c| c == ".." || c == ".") {
+                anyhow::bail!("{what}: {p} must be a path under ~/");
+            }
+        }
+        if self.paths.is_empty() && self.keyring.is_empty() && self.keys.is_none() {
+            anyhow::bail!("{what}: nothing to sync; give paths, keys or keyring");
+        }
+        if self.peers.len() < 2 {
+            anyhow::bail!("{what}: peers names every host that holds it, at least two");
+        }
+        for k in &self.keyring {
+            if k.schema.is_none() && k.attrs.is_empty() {
+                anyhow::bail!(
+                    "{what}: a keyring item needs a schema or attrs, since the Secret Service searches by them"
+                );
+            }
+        }
+        if let Some(cmd) = &self.on_receive {
+            for placeholder in cmd.split('{').skip(1).filter_map(|p| p.split_once('}')).map(|(p, _)| p) {
+                if !self.keys.as_ref().is_some_and(|k| k.keys.iter().any(|k| k == placeholder)) {
+                    anyhow::bail!("{what}: on_receive names {{{placeholder}}}, which is not one of its keys");
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// A machine reached over ssh that builds packages for a host.

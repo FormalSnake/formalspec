@@ -183,6 +183,7 @@ mod tests {
             persist: vec![],
             release_age: None,
             builders: vec![],
+            sync: vec![],
             ssh: None,
         }
     }

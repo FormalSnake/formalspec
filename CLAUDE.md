@@ -38,6 +38,7 @@ add each mapping you settle there, and drop nix-isms that only exist to work aro
 | `fspec-pkgmgr` | Native package managers, Flatpak, Homebrew |
 | `fspec-image` | bootc images and their CI |
 | `fspec-remote` | Shipping the spec and applying or planning over ssh |
+| `fspec-sync` | `fspec sync`: app data between the user's hosts over ssh |
 | `fspec-switch` | `fspec switch`, `forget`, `disk`: pure functions returning command plans |
 | `fspec-install` | The installer |
 | `fspec-dev` | Project environments from `dev.star` |
