@@ -155,6 +155,8 @@ fn a_src_moved_with_the_same_bytes_is_not_rewritten() {
     let f = File { src: Some("files/a.conf".into()), ..file("~/a.conf") };
     w.apply(&want([f.clone()])).unwrap();
     let moved = File { src: Some("b.conf".into()), ..f.clone() };
+    // The old source is gone from the new spec tree, as when a spec moves its files.
+    fs::remove_file(w.spec.join("files/a.conf")).unwrap();
     assert!(w.plan(&want([moved.clone()])).changes.is_empty());
     let generation = w.state().generation;
     w.apply(&want([moved.clone()])).unwrap();

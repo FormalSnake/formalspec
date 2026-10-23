@@ -40,6 +40,9 @@ pub enum Action {
     Drift {
         notes: Vec<String>,
     },
+    /// A removed `file` whose path another resource now writes: dropped from the state, left on
+    /// disk.
+    HandOver,
 }
 
 /// Fails when two declarations share a key, since only one of them could win on disk.
@@ -118,7 +121,7 @@ fn detail(r: &Resource) -> String {
 impl Plan {
     pub fn counts(&self) -> (usize, usize, usize) {
         let n = |f: fn(&Action) -> bool| self.changes.iter().filter(|c| f(&c.action)).count();
-        let change = n(|a| matches!(a, Action::Update { .. } | Action::Drift { .. }));
+        let change = n(|a| matches!(a, Action::Update { .. } | Action::Drift { .. } | Action::HandOver));
         (n(|a| matches!(a, Action::Add)), change, n(|a| matches!(a, Action::Remove)))
     }
 }
@@ -132,6 +135,7 @@ impl fmt::Display for Plan {
                 Action::Remove => ('-', String::new()),
                 Action::Update { fields } => ('~', format!(" [{}]", fields.join(", "))),
                 Action::Drift { notes } => ('!', format!(" drifted: {}", notes.join("; "))),
+                Action::HandOver => ('>', " handed over to another resource, left on disk".into()),
             };
             let detail = if c.detail.is_empty() { String::new() } else { format!("  {}", c.detail) };
             writeln!(f, "  {sigil} {}{detail}{extra}", c.key)?;

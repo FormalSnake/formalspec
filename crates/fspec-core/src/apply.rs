@@ -245,7 +245,7 @@ pub fn plan_scope(cx: &Cx, backends: &[&dyn Backend], desired: &[Desired], state
             Err(e) => p.unsupported.push(e.to_string()),
         }
     }
-    let mut moved = Vec::new();
+    let mut moved = BTreeMap::new();
     for c in &p.changes {
         let Action::Update { fields } = &c.action else { continue };
         let (Some(entry), Some(d)) = (state.entries.get(&c.key), desired.iter().find(|d| d.resource.key() == c.key))
@@ -253,20 +253,32 @@ pub fn plan_scope(cx: &Cx, backends: &[&dyn Backend], desired: &[Desired], state
             continue;
         };
         if fields == &["src"] && backend_for(cx, backends, &d.resource)?.same_result(cx, entry, &d.resource)? {
-            moved.push(c.key.clone());
+            moved.insert(c.key.clone(), d.resource.clone());
         }
     }
-    p.changes.retain(|c| !moved.contains(&c.key));
+    p.changes.retain(|c| !moved.contains_key(&c.key));
     let changed: Vec<Key> = p.changes.iter().map(|c| c.key.clone()).collect();
     for (key, entry) in &state.entries {
         if changed.contains(key) {
             continue;
         }
         let Ok(b) = backend_for(cx, backends, &entry.resource) else { continue };
-        let notes = b.drift(cx, entry)?;
+        // A moved source is read where it is now; the old path may be gone from the spec.
+        let notes = match moved.get(key) {
+            Some(r) => b.drift(cx, &Entry { resource: r.clone(), ..entry.clone() })?,
+            None => b.drift(cx, entry)?,
+        };
         if !notes.is_empty() {
             let detail = String::new();
             p.changes.push(Change { key: key.clone(), scope: cx.scope, action: Action::Drift { notes }, detail });
+        }
+    }
+    let claimed = claimed(cx, backends, &desired);
+    for change in p.changes.iter_mut().filter(|c| c.action == Action::Remove) {
+        if let Some(Entry { resource: Resource::File(f), .. }) = state.entries.get(&change.key)
+            && cx.resolve(&f.path).is_ok_and(|p| claimed.contains(&p))
+        {
+            change.action = Action::HandOver;
         }
     }
     for change in p.changes.iter_mut().filter(|c| c.action == Action::Remove) {
@@ -285,6 +297,18 @@ pub fn plan_scope(cx: &Cx, backends: &[&dyn Backend], desired: &[Desired], state
     }
     p.changes.sort_by(|a, b| a.key.cmp(&b.key));
     Ok(p)
+}
+
+/// The live paths the desired resources of this scope write besides their own `file`s.
+/// A resource no backend applies is the plan's `unsupported`, not an error here.
+fn claimed(cx: &Cx, backends: &[&dyn Backend], desired: &[Desired]) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    for d in desired.iter().filter(|d| d.resource.scope() == cx.scope) {
+        if let Ok(b) = backend_for(cx, backends, &d.resource) {
+            paths.extend(b.writes(cx, &d.resource));
+        }
+    }
+    paths
 }
 
 /// The data attributed to packages, kept in the user state whichever scope is applying.
@@ -355,14 +379,8 @@ pub fn apply_scope(cx: &Cx, backends: &[&dyn Backend], desired: &[Desired]) -> R
         })
         .collect();
 
-    let mut claimed = Vec::new();
-    for d in wanted.values().filter(|d| d.resource.scope() == cx.scope) {
-        claimed.extend(backend_for(cx, backends, &d.resource)?.writes(cx, &d.resource));
-    }
-    let (handed, ops): (Vec<Op>, Vec<Op>) = ops.into_iter().partition(|op| match (&op.desired, op.resource()) {
-        (None, Resource::File(f)) => cx.resolve(&f.path).is_ok_and(|p| claimed.contains(&p)),
-        _ => false,
-    });
+    let handed_keys: Vec<&Key> = p.changes.iter().filter(|c| c.action == Action::HandOver).map(|c| &c.key).collect();
+    let (handed, ops): (Vec<Op>, Vec<Op>) = ops.into_iter().partition(|op| handed_keys.contains(&&op.key));
     for op in &handed {
         println!("{}: handed over to another resource; left in place", op.key);
     }

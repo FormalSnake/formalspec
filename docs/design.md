@@ -1819,7 +1819,9 @@ refuses), `drift` reports live divergence for unchanged resources, `prepare`
 fetches and renders into a staging directory, and `commit` makes changes live,
 journaling an undo step before each mutation. A backend can name the live
 paths a resource writes (`writes`); a removed `file` at one of those paths is
-handed over instead of deleted. The engine commits removals in
+handed over instead of deleted, and the plan shows it as `>` rather than `-`.
+A file whose `src` moved to another path with the same bytes is checked for
+drift against its new source. The engine commits removals in
 reverse phase order, then adds and updates in phase order (users, files, store,
 packages, services, defaults, system). A backend can then `settle` its adds
 and updates, in the same phase order, for work that needs what later phases

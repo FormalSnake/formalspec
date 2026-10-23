@@ -1238,6 +1238,8 @@ fn limine_conf_on_the_esp_is_handed_to_the_esp_sync() {
     disable_rolling(&w);
 
     let want = [distro_res(TW, &[]), file("/etc/fspec/limine.conf", "timeout: 3\n")];
+    let plan = fspec_core::apply::plan_scope(&w.cx(Scope::System), &backends, &want, &w.state(Scope::System)).unwrap();
+    assert!(plan.to_string().contains(&format!("> file:{esp}  managed handed over")), "{plan}");
     apply_scope(&w.cx(Scope::System), &backends, &want).unwrap();
     assert_eq!(fs::read_to_string(w.paths.root.join(&esp[1..])).unwrap(), "timeout: 3\n");
     let state = w.state(Scope::System);
