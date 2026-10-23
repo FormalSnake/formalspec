@@ -945,7 +945,9 @@ does not detect the flavour; dcron, busybox crond and snooze are out of scope.
 phase, so files and secrets can be owned by it, but it joins its groups only
 after every phase has committed: packages create groups such as `docker` (a
 sysusers.d file) and `nordvpn` (a postinstall that also empties the group), so
-one apply converges. On macOS it only sets the login shell
+one apply converges. A group still missing then gets one `systemd-sysusers`
+run on a systemd host, since a sysusers.d file a package or a `file` dropped
+is otherwise read only at the next boot. On macOS it only sets the login shell
 and checks the account and uid; it never creates accounts. Removing a `user`
 stops managing it and leaves the account. `defaults` journals the previous value
 of each key so a failed apply restores it, and removal deletes a key only while

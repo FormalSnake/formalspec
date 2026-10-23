@@ -217,4 +217,9 @@ fn a_group_that_does_not_exist_yet_waits_for_a_later_apply() {
     apply_scope(&w.cx(Scope::System), &[&UsersBackend], &[desired(u)]).unwrap();
     let lines = w.runner.lines();
     assert!(lines.contains(&"usermod -aG wheel,docker kyan".to_string()), "{lines:?}");
+    let at = |l: &str| lines.iter().position(|x| x == l).unwrap();
+    assert!(
+        at("getent group nordvpn") < at("systemd-sysusers")
+            && at("systemd-sysusers") < at("usermod -aG wheel,docker kyan")
+    );
 }

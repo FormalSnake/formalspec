@@ -9,7 +9,7 @@ use std::path::Path;
 use anyhow::{Result, bail};
 use fspec_core::Resource;
 use fspec_core::apply::{Backend, Cx, Op, Phase, Records};
-use fspec_core::facts::Os;
+use fspec_core::facts::{Init, Os};
 use fspec_core::journal::{Journal, Undo};
 use fspec_core::resource::User;
 use fspec_core::runner::Cmd;
@@ -211,14 +211,22 @@ fn join_groups(cx: &Cx, u: &User, journal: &mut Journal) -> Result<()> {
     let groups = cx.runner.run(&Cmd::new("id").args(["-nG", &u.name]))?;
     let have: Vec<&str> = groups.stdout.split_whitespace().collect();
     let mut missing: Vec<&String> = u.groups.iter().filter(|g| !have.contains(&g.as_str())).collect();
-    // A deferred package has not created its group yet; drift joins it on a later apply.
-    missing.retain(|g| {
-        let exists = cx.runner.run(&Cmd::new("getent").args(["group", g])).is_ok_and(|o| o.status == 0);
-        if !exists {
-            eprintln!("fspec: user:{}: group {g} does not exist yet, joining it on a later apply", u.name);
+    let exists = |g: &str| cx.runner.run(&Cmd::new("getent").args(["group", g])).is_ok_and(|o| o.status == 0);
+    let mut absent: Vec<&String> = missing.iter().copied().filter(|g| !exists(g)).collect();
+    // A group declared in /etc/sysusers.d, by a package or a `file`, exists only once
+    // systemd-sysusers has run, which otherwise happens at the next boot.
+    if cx.facts.init == Init::Systemd && !absent.is_empty() {
+        let out = cx.runner.run(&Cmd::new("systemd-sysusers"))?;
+        if out.status != 0 {
+            eprintln!("fspec: systemd-sysusers exited {}: {}", out.status, out.stderr.trim());
         }
-        exists
-    });
+        absent.retain(|g| !exists(g));
+    }
+    // A deferred package has not created its group yet; drift joins it on a later apply.
+    for g in &absent {
+        eprintln!("fspec: user:{}: group {g} does not exist yet, joining it on a later apply", u.name);
+    }
+    missing.retain(|g| !absent.contains(g));
     if !missing.is_empty() {
         for g in &missing {
             journal.record(Undo::Run { cmd: Cmd::new("gpasswd").args(["-d", &u.name, g]) })?;
