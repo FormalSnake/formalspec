@@ -300,3 +300,59 @@ fn a_timer_env_goes_into_its_service() {
         "env": {"VAULT": "/v"}}));
     assert!(units(&r).unwrap()[0].content.contains("Environment=\"VAULT=/v\"\n"));
 }
+
+#[test]
+fn a_service_running_a_replaced_store_package_restarts() {
+    let w = World::linux(Init::Systemd);
+    let backends: &[&dyn Backend] = &[&SystemdBackend];
+    let store = w.paths.fspec_root().join("store");
+    for id in ["aaa-shell", "bbb-shell"] {
+        fs::create_dir_all(store.join(id).join("bin")).unwrap();
+        fs::write(store.join(id).join("bin/shell"), "").unwrap();
+    }
+    let bin = w.paths.fspec_root().join("current/bin");
+    fs::create_dir_all(&bin).unwrap();
+    std::os::unix::fs::symlink("../../store/bbb-shell/bin/shell", bin.join("shell")).unwrap();
+    let proc = w.paths.root.join("proc/42");
+    fs::create_dir_all(&proc).unwrap();
+    std::os::unix::fs::symlink("/opt/fspec/store/aaa-shell/bin/shell", proc.join("exe")).unwrap();
+    w.runner.respond(
+        "systemctl --user show -p MainPID -p ExecStart shell.service",
+        Output {
+            stdout: "MainPID=42\nExecStart={ path=/opt/fspec/current/bin/shell ; argv[]=/opt/fspec/current/bin/shell ; ignore_errors=no }\n".into(),
+            ..Default::default()
+        },
+    );
+    let shell = vec![desired(resource(json!({"kind": "service", "name": "shell.service", "user": true})))];
+    apply_scope(&w.cx(Scope::User), backends, &shell).unwrap();
+    assert_eq!(w.runner.lines(), ["systemctl --user enable shell.service"]);
+
+    let cx = w.cx(Scope::User);
+    let state = State::load(&cx.state_dir().join("state.json")).unwrap();
+    let p = plan_scope(&cx, backends, &shell, &state).unwrap();
+    assert_eq!(
+        p.changes[0].action,
+        Action::Drift { notes: vec!["shell.service runs aaa-shell, the store now has bbb-shell".into()] }
+    );
+    w.runner.calls.lock().unwrap().clear();
+    apply_scope(&cx, backends, &shell).unwrap();
+    assert!(w.runner.lines().contains(&"systemctl --user restart shell.service".to_string()));
+
+    // A package the same apply replaced is caught by the refresh after the commit.
+    w.runner.calls.lock().unwrap().clear();
+    let state = State::load(&cx.state_dir().join("state.json")).unwrap();
+    let entries: Vec<Entry> = state.entries.values().cloned().collect();
+    let mut journal = fspec_core::journal::Journal::begin(&cx.state_dir(), 99).unwrap();
+    SystemdBackend.refresh(&cx, &entries, &mut journal).unwrap();
+    assert_eq!(
+        w.runner.lines(),
+        ["systemctl --user show -p MainPID -p ExecStart shell.service", "systemctl --user restart shell.service"]
+    );
+    journal.finish().unwrap();
+
+    // Up to date: nothing to restart.
+    fs::remove_file(proc.join("exe")).unwrap();
+    std::os::unix::fs::symlink("/opt/fspec/store/bbb-shell/bin/shell (deleted)", proc.join("exe")).unwrap();
+    let state = State::load(&cx.state_dir().join("state.json")).unwrap();
+    assert!(plan_scope(&cx, backends, &shell, &state).unwrap().changes.is_empty());
+}

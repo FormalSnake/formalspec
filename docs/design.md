@@ -872,6 +872,15 @@ boots to `graphical.target` (a distro can default to `multi-user.target`, which
 never starts a display manager wanted by the graphical one), drift includes
 another default, and removal puts back the default it replaced.
 
+On systemd a running service whose `ExecStart` now resolves to another store
+package than the one its main process was started from (`/proc/<pid>/exe`) is
+stale: `plan` reports it as drift and `apply` restarts it. This covers a service
+of either kind whose package moved in an earlier apply or in the other scope (a
+user unit running a system store package). A package the same apply replaces is
+caught after the commit, when the engine hands each backend the entries no
+change touched (`refresh`). A unit with `RefuseManualStart` or `RefuseManualStop`
+is left for its next start.
+
 A timer's `schedule` is a five-field cron expression or one of `@hourly`,
 `@daily`, `@weekly` and `@monthly`. Timers become systemd timers, cron entries or launchd
 calendar intervals. Features only systemd has (socket activation, cgroup
@@ -1827,7 +1836,9 @@ drift against its new source. The engine commits removals in
 reverse phase order, then adds and updates in phase order (users, files, store,
 packages, services, defaults, system). A backend can then `settle` its adds
 and updates, in the same phase order, for work that needs what later phases
-installed (group membership). The engine writes the new state and
+installed (group membership), and `refresh` the entries no change touched,
+for what a change moved under them (a service running a replaced store
+package). The engine writes the new state and
 `generations/<n>.json` only after every commit succeeded. Each scope (system,
 user) is its own transaction with its own journal. A non-root `fspec apply`
 runs the system scope through `sudo fspec apply --scope system`, then the user

@@ -218,6 +218,13 @@ pub trait Backend {
     fn settle(&self, _cx: &Cx, _ops: &[Op], _journal: &mut Journal) -> Result<()> {
         Ok(())
     }
+
+    /// Called after the commit with the entries of this backend that no op touched, for what
+    /// another change moved under them: a service still running the package build the store
+    /// just replaced.
+    fn refresh(&self, _cx: &Cx, _entries: &[Entry], _journal: &mut Journal) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Plan for one scope: the config diff plus drift that backends report on unchanged resources.
@@ -403,7 +410,10 @@ pub fn apply_scope(cx: &Cx, backends: &[&dyn Backend], desired: &[Desired]) -> R
     }
 
     let mut journal = Journal::begin(&dir, cx.generation)?;
-    let result = commit_all(cx, &by_backend, &staging, &mut journal);
+    let result = commit_all(cx, &by_backend, &staging, &mut journal).and_then(|records| {
+        refresh_untouched(cx, backends, &state, &p, &mut journal)?;
+        Ok(records)
+    });
     let records = match result {
         Ok(r) => r,
         Err(e) => {
@@ -497,6 +507,21 @@ fn commit_all(
     let added = ops().filter(|o| o.current.is_none() && !o.is_removal() && deferral(records.get(&o.key)).is_none());
     restore_returned(cx, added, journal)?;
     Ok(records)
+}
+
+fn refresh_untouched(cx: &Cx, backends: &[&dyn Backend], state: &State, p: &Plan, journal: &mut Journal) -> Result<()> {
+    for b in backends {
+        let entries: Vec<Entry> = state
+            .entries
+            .iter()
+            .filter(|(key, e)| !p.changes.iter().any(|c| &c.key == *key) && b.handles(cx, &e.resource))
+            .map(|(_, e)| e.clone())
+            .collect();
+        if !entries.is_empty() {
+            b.refresh(cx, &entries, journal).with_context(|| format!("{}: refreshing", b.name()))?;
+        }
+    }
+    Ok(())
 }
 
 /// Removed packages lose their app data to the trash once every backend has removed what it

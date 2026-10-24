@@ -49,7 +49,9 @@ impl Backend for SystemdBackend {
 
     fn drift(&self, cx: &Cx, entry: &Entry) -> Result<Vec<String>> {
         if let Some(s) = distro(&entry.resource) {
-            return crate::distro_unit::drift(cx, Init::Systemd, s);
+            let mut notes = crate::distro_unit::drift(cx, Init::Systemd, s)?;
+            notes.extend(stale(cx, &entry.resource)?);
+            return Ok(notes);
         }
         let mut notes = Vec::new();
         for u in units(&entry.resource)? {
@@ -59,6 +61,7 @@ impl Backend for SystemdBackend {
                 Some(_) => {}
             }
         }
+        notes.extend(stale(cx, &entry.resource)?);
         Ok(notes)
     }
 
@@ -77,6 +80,9 @@ impl Backend for SystemdBackend {
             if let Some(s) = distro(op.resource()) {
                 let rec = crate::distro_unit::commit(cx, Init::Systemd, journal, op, s)?;
                 if !op.is_removal() {
+                    if op.current.is_some() {
+                        restart_stale(cx, journal, op.resource())?;
+                    }
                     records.insert(op.key.clone(), rec);
                 }
                 continue;
@@ -143,6 +149,62 @@ impl Backend for SystemdBackend {
         }
         Ok(records)
     }
+
+    fn refresh(&self, cx: &Cx, entries: &[Entry], journal: &mut Journal) -> Result<()> {
+        for e in entries {
+            restart_stale(cx, journal, &e.resource)?;
+        }
+        Ok(())
+    }
+}
+
+/// The unit fspec starts and stops for `r`: its own unit, or the distro's for a service
+/// without `exec`.
+fn unit_name(r: &Resource) -> String {
+    match distro(r) {
+        Some(s) => s.name.clone(),
+        None => main_unit(r),
+    }
+}
+
+/// Why a running service is stale: its `ExecStart` now resolves to another store package than
+/// the one its main process was started from, as after an apply that moved the package's
+/// `current` link. A unit that refuses manual restarts is left to the next session.
+fn stale(cx: &Cx, r: &Resource) -> Result<Option<String>> {
+    let store = cx.paths.fspec_root().join("store");
+    if !matches!(r, Resource::Service(_)) || refuses_manual(r) || !store.is_dir() {
+        return Ok(None);
+    }
+    let unit = unit_name(r);
+    let out = cx.runner.run(&ctl(is_user(r), &["show", "-p", "MainPID", "-p", "ExecStart", &unit]))?.stdout;
+    let prop = |k: &str| out.lines().find_map(|l| l.strip_prefix(k)?.strip_prefix('='));
+    let Some(pid) = prop("MainPID").filter(|p| !matches!(*p, "" | "0")) else { return Ok(None) };
+    // `{ path=/opt/fspec/current/bin/x ; argv[]=... }`
+    let Some(exec) = prop("ExecStart").and_then(|e| e.split("path=").nth(1)?.split(" ;").next()) else {
+        return Ok(None);
+    };
+    // The kernel reports a removed executable as `<path> (deleted)`; the package is the first
+    // component under the store either way.
+    let Ok(running) = fs::read_link(cx.resolve(&format!("/proc/{pid}/exe"))?) else { return Ok(None) };
+    let Ok(now) = fs::canonicalize(cx.resolve(exec)?) else { return Ok(None) };
+    let package = |p: &Path, store: &Path| {
+        Some(p.strip_prefix(store).ok()?.components().next()?.as_os_str().to_string_lossy().into_owned())
+    };
+    let was = package(&cx.resolve(&running.to_string_lossy())?, &store);
+    let is = fs::canonicalize(&store).ok().and_then(|store| package(&now, &store));
+    Ok(match (was, is) {
+        (Some(was), Some(is)) if was != is => Some(format!("{unit} runs {was}, the store now has {is}")),
+        _ => None,
+    })
+}
+
+fn restart_stale(cx: &Cx, journal: &mut Journal, r: &Resource) -> Result<()> {
+    let Some(why) = stale(cx, r)? else { return Ok(()) };
+    let restart = ctl(is_user(r), &["restart", &unit_name(r)]);
+    journal.record(Undo::Run { cmd: restart.clone() })?;
+    cx.runner.check(&restart)?;
+    println!("{}: restarted, {why}", r.key());
+    Ok(())
 }
 
 fn staged(staging: &Path, op: &Op, u: &Unit) -> std::path::PathBuf {
