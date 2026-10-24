@@ -78,9 +78,16 @@ pub fn ship_into(alias: &str, dir: &str, archive: &Path) -> Cmd {
     batch(alias).arg(format!("mkdir -p {dir} && tar -xf - -C {dir}")).stdin_file(archive)
 }
 
-/// A dirty ship first drops the earlier dirty copies of the same commit.
+/// A dirty ship first drops the earlier dirty copies of the same commit. The login shell can be
+/// fish, which fails a glob that matches nothing, so `find` does the matching.
 pub fn ship(alias: &str, commit: &str, dest: &str, archive: &Path, dirty: bool) -> Cmd {
-    let wipe = if dirty { format!("rm -rf \"$HOME/.cache/fspec/spec/{commit}-dirty\"* && ") } else { String::new() };
+    let wipe = if dirty {
+        format!(
+            "find \"$HOME/.cache/fspec/spec\" -maxdepth 1 -name '{commit}-dirty*' -exec rm -rf '{{}}' + 2>/dev/null; "
+        )
+    } else {
+        String::new()
+    };
     batch(alias).arg(format!("{wipe}mkdir -p {dest} && tar -xf - -C {dest}")).stdin_file(archive)
 }
 
@@ -167,7 +174,7 @@ mod tests {
         let ship = ship("g815", "abc123", &dest, Path::new("/t/s.tar"), true);
         assert_eq!(
             ship.args.last().unwrap(),
-            "rm -rf \"$HOME/.cache/fspec/spec/abc123-dirty\"* && mkdir -p \"$HOME/.cache/fspec/spec/abc123-dirty-0a1b2c3d4e5f\" && tar -xf - -C \"$HOME/.cache/fspec/spec/abc123-dirty-0a1b2c3d4e5f\""
+            "find \"$HOME/.cache/fspec/spec\" -maxdepth 1 -name 'abc123-dirty*' -exec rm -rf '{}' + 2>/dev/null; mkdir -p \"$HOME/.cache/fspec/spec/abc123-dirty-0a1b2c3d4e5f\" && tar -xf - -C \"$HOME/.cache/fspec/spec/abc123-dirty-0a1b2c3d4e5f\""
         );
     }
 

@@ -112,7 +112,7 @@ fn dirty_tree_is_refused_unless_allowed() {
 
     remote(dir.path(), &runner, true).apply(&h, "g815", None).unwrap();
     let lines = runner.lines();
-    assert!(lines.iter().any(|l| l.contains("rm -rf \"$HOME/.cache/fspec/spec/abc123-dirty\"*")));
+    assert!(lines.iter().any(|l| l.contains("-name 'abc123-dirty*' -exec rm -rf")));
 }
 
 #[test]
