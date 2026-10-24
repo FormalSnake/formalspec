@@ -179,8 +179,11 @@ fn stale(cx: &Cx, r: &Resource) -> Result<Option<String>> {
     let out = cx.runner.run(&ctl(is_user(r), &["show", "-p", "MainPID", "-p", "ExecStart", &unit]))?.stdout;
     let prop = |k: &str| out.lines().find_map(|l| l.strip_prefix(k)?.strip_prefix('='));
     let Some(pid) = prop("MainPID").filter(|p| !matches!(*p, "" | "0")) else { return Ok(None) };
-    // `{ path=/opt/fspec/current/bin/x ; argv[]=... }`
-    let Some(exec) = prop("ExecStart").and_then(|e| e.split("path=").nth(1)?.split(" ;").next()) else {
+    // `{ path=/opt/fspec/current/bin/x ; argv[]=... }`. A distro unit may name a bare command
+    // (`path=greetd`), which can never be a store path.
+    let Some(exec) =
+        prop("ExecStart").and_then(|e| e.split("path=").nth(1)?.split(" ;").next()).filter(|e| e.starts_with('/'))
+    else {
         return Ok(None);
     };
     // The kernel reports a removed executable as `<path> (deleted)`; the package is the first

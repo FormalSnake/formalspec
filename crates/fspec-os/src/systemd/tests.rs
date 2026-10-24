@@ -355,4 +355,16 @@ fn a_service_running_a_replaced_store_package_restarts() {
     std::os::unix::fs::symlink("/opt/fspec/store/bbb-shell/bin/shell (deleted)", proc.join("exe")).unwrap();
     let state = State::load(&cx.state_dir().join("state.json")).unwrap();
     assert!(plan_scope(&cx, backends, &shell, &state).unwrap().changes.is_empty());
+
+    // A bare command in ExecStart is not a store path.
+    w.runner.responses.lock().unwrap().clear();
+    w.runner.respond(
+        "systemctl --user show -p MainPID -p ExecStart shell.service",
+        Output {
+            stdout: "MainPID=42\nExecStart={ path=shell ; argv[]=shell ; ignore_errors=no }\n".into(),
+            ..Default::default()
+        },
+    );
+    let state = State::load(&cx.state_dir().join("state.json")).unwrap();
+    assert!(plan_scope(&cx, backends, &shell, &state).unwrap().changes.is_empty());
 }
